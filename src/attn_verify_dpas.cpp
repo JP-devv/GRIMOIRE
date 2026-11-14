@@ -99,6 +99,23 @@ int verify_dpas_splits(const AttnParams& p, const VerifyGroups& g, int len_max) 
         if (n < by_max) n = by_max;
     }
     if (n > MAX_SPLITS) n = MAX_SPLITS;
+    // Long contexts, one-row groups (MTP draft rows; tiles == 1, each thread its own work-group): a 16-key step reads
+    // 16 bytes of each of 256 K cache lines (K is [dim][seq]); the rest of each line is used by the next three steps
+    // only if it is still in L1.  Past ~8 threads per Xe core it is not, and K is read ~4x.  MEASURED 2026-11-14,
+    // tools/bench_attn_bisect.cpp, 61K keys, one layer: 1 row 128 splits (512 threads) 1,392 us -> 61 splits (244
+    // threads) 429 us; 4 users x 1 row 7,510 -> 1,894 us at 256 threads.  GRIMOIRE_VERIFY_THIN_THREADS (256).
+    static const int thin = env_int("GRIMOIRE_VERIFY_THIN_THREADS", 256);
+    if (kps < 16 && thin > 0) {
+        int max_rows = 1;
+        for (int i = 0; i < g.n; ++i) max_rows = g.nrows[i] > max_rows ? g.nrows[i] : max_rows;
+        const int G = p.num_heads / p.num_kv_heads;
+        const int tiles = (max_rows * G + 7) / 8;
+        const int per_split = (g.n > 0 ? g.n : 1) * p.num_kv_heads * tiles;
+        if (tiles == 1 && size_t(len_max) > size_t(16384)) {
+            const int cap = thin / per_split > 0 ? thin / per_split : 1;
+            if (n > cap) n = cap;
+        }
+    }
     return n > 0 ? n : 1;
 }
 

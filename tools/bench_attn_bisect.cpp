@@ -16,6 +16,7 @@
 #include <cstdio>
 #include <random>
 #include <vector>
+#include <cmath>
 
 using namespace b70;
 
@@ -92,9 +93,22 @@ int main(int argc, char** argv) {
             pf[2] = timeit([&] { bisect_attn<6>(q, base, vg, slot_bytes, dlens, smax, {}); });
             const double kmaj = timeit([&] { bisect_attn<7>(q, base, vg, slot_bytes, dlens, smax, {}); });
             const double wg16 = timeit([&] { bisect_attn<8>(q, base, vg, slot_bytes, dlens, smax, {}); });
+            const double k64 = timeit([&] { bisect_attn<9>(q, base, vg, slot_bytes, dlens, smax, {}); });
+            // correctness of the 64-key steps: merged output against the production kernel's
+            const size_t nout = size_t(c.groups) * c.rows * H * HD;
+            std::vector<float> o0(nout), o9(nout);
+            bisect_attn<0>(q, base, vg, slot_bytes, dlens, smax, {});
+            launch_verify_merge(q, base, c.groups * c.rows, smax);
+            q.memcpy(o0.data(), dout, nout * 4).wait();
+            bisect_attn<9>(q, base, vg, slot_bytes, dlens, smax, {});
+            launch_verify_merge(q, base, c.groups * c.rows, smax);
+            q.memcpy(o9.data(), dout, nout * 4).wait();
+            double md = 0, mx = 0;
+            for (size_t i = 0; i < nout; ++i) { md = std::max(md, double(std::fabs(o0[i] - o9[i]))); mx = std::max(mx, double(std::fabs(o0[i]))); }
+            std::printf("    64-key vs production: max |diff| %.3g of max %.3g\n", md, mx);
             const double bytes = double(c.groups) * L * KVH * HD * 2;
-            std::printf("%7d %2dx%-2d | %9.1f %9.1f %9.1f %9.1f | %8.1f | %d | prefetch 1/4/8: %9.1f %9.1f %9.1f | K key-major: %9.1f | WG16: %9.1f\n", L,
-                        c.groups, c.rows, us[0], us[1], us[2], us[3], bytes / us[0] / 1e3, smax, pf[0], pf[1], pf[2], kmaj, wg16);
+            std::printf("%7d %2dx%-2d | %9.1f %9.1f %9.1f %9.1f | %8.1f | %d | prefetch 1/4/8: %9.1f %9.1f %9.1f | K key-major: %9.1f | WG16: %9.1f | 64-key steps: %9.1f\n", L,
+                        c.groups, c.rows, us[0], us[1], us[2], us[3], bytes / us[0] / 1e3, smax, pf[0], pf[1], pf[2], kmaj, wg16, k64);
         }
     return 0;
 }
