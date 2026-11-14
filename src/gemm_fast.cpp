@@ -3484,8 +3484,10 @@ sycl::event gemm_fast_run(sycl::queue& q, const QuantWeight& w, const sycl_bf16*
     // weight (the dequantize pass, ~160 ms a prompt, and its 2 bytes-a-weight scratch, which the prefill chunk
     // budget pays for) -- the same bf16-rounded weights the bf16 GEMM below multiplies.  GRIMOIRE_I4_ONEDNN_PROMPT=0
     // = the paths below.  GRIMOIRE_I4A8=1 (opt-in) keeps priority.
+    // OFF by default (GRIMOIRE_I4_ONEDNN_PROMPT=1 = on): MEASURED 2026-11-14, one B70, Swift INT4, TTFT of 2.2K /
+    // 1.3K-token prompts 1,213 / 789 ms -> 1,446 / 830 ms -- slower than dequantize + bf16 GEMM at prompt sizes.
     static const bool i4_dnnl_prompt = [] { const char* e = std::getenv("GRIMOIRE_I4_ONEDNN_PROMPT");
-        return !(e && *e == '0'); }();
+        return e && *e == '1'; }();
     if (i4_dnnl_prompt && w.fmt == Fmt::INT4 && M > 16 && w.N >= 2048 && !i4a8_ok(w, M) &&
         onednn_int4_ok(q, w, M)) {
         sycl::event e;
