@@ -329,6 +329,18 @@ sycl::event verify_attn_dpas_impl(sycl::queue& q, const AttnParams& p, const Ver
                     #pragma unroll
                     for (int w = 0; w < 4; ++w) {
                         es::simd<uint32_t, 128> b;
+                        if constexpr (KM) {
+                            // V pairs (key 2pr, key 2pr+1) x 16 dims through 16-bit lanes: same values as below
+                            #pragma unroll
+                            for (int pr = 0; pr < 8; ++pr) {
+                                es::simd<uint16_t, 32> b16 = 0;
+                                auto bv = b16.template bit_cast_view<uint8_t>();
+                                bv.template select<16, 4>(0) = vb.template select<16, 1>((2 * pr) * 64 + 16 * w);
+                                bv.template select<16, 4>(2) = vb.template select<16, 1>((2 * pr + 1) * 64 + 16 * w);
+                                es::simd<uint16_t, 32> h16 = ((b16 & 0x7F) << 7) | ((b16 & 0x80) << 8);
+                                b.template select<16, 1>(16 * pr) = h16.template bit_cast_view<uint32_t>();
+                            }
+                        } else
                         #pragma unroll
                         for (int pr = 0; pr < 8; ++pr) {
                             es::simd<uint32_t, 16> lo =
