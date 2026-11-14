@@ -61,8 +61,10 @@ double run(sycl::queue& q, const uint8_t* k, const uint8_t* v, uint32_t* sink, i
     return std::chrono::duration<double, std::micro>(std::chrono::steady_clock::now() - t0).count() / N;
 }
 
-int main() {
-    const int L = 61440, cap = 61440, KVH = 4, HD = 256, USERS = 4;
+int main(int argc, char** argv) {
+    const int L = 61440, KVH = 4, HD = 256, USERS = 4;
+    const int cap = argc > 1 ? std::atoi(argv[1]) : 61440;
+    std::printf("cap (row pitch) %d\n", cap);
     sycl::queue q{sycl::gpu_selector_v, {sycl::property::queue::in_order{}}};
     const size_t bytes = size_t(USERS) * KVH * HD * cap;
     uint8_t* k = sycl::malloc_device<uint8_t>(bytes, q);
@@ -71,7 +73,7 @@ int main() {
     q.memset(k, 1, bytes); q.memset(v, 2, bytes); q.wait();
     std::printf("%-6s %-7s | %10s %8s | %10s %8s\n", "users", "splits", "dim-major", "GB/s", "key-major", "GB/s");
     for (int users : {1, 4})
-        for (int splits : {16, 32, 61, 128, 256}) {
+        for (int splits : {32, 61, 128}) {
             const double a = run<false>(q, k, v, sink, users, L, cap, splits);
             const double b = run<true>(q, k, v, sink, users, L, cap, splits);
             const double gb = double(users) * KVH * L * HD * 2;
