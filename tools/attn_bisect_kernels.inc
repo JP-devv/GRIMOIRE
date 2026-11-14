@@ -43,6 +43,7 @@
 // =====================================================================
 #include "attn_verify.hpp"
 #include <sycl/ext/intel/esimd.hpp>
+#include <sycl/ext/oneapi/experimental/prefetch.hpp>
 #include <cstdlib>
 #include <limits>
 
@@ -450,6 +451,20 @@ sycl::event bisect_attn(sycl::queue& q, const AttnParams& p, const VerifyGroups&
             es::simd<float, RB> m = NINF, l = 0.0f;
             const es::simd<int, NK> col(0, 1);
             for (int s0 = s_beg; s0 < s_end; s0 += NK) {
+                if constexpr (MODE >= 4) {   // prefetch K / V of the block PFD blocks ahead into L1 + L2
+                    constexpr int PFD = MODE == 4 ? 1 : MODE == 5 ? 4 : 8;
+                    constexpr auto PFH = sycl::ext::oneapi::experimental::properties{
+                        es::cache_hint_L1<es::cache_hint::cached>, es::cache_hint_L2<es::cache_hint::cached>};
+                    const int sp = s0 + PFD * NK;
+                    if (sp < s_end) {
+                        #pragma unroll
+                        for (int dc = 0; dc < HD / 32; ++dc)
+                            es::prefetch_2d<uint32_t, 4, 32>(kh32, KW, HD - 1, KW, sp / 4, 32 * dc, PFH);
+                        #pragma unroll
+                        for (int vc = 0; vc < 4; ++vc)
+                            es::prefetch_2d<uint32_t, 16, 16>(vh32, HD - 1, VH, HD - 1, 16 * vc, sp, PFH);
+                    }
+                }
                 // S = Q K^T over 256 dims: 8 loads of [32 dims][16 keys], 2 dpas each.
                 es::simd<float, RB * NK> s = 0.0f;
                 #pragma unroll

@@ -86,9 +86,13 @@ int main(int argc, char** argv) {
             us[1] = timeit([&] { bisect_attn<1>(q, base, vg, slot_bytes, dlens, smax, {}); });
             us[2] = timeit([&] { bisect_attn<2>(q, base, vg, slot_bytes, dlens, smax, {}); });
             us[3] = timeit([&] { bisect_attn<3>(q, base, vg, slot_bytes, dlens, smax, {}); });
+            double pf[3];
+            pf[0] = timeit([&] { bisect_attn<4>(q, base, vg, slot_bytes, dlens, smax, {}); });
+            pf[1] = timeit([&] { bisect_attn<5>(q, base, vg, slot_bytes, dlens, smax, {}); });
+            pf[2] = timeit([&] { bisect_attn<6>(q, base, vg, slot_bytes, dlens, smax, {}); });
             const double bytes = double(c.groups) * L * KVH * HD * 2;
-            std::printf("%7d %2dx%-2d | %9.1f %9.1f %9.1f %9.1f | %8.1f | %d\n", L, c.groups, c.rows, us[0], us[1], us[2],
-                        us[3], bytes / us[0] / 1e3, smax);
+            std::printf("%7d %2dx%-2d | %9.1f %9.1f %9.1f %9.1f | %8.1f | %d | prefetch 1/4/8: %9.1f %9.1f %9.1f\n", L,
+                        c.groups, c.rows, us[0], us[1], us[2], us[3], bytes / us[0] / 1e3, smax, pf[0], pf[1], pf[2]);
         }
     return 0;
 }
