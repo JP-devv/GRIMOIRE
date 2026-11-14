@@ -1521,11 +1521,18 @@ sycl::event launch_rope_dev(sycl::queue& q, float* x, int n_heads, int head_dim,
     });
 }
 
+bool& kv_kmajor_flag() { static bool on = false; return on; }
+void kv_kmajor_refuse(const char* who) {
+    if (kv_kmajor_flag())
+        throw std::runtime_error(std::string(who) + ": not written for the key-major K cache (GRIMOIRE_KV_KMAJOR=0)");
+}
+
 sycl::event launch_kv_append_dev(sycl::queue& q, const float* k, const float* v,
                                  uint8_t* k_cache, uint8_t* v_cache,
                                  const int32_t* d_pos, int n_kv_heads,
                                  int head_dim, int seq_cap,
                                  const std::vector<sycl::event>& deps = {}) {
+    const bool km = kv_kmajor_flag();
     return q.submit([&](sycl::handler& h) {
         h.depends_on(deps);
         h.parallel_for(sycl::range<1>(size_t(n_kv_heads) * head_dim),
@@ -1535,7 +1542,8 @@ sycl::event launch_kv_append_dev(sycl::queue& q, const float* k, const float* v,
                 const int d    = t % head_dim;
                 const int pos  = d_pos[0];
                 if (pos >= seq_cap) return;
-                k_cache[(int64_t(head) * head_dim + d) * seq_cap + pos] =
+                k_cache[km ? (int64_t(head) * seq_cap + pos) * head_dim + d
+                           : (int64_t(head) * head_dim + d) * seq_cap + pos] =
                     f32_to_e4m3(k[t]);
                 v_cache[(int64_t(head) * seq_cap + pos) * head_dim + d] =
                     f32_to_e4m3(v[t]);

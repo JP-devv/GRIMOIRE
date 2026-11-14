@@ -74,6 +74,10 @@ int env_int(const char* name, int fallback) {
 }
 } // namespace
 
+namespace { bool g_verify_kmajor = false; }
+void set_verify_kv_kmajor(bool on) { g_verify_kmajor = on; }
+bool verify_kv_kmajor() { return g_verify_kmajor; }
+
 bool verify_dpas_ok(const AttnParams& p) {
     return p.head_dim == 256 && p.num_kv_heads > 0 && p.num_heads % p.num_kv_heads == 0 &&
            p.window_left <= 0 && !p.qbits && (p.seq_cap % 16) == 0;
@@ -119,9 +123,11 @@ int verify_dpas_splits(const AttnParams& p, const VerifyGroups& g, int len_max) 
     return n > 0 ? n : 1;
 }
 
-sycl::event launch_verify_attn_dpas(sycl::queue& q, const AttnParams& p, const VerifyGroups& g,
-                                    int64_t kv_stride, const int32_t* d_lens, int splits_max,
-                                    const std::vector<sycl::event>& deps) {
+namespace {
+template <bool KM>
+sycl::event verify_attn_dpas_impl(sycl::queue& q, const AttnParams& p, const VerifyGroups& g,
+                                  int64_t kv_stride, const int32_t* d_lens, int splits_max,
+                                  const std::vector<sycl::event>& deps) {
     constexpr int HD = 256, RB = 8, NK = 16, DT = HD / 16;
     const int G = p.num_heads / p.num_kv_heads;
     const int KVH = p.num_kv_heads, H = p.num_heads;
@@ -208,6 +214,7 @@ sycl::event launch_verify_attn_dpas(sycl::queue& q, const AttnParams& p, const V
             }
 
             const int64_t cbase = int64_t(vg.slot[grp]) * kv_stride;
+            // K: [256 dims][seq_cap] per head, or key-major [seq_cap][256] (KM, like V) -- same head offset
             const uint32_t* kh32 = reinterpret_cast<const uint32_t*>(
                 pp.k_cache + cbase + int64_t(kvh) * HD * pp.seq_cap);
             const uint32_t* vh32 = reinterpret_cast<const uint32_t*>(
@@ -221,6 +228,41 @@ sycl::event launch_verify_attn_dpas(sycl::queue& q, const AttnParams& p, const V
             for (int s0 = s_beg; s0 < s_end; s0 += NK) {
                 // S = Q K^T over 256 dims: 8 loads of [32 dims][16 keys], 2 dpas each.
                 es::simd<float, RB * NK> s = 0.0f;
+                if constexpr (KM) {
+                    // Key-major K: one transposed 2-D load per 32 dims = u32[8 dim quads][16 keys] (each u32 four
+                    // consecutive dims of one key).  Each byte goes into its own u16 by register moves, then one
+                    // (b & 0x7F) << 7 | (b & 0x80) << 8 over 32 lanes (llm-scaler's dequantFp8): 16 keys x 2 dims.
+                    // Same values as the dim-major path below, bit for bit (tools/bench_attn_bisect.cpp MODE 14).
+                    // MEASURED 2026-11-14, 61K keys, one layer: 1 draft row 1,394 -> 246 us, one user's 7 rows
+                    // 808 -> 577, 4 users x 4 rows 2,206 -> 1,286, 4 users x 1 row 7,461 -> 1,073.
+                    #pragma unroll
+                    for (int dc = 0; dc < HD / 32; ++dc) {
+                        es::simd<uint32_t, 128> tq = es::load_2d<uint32_t, 8, 16, 1, true, false>(
+                            kh32, HD - 1, unsigned(pp.seq_cap) - 1, HD - 1, 8 * dc, s0);
+                        #pragma unroll
+                        for (int hh = 0; hh < 2; ++hh) {
+                            es::simd<uint32_t, 128> b;
+                            #pragma unroll
+                            for (int c = 0; c < 4; ++c) {
+                                es::simd<uint32_t, 16> t = tq.template select<16, 1>((4 * hh + c) * 16);
+                                es::simd<uint8_t, 64> row = t.template bit_cast_view<uint8_t>();
+                                #pragma unroll
+                                for (int hp = 0; hp < 2; ++hp) {
+                                    es::simd<uint16_t, 32> b16 = 0;
+                                    auto bv = b16.template bit_cast_view<uint8_t>();
+                                    bv.template select<16, 4>(0) = row.template select<16, 4>(2 * hp);
+                                    bv.template select<16, 4>(2) = row.template select<16, 4>(2 * hp + 1);
+                                    es::simd<uint16_t, 32> h16 = ((b16 & 0x7F) << 7) | ((b16 & 0x80) << 8);
+                                    b.template select<16, 1>(16 * (2 * c + hp)) = h16.template bit_cast_view<uint32_t>();
+                                }
+                            }
+                            const int dt = 2 * dc + hh;
+                            s = xmx::dpas<8, RB, float, float, fp16, fp16>(
+                                s, b.template bit_cast_view<fp16>().read(),
+                                es::simd<fp16, RB * 16>(qa.template select<RB * 16, 1>(dt * RB * 16)));
+                        }
+                    }
+                } else
                 #pragma unroll
                 for (int dc = 0; dc < HD / 32; ++dc) {
                     es::simd<uint32_t, 128> kr = es::load_2d<uint32_t, 4, 32>(
@@ -317,6 +359,15 @@ sycl::event launch_verify_attn_dpas(sycl::queue& q, const AttnParams& p, const V
             }
         });
     });
+}
+
+} // namespace
+
+sycl::event launch_verify_attn_dpas(sycl::queue& q, const AttnParams& p, const VerifyGroups& g,
+                                    int64_t kv_stride, const int32_t* d_lens, int splits_max,
+                                    const std::vector<sycl::event>& deps) {
+    return g_verify_kmajor ? verify_attn_dpas_impl<true>(q, p, g, kv_stride, d_lens, splits_max, deps)
+                           : verify_attn_dpas_impl<false>(q, p, g, kv_stride, d_lens, splits_max, deps);
 }
 
 sycl::event launch_verify_merge(sycl::queue& q, const AttnParams& p, int rows, int splits_max,

@@ -1425,6 +1425,7 @@ sycl::event launch_kv_append_batched(
     sycl::queue& q, const float* k, const float* v, uint8_t* k_cache,
     uint8_t* v_cache, int tokens, int start_pos, int n_kv_heads,
     int head_dim, int seq_cap, const std::vector<sycl::event>& deps) {
+    const bool km = kv_kmajor_flag();
     return q.submit([&](sycl::handler& h) {
         h.depends_on(deps);
         h.parallel_for(sycl::range<1>(size_t(tokens) * n_kv_heads * head_dim),
@@ -1436,7 +1437,8 @@ sycl::event launch_kv_append_batched(
                 const int pos = start_pos + t;
                 if (pos >= seq_cap) return;
                 const int64_t src = (int64_t(t) * n_kv_heads + kh) * head_dim + d;
-                k_cache[(int64_t(kh) * head_dim + d) * seq_cap + pos] =
+                k_cache[km ? (int64_t(kh) * seq_cap + pos) * head_dim + d
+                           : (int64_t(kh) * head_dim + d) * seq_cap + pos] =
                     f32_to_e4m3(k[src]);
                 v_cache[(int64_t(kh) * seq_cap + pos) * head_dim + d] =
                     f32_to_e4m3(v[src]);
@@ -1496,6 +1498,7 @@ sycl::event launch_qk_norm_rope_rows(sycl::queue& q, float* qv, float* kv, const
 sycl::event launch_kv_append_rows(sycl::queue& q, const float* k, const float* v,
     uint8_t* k_base, uint8_t* v_base, int64_t kv_stride, const RowSlots& rs, int rows,
     int n_kv_heads, int head_dim, int seq_cap, const std::vector<sycl::event>& deps) {
+    const bool km = kv_kmajor_flag();
     return q.submit([&](sycl::handler& h) {
         h.depends_on(deps);
         const RowSlots slots = rs;
@@ -1510,7 +1513,8 @@ sycl::event launch_kv_append_rows(sycl::queue& q, const float* k, const float* v
                 uint8_t* k_cache = k_base + int64_t(slots.slot[t]) * kv_stride;
                 uint8_t* v_cache = v_base + int64_t(slots.slot[t]) * kv_stride;
                 const int64_t src = (int64_t(t) * n_kv_heads + kh) * head_dim + d;
-                k_cache[(int64_t(kh) * head_dim + d) * seq_cap + pos] =
+                k_cache[km ? (int64_t(kh) * seq_cap + pos) * head_dim + d
+                           : (int64_t(kh) * head_dim + d) * seq_cap + pos] =
                     f32_to_e4m3(k[src]);
                 v_cache[(int64_t(kh) * seq_cap + pos) * head_dim + d] =
                     f32_to_e4m3(v[src]);
@@ -1982,6 +1986,7 @@ sycl::event launch_flash_prefill(
         return launch_flash_prefill_fast(q, qv, k_cache, v_cache, out, tokens, start_pos,
                                          num_heads, num_kv_heads, head_dim, seq_cap,
                                          softmax_scale, deps);
+    kv_kmajor_refuse("launch_flash_prefill (generic kernel)");
     return head_dim > MAX_HEAD_DIM
          ? launch_flash_prefill_impl<MAX_DPL_WIDE>(q, qv, k_cache, v_cache, out, tokens, start_pos, num_heads,
            num_kv_heads, head_dim, seq_cap, softmax_scale, deps)
@@ -2215,6 +2220,7 @@ sycl::event launch_dflash2_block_attention(
     int num_heads, int num_kv_heads, int head_dim, int seq_cap,
     int sliding_window, bool causal, float softmax_scale,
     const std::vector<sycl::event>& deps, bool split_keys) {
+    kv_kmajor_refuse("launch_dflash2_block_attention");
     const int end=context_len+tokens;
     const int begin=(causal&&sliding_window>0)
         ? std::max(0,context_len+1-sliding_window)
@@ -2379,12 +2385,13 @@ sycl::event launch_qk_norm_rope_bf16_batched(sycl::queue&q,sycl_bf16*qv,
 sycl::event launch_kv_append_bf16_batched(sycl::queue&q,const sycl_bf16*k,
     const sycl_bf16*v,uint8_t*k_cache,uint8_t*v_cache,int tokens,int start_pos,
     int n_kv_heads,int head_dim,int seq_cap,const std::vector<sycl::event>&deps){
+ const bool km=kv_kmajor_flag();
  return q.submit([&](sycl::handler&h){h.depends_on(deps);
   h.parallel_for(sycl::range<1>(size_t(tokens)*n_kv_heads*head_dim),[=](sycl::id<1>id){
    int64_t z=id[0];int d=int(z%head_dim);int64_t th=z/head_dim;
    int kh=int(th%n_kv_heads),t=int(th/n_kv_heads),pos=start_pos+t;if(pos>=seq_cap)return;
    int64_t src=(int64_t(t)*n_kv_heads+kh)*head_dim+d;
-   k_cache[(int64_t(kh)*head_dim+d)*seq_cap+pos]=f32_to_e4m3(float(k[src]));
+   k_cache[km?(int64_t(kh)*seq_cap+pos)*head_dim+d:(int64_t(kh)*head_dim+d)*seq_cap+pos]=f32_to_e4m3(float(k[src]));
    v_cache[(int64_t(kh)*seq_cap+pos)*head_dim+d]=f32_to_e4m3(float(v[src]));});});
 }
 

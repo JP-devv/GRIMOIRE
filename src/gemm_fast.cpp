@@ -868,6 +868,9 @@ sycl::event flash_esimd(sycl::queue& q, sycl::event dep, const sycl_bf16* Qb, in
     });
 }
 
+bool& flash_kv_kmajor_storage() { static bool on = false; return on; }
+bool flash_kv_kmajor() { return flash_kv_kmajor_storage(); }
+
 int flash_key_block() {
     static const int block = [] {
         const char* e = std::getenv("GRIMOIRE_FLASH_BLOCK");
@@ -900,7 +903,19 @@ sycl::event flash_fast_impl(sycl::queue& q, const float* qv, const uint8_t* kc,
     if (!grow(q, fs.kp, fs.kp_cap, elems) || !grow(q, fs.vp, fs.vp_cap, elems))
         throw std::runtime_error("flash_fast: K/V scratch allocation failed");
     sycl_bf16* Kp = fs.kp; sycl_bf16* Vp = fs.vp; const sycl_bf16* lut = fs.lut;
-    sycl::event e = q.submit([&](sycl::handler& h) {
+    sycl::event e;
+    if (flash_kv_kmajor()) {
+        // key-major K cache ([KVH][seq_cap][D], kernels.hpp): read with d fastest, same packed result
+        e = q.submit([&](sycl::handler& h) {
+            h.depends_on(deps);
+            h.parallel_for(sycl::range<3>(size_t(KVH), size_t(Sp), size_t(D)), [=](sycl::id<3> id) {
+                const int hh = int(id[0]), s = int(id[1]), d = int(id[2]);
+                Kp[((size_t(hh) * (D / 2) + d / 2) * Sp + s) * 2 + (d & 1)] =
+                    s < kend ? lut[kc[(size_t(hh) * seq_cap + s) * D + d]] : sycl_bf16(0.0f);
+            });
+        });
+    } else
+    e = q.submit([&](sycl::handler& h) {
         h.depends_on(deps);
         h.parallel_for(sycl::range<3>(size_t(KVH), size_t(D), size_t(Sp)), [=](sycl::id<3> id) {
             const int hh = int(id[0]), d = int(id[1]), s = int(id[2]);       // key fastest
@@ -4434,5 +4449,8 @@ sycl::event launch_moe_mxfp4_smallm(sycl::queue& q, const QuantWeight& w, int Ne
     return M <= 8 ? moe_mxfp4_smallm_impl<0, 1>(q, w, Ne, A, out, tile_e, off, cnt, T, deps)
                   : moe_mxfp4_smallm_impl<0, 2>(q, w, Ne, A, out, tile_e, off, cnt, T, deps);
 }
+
+// key-major K cache (kernels.hpp): this library's copy of the flag, set by Grimoire::build
+void set_flash_kv_kmajor(bool on) { flash_kv_kmajor_storage() = on; }
 
 } // namespace b70

@@ -9937,6 +9937,22 @@ bool Grimoire::build(const std::string& dir, const UploadOptions& requested_opt,
 
     power_gov_init();
     acct(tm_heat_init());                 // GRIMOIRE_EXPERT_HEAT: spare expert slots
+    {
+        // KEY-MAJOR K CACHE (kernels.hpp): for the models whose every K reader handles it -- Qwen3.5 / 3.8
+        // dense (DeltaNet hybrid), full attention at head_dim 256 with no window, FP8 cache, no DFlash, no PP /
+        // legacy TP.  Set before the first K write.  GRIMOIRE_KV_KMAJOR=0 = the dim-major layout everywhere.
+        static const bool km_env = [] { const char* e = std::getenv("GRIMOIRE_KV_KMAJOR"); return !(e && *e == '0'); }();
+        bool hd256 = true;
+        for (const auto& d : L) if (d.k_base && d.head_dim != 256) hd256 = false;
+        const bool km = km_env && hd256 && !cfg.is_moe() && !cfg.is_muse && !cfg.is_gemma4 && !cfg.is_qwen4_exp &&
+                        !cfg.is_k2 && !cfg.is_agnes && !cfg.is_qwen3 && cfg.sliding_window == 0 && cfg.lin_v_heads > 0 &&
+                        !dflash2.ok && !pp_enabled() && !tp_enabled();
+        kv_kmajor_flag() = km;
+        set_flash_kv_kmajor(km);
+        set_verify_kv_kmajor(km);
+        std::printf("  K cache layout: %s\n", km ? "key-major [kv head][position][dim] (like V)"
+                                                 : "dim-major [kv head][dim][position]");
+    }
     std::printf("  zeroing recurrent state ... ");
     std::fflush(stdout);
     // EVERY slot, not just the bound one.  reset() clears the sequence
@@ -15047,7 +15063,9 @@ int Grimoire::mtp_draft(int next_token, int position, bool from_mtp_hidden) {
 
     AttnParams ap{};
     const int w0 = mtp_window_start(position);
-    ap.q = qvec; ap.k_cache = d.k_cache + w0; ap.v_cache = d.v_cache + size_t(w0) * d.head_dim;
+    // window start: K is dim-major (+w0 bytes per row) or key-major (+w0 rows of head_dim, like V)
+    ap.q = qvec; ap.k_cache = d.k_cache + (kv_kmajor_flag() ? size_t(w0) * d.head_dim : size_t(w0));
+    ap.v_cache = d.v_cache + size_t(w0) * d.head_dim;
     ap.out = s.attn_out;
     ap.seq_len = position + 1 - w0; ap.seq_cap = max_seq;
     if (w0) { int32_t* ds = s.d_seq_len; const int len = position + 1 - w0; q.single_task([=] { *ds = len; }); }
@@ -15330,7 +15348,7 @@ bool Grimoire::mtp_draft_rows(int n, const int32_t* tok_in, const int* slot, con
         launch_kv_append_dev(q, krow, vrow, kc, vc, s.d_pos, d.kv_heads, HD, max_seq, none);
         AttnParams ap{};
         const int w0 = mtp_window_start(p);
-        ap.q = qvec; ap.k_cache = kc + w0; ap.v_cache = vc + size_t(w0) * HD;
+        ap.q = qvec; ap.k_cache = kc + (kv_kmajor_flag() ? size_t(w0) * HD : size_t(w0)); ap.v_cache = vc + size_t(w0) * HD;
         ap.out = row(mtpr.att, r, AD);
         ap.seq_len = p + 1 - w0; ap.seq_cap = max_seq;
         if (w0) { int32_t* ds = s.d_seq_len; const int len = p + 1 - w0; q.single_task([=] { *ds = len; }); }

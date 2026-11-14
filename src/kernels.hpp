@@ -259,6 +259,16 @@ sycl::event launch_gemm_fast_predq(sycl::queue& q, const QuantWeight& w, const s
 bool onednn_gemm_ok(const QuantWeight& w, int M);
 sycl::event onednn_gemm(sycl::queue& q, const QuantWeight& w, const sycl_bf16* x, float* y,
                         int M, bool accumulate, const std::vector<sycl::event>& deps = {});
+// KEY-MAJOR FP8 K CACHE (2026-11-14).  K was stored [kv_head][head_dim][seq_cap] (dim-major): one 16-key step of
+// the decode / verify attention touched 256 rows seq_cap bytes apart -- at 61K, 4 users, the reads alone took
+// 1.9-3.8 ms a layer against 0.24-0.28 ms key-major (tools/bench_kvread.cpp).  With kv_kmajor_flag() set, K is
+// [kv_head][seq_cap][head_dim] like V.  Set once in Grimoire::build for the models whose every K reader handles
+// it (Qwen3.5 / 3.8 dense, head_dim 256, no window, no DFlash); every other K reader refuses while it is set.
+// The two kernel libraries keep their own copies: set_flash_kv_kmajor (libgrimoire_gemm.so, the prompt
+// attention's K packing) and set_verify_kv_kmajor (libgrimoire_attn.so, attn_verify.hpp).
+bool& kv_kmajor_flag();
+void kv_kmajor_refuse(const char* who);    // throws if kv_kmajor_flag() is set
+void set_flash_kv_kmajor(bool on);
 // Matrix-unit causal prefill attention (src/gemm_fast.cpp);
 // launch_flash_prefill() takes it whenever the geometry fits.
 bool flash_fast_supported(int head_dim, int num_heads, int num_kv_heads);
