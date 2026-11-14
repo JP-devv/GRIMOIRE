@@ -20006,7 +20006,9 @@ bool Grimoire::prefill(const std::vector<int32_t>& tokens,
         // + MTP depth 4, verify 53.3 ms per step through oneDNN s8, 53.6 through
         // the small-M kernel's INT8 decode (dpas_f8), FP8 54.2 -- equal, so oneDNN
         // stays first and the small-M kernel is what INT8 gets when it declines.
-        const bool dnnl_small = smallm_dnnl && M>=2 && M<=16 && !exact_verify && !smallm_gemv &&
+        // 17..32 rows too (2026-11-14): past 16 rows FP8 / INT8 / BF16 had no small-M path here -- a verify of
+        // 17..32 rows fell to one decode GEMV per row (verify_a16 below).
+        const bool dnnl_small = smallm_dnnl && M>=2 && M<=kSpecBatch && !exact_verify && !smallm_gemv &&
                                 !w.has_i4() && onednn_gemm_ok(w.w,M);
         const bool dpas_ok = dnnl_small || dpas_bf || dpas_i4 || dpas_f8 || dpas_nq || (smallm_dpas && M>=2 && M<=16 && !exact_verify && !smallm_gemv &&
                              !w.has_i4() && mxfp4_smallm_ok(w.w,M,nullptr,y));
@@ -22279,6 +22281,12 @@ bool Grimoire::prefill(const std::vector<int32_t>& tokens,
         // Verification needs the main-model choice after every candidate,
         // not only after the last row. Keep the reductions and copies on the
         // in-order queue, then return all token ids in one host transfer.
+        // FP8 / INT8 / BF16 heads past the small-M kernel's 8 rows (2026-11-14): oneDNN, the vocabulary
+        // matrix read once.  Before, a 9..32-row verify ran one 248K-row GEMV per row -- Qwen3.8-27B as INT8
+        // on two cards, 16 rows: 16 x 1.27 GB of head reads in a 76 ms verify.
+        const bool lm_dnnl = !exact_verify && !lm_head.has_i4() && lm_head.w.payload &&
+            (lm_head.w.fmt == Fmt::FP8_E4M3 || lm_head.w.fmt == Fmt::INT8 || lm_head.w.fmt == Fmt::BF16) &&
+            M >= 2 && M <= kSpecBatch && onednn_gemm_ok(lm_head.w, M);
         if (tp_enabled()) {
             mm(lm_head,bn,batch_logits);
         } else if (lm_head.has_i4()) {
@@ -22294,6 +22302,7 @@ bool Grimoire::prefill(const std::vector<int32_t>& tokens,
                     (lm_head.w.fmt == Fmt::INT4 && M <= 32 && int4_smallm_ok(lm_head.w, M, nullptr, nullptr)) ||
                     ((lm_head.w.fmt == Fmt::FP8_E4M3 || lm_head.w.fmt == Fmt::INT8) &&
                      fp8_smallm_ok(lm_head.w, M, nullptr, nullptr)) ||
+                    lm_dnnl ||
                     (!exact_verify && native_smallm_ok(lm_head.w, M, nullptr, nullptr)))
                    && lm_head.w.payload) {
             // Verification is a matrix multiplication, not M independent
@@ -22305,7 +22314,7 @@ bool Grimoire::prefill(const std::vector<int32_t>& tokens,
         const bool lm_batched = lm_head.w.fmt == Fmt::MXFP4 ||
             (lm_head.w.fmt == Fmt::INT4 && M <= 32 && int4_smallm_ok(lm_head.w, M, nullptr, nullptr)) ||
             ((lm_head.w.fmt == Fmt::FP8_E4M3 || lm_head.w.fmt == Fmt::INT8) &&
-             fp8_smallm_ok(lm_head.w, M, nullptr, nullptr)) ||
+             fp8_smallm_ok(lm_head.w, M, nullptr, nullptr)) || lm_dnnl ||
             // GGUF native heads (2026-10-29): the Qwen3.8-27B Q6_K head row by row was 5 x 1.8 ms
             // of a 52 ms MTP verify (M = 5).
             (!exact_verify && native_smallm_ok(lm_head.w, M, nullptr, nullptr));
