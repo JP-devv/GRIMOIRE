@@ -449,6 +449,8 @@ sycl::event bisect_attn(sycl::queue& q, const AttnParams& p, const VerifyGroups&
             const uint32_t* vh32 = reinterpret_cast<const uint32_t*>(
                 pp.v_cache + cbase + int64_t(kvh) * pp.seq_cap * HD);
             const unsigned KW = unsigned(pp.seq_cap) - 1;    // K: [256 rows][seq_cap bytes]
+            const uint32_t* khm32 = reinterpret_cast<const uint32_t*>(
+                pp.k_cache + cbase + int64_t(kvh) * pp.seq_cap * HD);   // MODE 12: K key-major
             const unsigned VH = unsigned(pp.seq_cap) - 1;    // V: [seq_cap rows][256 bytes]
 
             es::simd<float, RB * HD> o = 0.0f;               // DT tiles of [RB][16]
@@ -649,7 +651,7 @@ sycl::event bisect_attn(sycl::queue& q, const AttnParams& p, const VerifyGroups&
                 }
             } else
             for (int s0 = s_beg; s0 < s_end; s0 += NK) {
-                if constexpr (MODE >= 4) {   // prefetch K / V of the block PFD blocks ahead into L1 + L2
+                if constexpr (MODE >= 4 && MODE <= 6) {   // prefetch K / V of the block PFD blocks ahead into L1 + L2
                     constexpr int PFD = MODE == 4 ? 1 : MODE == 5 ? 4 : 8;
                     constexpr auto PFH = sycl::ext::oneapi::experimental::properties{
                         es::cache_hint_L1<es::cache_hint::cached>, es::cache_hint_L2<es::cache_hint::cached>};
@@ -665,6 +667,35 @@ sycl::event bisect_attn(sycl::queue& q, const AttnParams& p, const VerifyGroups&
                 }
                 // S = Q K^T over 256 dims: 8 loads of [32 dims][16 keys], 2 dpas each.
                 es::simd<float, RB * NK> s = 0.0f;
+                if constexpr (MODE == 12) {
+                    // K key-major: one transposed 2-D load per 32 dims = u32[8 dim quads][16 keys], each u32 four
+                    // consecutive dims of one key; dim pair 2c = bytes 0,1, pair 2c+1 = bytes 2,3.
+                    #pragma unroll
+                    for (int dc = 0; dc < HD / 32; ++dc) {
+                        es::simd<uint32_t, 128> tq = es::load_2d<uint32_t, 8, 16, 1, true, false>(
+                            khm32, HD - 1, unsigned(pp.seq_cap) - 1, HD - 1, 8 * dc, s0);
+                        #pragma unroll
+                        for (int hh = 0; hh < 2; ++hh) {
+                            es::simd<uint32_t, 128> b;
+                            #pragma unroll
+                            for (int c = 0; c < 4; ++c) {
+                                es::simd<uint32_t, 16> t = tq.template select<16, 1>((4 * hh + c) * 16);
+                                es::simd<uint32_t, 16> b0 = t & 0xFFu, b1 = (t >> 8) & 0xFFu;
+                                es::simd<uint32_t, 16> b2 = (t >> 16) & 0xFFu, b3 = t >> 24;
+                                es::simd<uint32_t, 16> h0 = ((b0 & 0x7F) << 7) | ((b0 & 0x80) << 8);
+                                es::simd<uint32_t, 16> h1 = ((b1 & 0x7F) << 7) | ((b1 & 0x80) << 8);
+                                es::simd<uint32_t, 16> h2 = ((b2 & 0x7F) << 7) | ((b2 & 0x80) << 8);
+                                es::simd<uint32_t, 16> h3 = ((b3 & 0x7F) << 7) | ((b3 & 0x80) << 8);
+                                b.template select<16, 1>(16 * (2 * c)) = h0 | (h1 << 16);
+                                b.template select<16, 1>(16 * (2 * c + 1)) = h2 | (h3 << 16);
+                            }
+                            const int dt = 2 * dc + hh;
+                            s = xmx::dpas<8, RB, float, float, fp16, fp16>(
+                                s, b.template bit_cast_view<fp16>().read(),
+                                es::simd<fp16, RB * 16>(qa.template select<RB * 16, 1>(dt * RB * 16)));
+                        }
+                    }
+                } else
                 #pragma unroll
                 for (int dc = 0; dc < HD / 32; ++dc) {
                     es::simd<uint32_t, 128> kr;

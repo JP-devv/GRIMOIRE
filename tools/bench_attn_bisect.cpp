@@ -43,6 +43,18 @@ int main(int argc, char** argv) {
         }
         q.wait();
     }
+    // the same K values key-major ([kvh][cap][HD], like V) for MODE 12
+    uint8_t* dkm = sycl::malloc_device<uint8_t>(size_t(slot_bytes) * SLOTS, q);
+    {
+        std::vector<uint8_t> h(static_cast<size_t>(slot_bytes)), t(static_cast<size_t>(slot_bytes));
+        q.memcpy(h.data(), dk, h.size()).wait();
+        for (int kh = 0; kh < KVH; ++kh)
+            for (int d = 0; d < HD; ++d)
+                for (int p = 0; p < CAP; ++p)
+                    t[(size_t(kh) * CAP + p) * HD + d] = h[(size_t(kh) * HD + d) * CAP + p];
+        for (int s2 = 0; s2 < SLOTS; ++s2) q.memcpy(dkm + size_t(s2) * slot_bytes, t.data(), t.size());
+        q.wait();
+    }
     std::vector<float> hq(size_t(RMAX) * H * HD);
     { std::mt19937 rng(3); std::normal_distribution<float> nd; for (auto& x : hq) x = nd(rng); }
     float* dq = sycl::malloc_device<float>(hq.size(), q);
@@ -96,6 +108,8 @@ int main(int argc, char** argv) {
             const double k64 = timeit([&] { bisect_attn<9>(q, base, vg, slot_bytes, dlens, smax, {}); });
             const double slm = timeit([&] { bisect_attn<10>(q, base, vg, slot_bytes, dlens, smax, {}); });
             const double kmn = timeit([&] { bisect_attn<11>(q, base, vg, slot_bytes, dlens, smax, {}); });
+            AttnParams basem = base; basem.k_cache = dkm;
+            const double kmj = timeit([&] { bisect_attn<12>(q, basem, vg, slot_bytes, dlens, smax, {}); });
 
             // correctness of the 64-key steps: merged output against the production kernel's
             const size_t nout = size_t(c.groups) * c.rows * H * HD;
@@ -118,9 +132,19 @@ int main(int argc, char** argv) {
                 for (size_t i = 0; i < nout; ++i) md2 = std::max(md2, double(std::fabs(o0[i] - o10[i])));
                 std::printf("    SLM-staged vs production: max |diff| %.3g\n", md2);
             }
+            {
+                std::vector<float> o12(nout);
+                AttnParams basem = base; basem.k_cache = dkm;
+                bisect_attn<12>(q, basem, vg, slot_bytes, dlens, smax, {});
+                launch_verify_merge(q, basem, c.groups * c.rows, smax);
+                q.memcpy(o12.data(), dout, nout * 4).wait();
+                double md3 = 0; size_t nd = 0;
+                for (size_t i = 0; i < nout; ++i) { md3 = std::max(md3, double(std::fabs(o0[i] - o12[i]))); nd += o0[i] != o12[i]; }
+                std::printf("    KEY-MAJOR vs production: max |diff| %.3g, %zu of %zu differ\n", md3, nd, nout);
+            }
             const double bytes = double(c.groups) * L * KVH * HD * 2;
-            std::printf("%7d %2dx%-2d | %9.1f %9.1f %9.1f %9.1f | %8.1f | %d | prefetch 1/4/8: %9.1f %9.1f %9.1f | K key-major: %9.1f | WG16: %9.1f | 64-key steps: %9.1f | SLM 64-key: %9.1f | neither, K contiguous: %9.1f\n", L,
-                        c.groups, c.rows, us[0], us[1], us[2], us[3], bytes / us[0] / 1e3, smax, pf[0], pf[1], pf[2], kmaj, wg16, k64, slm, kmn);
+            std::printf("%7d %2dx%-2d | %9.1f %9.1f %9.1f %9.1f | %8.1f | %d | prefetch 1/4/8: %9.1f %9.1f %9.1f | K key-major: %9.1f | WG16: %9.1f | 64-key steps: %9.1f | SLM 64-key: %9.1f | neither, K contiguous: %9.1f | KEY-MAJOR full: %9.1f\n", L,
+                        c.groups, c.rows, us[0], us[1], us[2], us[3], bytes / us[0] / 1e3, smax, pf[0], pf[1], pf[2], kmaj, wg16, k64, slm, kmn, kmj);
         }
     return 0;
 }
