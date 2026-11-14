@@ -10790,8 +10790,11 @@ bool Grimoire::decode_spec_batch(const std::vector<int32_t>& tokens,
     // 178.6 / 137.5 / 128.4; 8 users depth 1 / 2 / 3 (16 / 24 / 32 rows) 249.8 / 195.7 / 236.3 --
     // a verify past 16 rows costs more than its extra drafts return.  kSpecBatch 32 stays the buffer
     // size, so GRIMOIRE_SPEC_ROWS=32 is the 0786428 behaviour.
-    static const int spec_rows=[] { const char* e=std::getenv("GRIMOIRE_SPEC_ROWS");
-        const int v=e&&*e?std::atoi(e):32; return std::clamp(v,2,kSpecBatch); }();
+    // 32 rows only where 17..32-row verify GEMMs are fast: INT4 weights (oneDNN INT4, 2026-11-14).  FP8 / INT8 /
+    // BF16 keep 16: past 16 rows their verify GEMM has no small-M path here (per-row GEMVs) -- not measured.
+    const bool wide_verify=!L.empty() && L[0].sh_gu.w.fmt==Fmt::INT4;
+    static const char* const rows_env=std::getenv("GRIMOIRE_SPEC_ROWS");
+    const int spec_rows=std::clamp(rows_env&&*rows_env?std::atoi(rows_env):wide_verify?32:16,2,kSpecBatch);
     // Depth cap per number of conversations, on top of the row rule: GRIMOIRE_SPEC_DEPTHS=d1,d2,d3,... (the n-th
     // entry caps n users; missing entries = the row rule alone).  Default "15,5": two users draft 5 deep (12 rows)
     // instead of 6 (14 rows).  MEASURED 2026-11-13, TP2 Swift INT4 MTP K6, BetterBench concurrency 2 (48 sampled
@@ -10820,8 +10823,8 @@ bool Grimoire::decode_spec_batch(const std::vector<int32_t>& tokens,
     // MTP drafts.  GRIMOIRE_COPY_AGREE=0 verifies every proposal without asking the head.
     static const int copy_depth=[] { const char* e=std::getenv("GRIMOIRE_COPY_DEPTH");
         return std::clamp(e&&*e?std::atoi(e):31,1,kSpecBatch-1); }();
-    static const int copy_rows=[] { const char* e=std::getenv("GRIMOIRE_COPY_ROWS");
-        return std::clamp(e&&*e?std::atoi(e):32,2,kSpecBatch); }();
+    static const char* const copy_rows_env=std::getenv("GRIMOIRE_COPY_ROWS");
+    const int copy_rows=std::clamp(copy_rows_env&&*copy_rows_env?std::atoi(copy_rows_env):wide_verify?32:16,2,kSpecBatch);
     static const bool copy_agree=[] { const char* e=std::getenv("GRIMOIRE_COPY_AGREE");
         return !(e&&*e=='0'); }();
     std::vector<int> copy_cap(size_t(n),0);
