@@ -61,6 +61,18 @@ int main(int argc, char** argv) {
     {
         double k6 = RUN(8, 6), k7 = RUN(8, 7);
         std::printf("K tile-major: %.2f ms (%.1f TFLOP/s), K+V tile-major: %.2f ms (%.1f TFLOP/s)\n", k6, flop / k6 / 1e9, k7, flop / k7 / 1e9);
+        double k8 = RUN(8, 8), k9 = RUN(8, 9);
+        {
+            const size_t n = size_t(T) * H * D;
+            std::vector<float> o0(n), o9(n);
+            flash_bisect<D, BK, 8, 0>(q, e, Qb, Tp, Kp, Vp, Sp, out, T, start, H, KVH); q.wait();
+            q.memcpy(o0.data(), out, n * 4).wait();
+            flash_bisect<D, BK, 8, 9>(q, e, Qb, Tp, Kp, Vp, Sp, out, T, start, H, KVH); q.wait();
+            q.memcpy(o9.data(), out, n * 4).wait();
+            size_t ndiff = 0; for (size_t i = 0; i < n; ++i) ndiff += o0[i] != o9[i];
+            std::printf("2 KB loads vs production: %zu of %zu outputs differ\n", ndiff, n);
+        }
+        std::printf("K loads 2 KB: %.2f ms (%.1f TFLOP/s), K+V loads 2 KB: %.2f ms (%.1f TFLOP/s)\n", k8, flop / k8 / 1e9, k9, flop / k9 / 1e9);
     }
     return 0;
 }

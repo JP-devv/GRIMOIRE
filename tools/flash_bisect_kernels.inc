@@ -34,6 +34,28 @@ sycl::event flash_bisect(sycl::queue& q, sycl::event dep, const sycl_bf16* Qb, i
                 // Key tiles stay block-major: each 16-key chunk is an 8x16
                 // DPAS accumulator, so every register offset is constant.
                 es::simd<float, NB * RB * 16> scores = 0.0f;
+                if constexpr (MODE == 8 || MODE == 9) {
+                    // K tiles of [32 dim pairs][16 keys] (2 KB): one load feeds 4 DPAS
+                    #pragma unroll
+                    for (int d4 = 0; d4 < DT / 4; ++d4) {
+                        es::simd<sycl_bf16, RB * 16> a4[4];
+                        #pragma unroll
+                        for (int j = 0; j < 4; ++j)
+                            a4[j] = es::load_2d<sycl_bf16, 16, RB>(qh, D * 2 - 1, Tp - 1, D * 2 - 1, (d4 * 4 + j) * 16, r0);
+                        #pragma unroll
+                        for (int b = 0; b < NB; ++b) {
+                            es::simd<uint32_t, 512> k4 = es::load_2d<uint32_t, 16, 32>(
+                                kh, Sp * 4 - 1, D / 2 - 1, Sp * 4 - 1, s0 + b * 16, d4 * 32);
+                            #pragma unroll
+                            for (int j = 0; j < 4; ++j)
+                                scores.template select<RB * 16, 1>(b * RB * 16) =
+                                    xmx::dpas<8, RB, float, float, sycl_bf16, sycl_bf16>(
+                                        es::simd<float, RB * 16>(scores.template select<RB * 16, 1>(b * RB * 16)),
+                                        es::simd<uint32_t, 128>(k4.template select<128, 1>(j * 128)).template bit_cast_view<sycl_bf16>().read(),
+                                        a4[j]);
+                        }
+                    }
+                } else
                 #pragma unroll 2
                 for (int dt = 0; dt < DT; ++dt) {
                     es::simd<sycl_bf16, RB * 16> a = es::load_2d<sycl_bf16, 16, RB>(
@@ -106,6 +128,24 @@ sycl::event flash_bisect(sycl::queue& q, sycl::event dep, const sycl_bf16* Qb, i
                     for (int r = 0; r < RB; ++r)
                         o.template select<16, 1>((dt * RB + r) * 16) *= cr[r];
                 es::simd<sycl_bf16, NB * RB * 16> probabilities = scores;
+                if constexpr (MODE == 9) {
+                    // V tiles of [32 key pairs][16 dims] (2 KB): one load feeds 4 DPAS (64 keys)
+                    #pragma unroll
+                    for (int dt = 0; dt < DT; ++dt) {
+                        #pragma unroll
+                        for (int b4 = 0; b4 < NB / 4; ++b4) {
+                            es::simd<uint32_t, 512> v4 = es::load_2d<uint32_t, 16, 32>(
+                                vh, D * 4 - 1, Sp / 2 - 1, D * 4 - 1, dt * 16, (s0 + b4 * 64) / 2);
+                            #pragma unroll
+                            for (int j = 0; j < 4; ++j)
+                                o.template select<RB * 16, 1>(dt * RB * 16) =
+                                    xmx::dpas<8, RB, float, float, sycl_bf16, sycl_bf16>(
+                                        es::simd<float, RB * 16>(o.template select<RB * 16, 1>(dt * RB * 16)),
+                                        es::simd<uint32_t, 128>(v4.template select<128, 1>(j * 128)).template bit_cast_view<sycl_bf16>().read(),
+                                        es::simd<sycl_bf16, RB * 16>(probabilities.template select<RB * 16, 1>((b4 * 4 + j) * RB * 16)));
+                        }
+                    }
+                } else
                 #pragma unroll
                 for (int dt = 0; dt < DT; ++dt) {
                     #pragma unroll
