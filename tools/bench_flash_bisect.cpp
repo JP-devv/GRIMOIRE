@@ -58,5 +58,9 @@ int main(int argc, char** argv) {
         double m0 = RUN(16, 0), m1 = RUN(32, 0);
         std::printf("full at TPW 16: %.2f ms, TPW 32: %.2f ms\n", m0, m1);
     }
+    {
+        double k6 = RUN(8, 6), k7 = RUN(8, 7);
+        std::printf("K tile-major: %.2f ms (%.1f TFLOP/s), K+V tile-major: %.2f ms (%.1f TFLOP/s)\n", k6, flop / k6 / 1e9, k7, flop / k7 / 1e9);
+    }
     return 0;
 }

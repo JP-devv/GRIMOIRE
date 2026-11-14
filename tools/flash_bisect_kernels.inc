@@ -1,5 +1,6 @@
 // tools/flash_bisect_kernels.inc (2026-11-14): src/gemm_fast.cpp's flash_esimd with parts switched off --
-// MODE 0 full | 1 no exp2 | 2 no QK DPAS | 3 no K loads | 4 no PV DPAS | 5 no V loads.  Timing only for 1..5.
+// MODE 0 full | 1 no exp2 | 2 no QK DPAS | 3 no K loads | 4 no PV DPAS | 5 no V loads | 6 K tile-major | 7 K+V tile-major.
+// Timing only for 1..7 (the bench packs nothing in the tile layouts).
 #include "kernels.hpp"
 #include <sycl/ext/intel/esimd.hpp>
 #include <limits>
@@ -41,6 +42,9 @@ sycl::event flash_bisect(sycl::queue& q, sycl::event dep, const sycl_bf16* Qb, i
                     for (int b = 0; b < NB; ++b) {
                         es::simd<uint32_t, 128> keys;
                         if constexpr (MODE == 3) keys = 0x3c003c00u;           // no K loads
+                        else if constexpr (MODE == 6 || MODE == 7)               // K tile-major: [Sp/16][D/2][16 keys] u32
+                            keys = es::block_load<uint32_t, 128>(
+                                kh + (size_t((s0 + b * 16) / 16) * (D / 2) + dt * 8) * 16);
                         else keys = es::load_2d<uint32_t, 16, 8>(
                             kh, Sp * 4 - 1, D / 2 - 1, Sp * 4 - 1, s0 + b * 16, dt * 8);
                         if constexpr (MODE == 2) {                               // no QK matrix work
@@ -108,6 +112,9 @@ sycl::event flash_bisect(sycl::queue& q, sycl::event dep, const sycl_bf16* Qb, i
                     for (int b = 0; b < NB; ++b) {
                         es::simd<uint32_t, 128> values;
                         if constexpr (MODE == 5) values = 0x3c003c00u;         // no V loads
+                        else if constexpr (MODE == 7)                            // V tile-major: [Sp/16][D/16][8 pairs][16 dims] u32
+                            values = es::block_load<uint32_t, 128>(
+                                vh + (size_t((s0 + b * 16) / 16) * (D / 16) + dt) * 128);
                         else values = es::load_2d<uint32_t, 16, 8>(
                             vh, D * 4 - 1, Sp / 2 - 1, D * 4 - 1, dt * 16, (s0 + b * 16) / 2);
                         if constexpr (MODE == 4) {                               // no PV matrix work
