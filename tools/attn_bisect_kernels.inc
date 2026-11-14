@@ -384,6 +384,7 @@ sycl::event bisect_attn(sycl::queue& q, const AttnParams& p, const VerifyGroups&
         const size_t wg = grouped ? size_t(tiles) : (MODE == 8 && nthreads % 16 == 0 ? 16 : 1);
         h.parallel_for(sycl::nd_range<1>(nthreads, wg), [=](sycl::nd_item<1> it) SYCL_ESIMD_KERNEL {
             constexpr float NINF = -std::numeric_limits<float>::infinity();
+            if constexpr (MODE == 10) es::slm_init<65536>();
             int id = grouped ? int(it.get_group(0)) : int(it.get_global_id(0));
             const int part = id % smax; id /= smax;
             const int tile = grouped ? int(it.get_local_id(0)) : id % tiles;
@@ -393,13 +394,14 @@ sycl::event bisect_attn(sycl::queue& q, const AttnParams& p, const VerifyGroups&
             const int row0 = vg.row0[grp], nrows = vg.nrows[grp];
             const int nr = nrows * G;
             const int j0 = tile * RB;
-            if (j0 >= nr) return;
+            if constexpr (MODE != 10) { if (j0 >= nr) return; }
             const int len_max = d_lens[row0 + nrows - 1];
             int nsp = (len_max + kMinKeysPerSplit - 1) / kMinKeysPerSplit;
             if (nsp > smax) nsp = smax;
             if (nsp < 1) nsp = 1;
             int per = (len_max + nsp - 1) / nsp;
-            per = (per + (MODE == 9 ? 64 : NK) - 1) / (MODE == 9 ? 64 : NK) * (MODE == 9 ? 64 : NK);
+            constexpr int PR_ = (MODE == 9 || MODE == 10) ? 64 : NK;
+            per = (per + PR_ - 1) / PR_ * PR_;
             const int s_beg = part * per;
             const int s_end = s_beg + per < len_max ? s_beg + per : len_max;
 
@@ -452,6 +454,114 @@ sycl::event bisect_attn(sycl::queue& q, const AttnParams& p, const VerifyGroups&
             es::simd<float, RB * HD> o = 0.0f;               // DT tiles of [RB][16]
             es::simd<float, RB> m = NINF, l = 0.0f;
             const es::simd<int, NK> col(0, 1);
+            if constexpr (MODE == 10) {
+                // A 64-key block per step, staged once per work-group in SLM as fp16 DPAS B operands:
+                // K pieces (sub, dt) = u32[8 dim pairs][16 keys], V pieces (sub, dt) = u32[8 key pairs][16 dims],
+                // 512 bytes each, 4 subs x 16 dt x 2 = 64 KB.  The work-group's threads fill it together (full
+                // 64-byte K lines, each byte converted once), then each computes its own 8 query rows.
+                constexpr int KB = 64, NS = KB / NK;
+                const int T = int(it.get_local_range(0)), lt = int(it.get_local_id(0));
+                const bool live_tile = j0 < nr;
+                for (int s0 = s_beg; s0 < s_end; s0 += KB) {
+                    // ---- fill: 16 K pieces (one per dt: [16 dims][64 keys]) + 4 V pieces (one per sub: [16 keys][256 dims])
+                    for (int pc = lt; pc < 20; pc += T) {
+                        if (pc < 16) {
+                            const int dt = pc;
+                            es::simd<uint32_t, 256> kr = es::load_2d<uint32_t, 16, 16>(kh32, KW, HD - 1, KW, s0 / 4, 16 * dt);
+                            es::simd<uint8_t, 1024> kb = kr.template bit_cast_view<uint8_t>();
+                            #pragma unroll
+                            for (int ns = 0; ns < NS; ++ns) {
+                                es::simd<uint32_t, 128> b;
+                                #pragma unroll
+                                for (int pr = 0; pr < 8; ++pr) {
+                                    es::simd<uint32_t, 16> lo = e4m3_h16<16>(kb.template select<16, 1>((2 * pr) * 64 + 16 * ns));
+                                    es::simd<uint32_t, 16> hi = e4m3_h16<16>(kb.template select<16, 1>((2 * pr + 1) * 64 + 16 * ns));
+                                    b.template select<16, 1>(16 * pr) = lo | (hi << 16);
+                                }
+                                es::slm_block_store<uint32_t, 128>(uint32_t(((ns * 16 + dt) * 128) * 4), b);
+                            }
+                        } else {
+                            const int ns = pc - 16;
+                            #pragma unroll
+                            for (int vc = 0; vc < 4; ++vc) {
+                                es::simd<uint32_t, 256> vr = es::load_2d<uint32_t, 16, 16>(
+                                    vh32, HD - 1, VH, HD - 1, 16 * vc, s0 + NK * ns);
+                                es::simd<uint8_t, 1024> vb = vr.template bit_cast_view<uint8_t>();
+                                #pragma unroll
+                                for (int w = 0; w < 4; ++w) {
+                                    es::simd<uint32_t, 128> b;
+                                    #pragma unroll
+                                    for (int pr = 0; pr < 8; ++pr) {
+                                        es::simd<uint32_t, 16> lo = e4m3_h16<16>(vb.template select<16, 1>((2 * pr) * 64 + 16 * w));
+                                        es::simd<uint32_t, 16> hi = e4m3_h16<16>(vb.template select<16, 1>((2 * pr + 1) * 64 + 16 * w));
+                                        b.template select<16, 1>(16 * pr) = lo | (hi << 16);
+                                    }
+                                    const int dt = 4 * vc + w;
+                                    es::slm_block_store<uint32_t, 128>(uint32_t((32768 + (ns * 16 + dt) * 512)), b);
+                                }
+                            }
+                        }
+                    }
+                    es::barrier();
+                    if (live_tile) {
+                        #pragma unroll
+                        for (int ns = 0; ns < NS; ++ns) {
+                            const int k0 = s0 + NK * ns;
+                            es::simd<float, RB * NK> sc = 0.0f;
+                            #pragma unroll
+                            for (int dt = 0; dt < DT; ++dt) {
+                                es::simd<uint32_t, 128> b = es::slm_block_load<uint32_t, 128>(uint32_t(((ns * 16 + dt) * 128) * 4));
+                                sc = xmx::dpas<8, RB, float, float, fp16, fp16>(
+                                    sc, b.template bit_cast_view<fp16>().read(),
+                                    es::simd<fp16, RB * 16>(qa.template select<RB * 16, 1>(dt * RB * 16)));
+                            }
+                            #pragma unroll
+                            for (int i = 0; i < RB; ++i) {
+                                const int li = lim[i] < s_end ? lim[i] : s_end;
+                                es::simd<float, NK> v = sc.template select<NK, 1>(NK * i);
+                                v.merge(es::simd<float, NK>(NINF), col + k0 >= li);
+                                sc.template select<NK, 1>(NK * i) = v;
+                            }
+                            es::simd<float, RB> bm;
+                            #pragma unroll
+                            for (int i = 0; i < RB; ++i)
+                                bm[i] = es::hmax<float>(es::simd<float, NK>(sc.template select<NK, 1>(NK * i)));
+                            es::simd<float, RB> mn = es::max(m, bm);
+                            es::simd<float, RB> ms = mn;
+                            ms.merge(es::simd<float, RB>(0.0f), mn == NINF);
+                            es::simd<float, RB> corr = es::exp2(m - ms);
+                            es::simd<float, RB> rs;
+                            #pragma unroll
+                            for (int i = 0; i < RB; ++i) {
+                                const float msi = ms[i];
+                                es::simd<float, NK> pv = es::exp2(es::simd<float, NK>(sc.template select<NK, 1>(NK * i)) - msi);
+                                sc.template select<NK, 1>(NK * i) = pv;
+                                rs[i] = es::reduce<float>(pv, std::plus<>());
+                            }
+                            l = l * corr + rs;
+                            m = mn;
+                            float cr[RB];
+                            #pragma unroll
+                            for (int i = 0; i < RB; ++i) cr[i] = corr[i];
+                            #pragma unroll
+                            for (int dt = 0; dt < DT; ++dt)
+                                #pragma unroll
+                                for (int i = 0; i < RB; ++i)
+                                    o.template select<16, 1>((dt * RB + i) * 16) *= cr[i];
+                            const es::simd<fp16, RB * NK> pa = sc;
+                            #pragma unroll
+                            for (int dt = 0; dt < DT; ++dt) {
+                                es::simd<uint32_t, 128> b = es::slm_block_load<uint32_t, 128>(uint32_t(32768 + (ns * 16 + dt) * 512));
+                                o.template select<RB * 16, 1>(dt * RB * 16) = xmx::dpas<8, RB, float, float, fp16, fp16>(
+                                    es::simd<float, RB * 16>(o.template select<RB * 16, 1>(dt * RB * 16)),
+                                    b.template bit_cast_view<fp16>().read(), pa);
+                            }
+                        }
+                    }
+                    es::barrier();
+                }
+                if (!live_tile) return;
+            } else
             if constexpr (MODE == 9) {
                 // 64 keys a step: every K cache line ([dim][seq], 64 bytes = 64 keys) is read whole, once.
                 constexpr int KB = 64, NS = KB / NK;

@@ -94,6 +94,8 @@ int main(int argc, char** argv) {
             const double kmaj = timeit([&] { bisect_attn<7>(q, base, vg, slot_bytes, dlens, smax, {}); });
             const double wg16 = timeit([&] { bisect_attn<8>(q, base, vg, slot_bytes, dlens, smax, {}); });
             const double k64 = timeit([&] { bisect_attn<9>(q, base, vg, slot_bytes, dlens, smax, {}); });
+            const double slm = timeit([&] { bisect_attn<10>(q, base, vg, slot_bytes, dlens, smax, {}); });
+
             // correctness of the 64-key steps: merged output against the production kernel's
             const size_t nout = size_t(c.groups) * c.rows * H * HD;
             std::vector<float> o0(nout), o9(nout);
@@ -106,9 +108,18 @@ int main(int argc, char** argv) {
             double md = 0, mx = 0;
             for (size_t i = 0; i < nout; ++i) { md = std::max(md, double(std::fabs(o0[i] - o9[i]))); mx = std::max(mx, double(std::fabs(o0[i]))); }
             std::printf("    64-key vs production: max |diff| %.3g of max %.3g\n", md, mx);
+            {
+                std::vector<float> o10(nout);
+                bisect_attn<10>(q, base, vg, slot_bytes, dlens, smax, {});
+                launch_verify_merge(q, base, c.groups * c.rows, smax);
+                q.memcpy(o10.data(), dout, nout * 4).wait();
+                double md2 = 0;
+                for (size_t i = 0; i < nout; ++i) md2 = std::max(md2, double(std::fabs(o0[i] - o10[i])));
+                std::printf("    SLM-staged vs production: max |diff| %.3g\n", md2);
+            }
             const double bytes = double(c.groups) * L * KVH * HD * 2;
-            std::printf("%7d %2dx%-2d | %9.1f %9.1f %9.1f %9.1f | %8.1f | %d | prefetch 1/4/8: %9.1f %9.1f %9.1f | K key-major: %9.1f | WG16: %9.1f | 64-key steps: %9.1f\n", L,
-                        c.groups, c.rows, us[0], us[1], us[2], us[3], bytes / us[0] / 1e3, smax, pf[0], pf[1], pf[2], kmaj, wg16, k64);
+            std::printf("%7d %2dx%-2d | %9.1f %9.1f %9.1f %9.1f | %8.1f | %d | prefetch 1/4/8: %9.1f %9.1f %9.1f | K key-major: %9.1f | WG16: %9.1f | 64-key steps: %9.1f | SLM 64-key: %9.1f\n", L,
+                        c.groups, c.rows, us[0], us[1], us[2], us[3], bytes / us[0] / 1e3, smax, pf[0], pf[1], pf[2], kmaj, wg16, k64, slm);
         }
     return 0;
 }
