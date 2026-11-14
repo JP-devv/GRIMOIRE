@@ -743,13 +743,17 @@ bool flash_use_esimd(int width, int heads, int kv_heads) {
 // round-tripped S and P through SLM and kept corr[] in private memory (IGC
 // ISA dump).  All building blocks checked on the B70 by tools/esimd_probe.cpp.
 // ---------------------------------------------------------------------
-template <int D, int BK>
+// TPW threads (8 query rows each) per work-group read the same K / V blocks together, so a block comes from
+// memory once per TPW * 8 query rows.  2026-11-14: TPW a template parameter (GRIMOIRE_FLASH_TPW = 8 | 16 | 32) --
+// vLLM-XPU's head-256 prefill shares each K/V tile across 256 query rows (32 sub-groups); at 8 x 8 = 64 rows a 61K
+// prompt spent 22.8 s of its 51 s here (unitrace), ~33 TFLOP/s: the long-context K/V re-reads.
+template <int D, int BK, int TPW = 8>
 sycl::event flash_esimd(sycl::queue& q, sycl::event dep, const sycl_bf16* Qb, int Tp,
                         const sycl_bf16* Kp, const sycl_bf16* Vp, int Sp, float* out,
                         int tokens, int start, int H, int KVH) {
     namespace es = sycl::ext::intel::esimd;
     namespace xmx = sycl::ext::intel::esimd::xmx;
-    constexpr int RB = 8, DT = D / 16, TPW = 8, NB = BK / 16;
+    constexpr int RB = 8, DT = D / 16, NB = BK / 16;
     const int qtiles = (tokens + RB * TPW - 1) / (RB * TPW);
     const size_t nthreads = size_t(qtiles) * H * TPW;
     return q.submit([&](sycl::handler& h) {
@@ -933,6 +937,12 @@ sycl::event flash_fast_impl(sycl::queue& q, const float* qv, const uint8_t* kc,
                 bf16_rne(t < tokens ? qv[(size_t(t) * H + hh) * D + d] * qscale : 0.0f);
         });
     });
+    static const int tpw = [] { const char* v = std::getenv("GRIMOIRE_FLASH_TPW"); const int n = v ? std::atoi(v) : 8;
+        return n == 16 || n == 32 ? n : 8; }();
+    if (use_esimd && block == 128 && tpw == 16)
+        return flash_esimd<D, 128, 16>(q, e, Qb, Tp, Kp, Vp, Sp, out, tokens, start, H, KVH);
+    if (use_esimd && block == 128 && tpw == 32)
+        return flash_esimd<D, 128, 32>(q, e, Qb, Tp, Kp, Vp, Sp, out, tokens, start, H, KVH);
     if (use_esimd) {
         if (block == 128) return flash_esimd<D, 128>(q, e, Qb, Tp, Kp, Vp, Sp, out, tokens, start, H, KVH);
         if (block == 64) return flash_esimd<D, 64>(q, e, Qb, Tp, Kp, Vp, Sp, out, tokens, start, H, KVH);
