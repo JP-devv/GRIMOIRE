@@ -469,8 +469,16 @@ sycl::event bisect_attn(sycl::queue& q, const AttnParams& p, const VerifyGroups&
                 es::simd<float, RB * NK> s = 0.0f;
                 #pragma unroll
                 for (int dc = 0; dc < HD / 32; ++dc) {
-                    es::simd<uint32_t, 128> kr = es::load_2d<uint32_t, 4, 32>(
-                        kh32, KW, HD - 1, KW, s0 / 4, 32 * dc);
+                    es::simd<uint32_t, 128> kr;
+                    if constexpr (MODE == 7) {
+                        // TIMING ONLY (wrong numbers): the same 4 KB of K per 16 keys read key-major, contiguous --
+                        // [seq][256 bytes] like V -- instead of 256 dim rows 61 KB apart.
+                        es::simd<uint32_t, 256> kt = es::load_2d<uint32_t, 16, 16>(
+                            kh32, HD - 1, VH, HD - 1, 16 * (dc & 3), s0);
+                        kr = kt.template select<128, 1>(128 * (dc >> 2));
+                    } else {
+                        kr = es::load_2d<uint32_t, 4, 32>(kh32, KW, HD - 1, KW, s0 / 4, 32 * dc);
+                    }
                     es::simd<uint8_t, 512> kb = kr.template bit_cast_view<uint8_t>();
                     #pragma unroll
                     for (int hh = 0; hh < 2; ++hh) {
