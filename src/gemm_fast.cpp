@@ -4266,6 +4266,16 @@ bool int4_smallm_ok(const QuantWeight& w, int M, const void* X, const void* Y) {
 // gemv_decode.cpp (launch_int4_smallm).
 sycl::event launch_int4_smallm_wide(sycl::queue& q, const QuantWeight& w, const sycl_bf16* X,
                                     float* Y, int M, const std::vector<sycl::event>& deps) {
+#ifdef GRIMOIRE_WITH_ONEDNN
+    // 17..32 rows through oneDNN's INT4 weights decompression (onednn_gemm_int4).  MEASURED 2026-11-14,
+    // tools/onednn_u4_probe.cpp vs tools/i4sweep_probe.cpp, one B70, group 128, weights from DRAM, M = 32, us,
+    // int4_smallm_fdq_impl<4> -> oneDNN: gate_up 276 -> 244, down 148 -> 129, dn_qkv 86.5 -> 79.6, z 61.3 -> 39.2,
+    // out/o 71.7 -> 46.2, attn_q 102 -> 86.5, lm_head 2020 -> 1563 (kv 11.0 -> 14.7: N < 2048 stays here).
+    // At 16 rows the own kernel is as fast or faster.  GRIMOIRE_I4_ONEDNN=0 = the own kernel at every M.
+    static const int i4_dnnl_min = [] { const char* e = std::getenv("GRIMOIRE_I4_ONEDNN_MIN");
+        return e && *e ? std::atoi(e) : 17; }();
+    if (M >= i4_dnnl_min && w.N >= 2048 && onednn_int4_ok(q, w, M)) return onednn_gemm_int4(q, w, X, Y, M, deps);
+#endif
     const bool g64 = (1 << w.int4_gshift()) == 64;
     SmallmPlan p = smallm_plan(w.N, w.K);
     // 9..16 rows (2026-11-05): MXFP4's rule (mxfp4_smallm_impl) -- 4 K slices for the wide outputs, 2 for the

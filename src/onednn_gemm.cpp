@@ -297,6 +297,139 @@ sycl::event exec(sycl::queue& q,Ctx& c, const Prim& p, const QuantWeight& w, con
 
 } // namespace
 
+// ---- INT4 (2026-11-14) ------------------------------------------------------------------------
+namespace {
+struct I4T { sycl_bf16* s = nullptr; uint8_t* z = nullptr; bool ok = false; };
+struct I4Prim { dnnl::matmul prim; dnnl::memory::desc src, wei, dst, scr, smd, zmd; };
+
+int i4_group(const QuantWeight& w) { return 1 << w.int4_gshift(); }
+
+bool i4_shape_ok(const QuantWeight& w) {
+    if (w.fmt != Fmt::INT4 || !w.payload || !w.scales || !w.zeros || w.N <= 0 || w.K <= 0) return false;
+    const int g = i4_group(w);
+    return (g == 64 || g == 128) && int64_t(w.row_scales) * g == w.K && w.row_bytes == int64_t(w.K) / 2 &&
+           w.K % 128 == 0;
+}
+
+// caller holds mu()
+const I4T& i4_transposed(sycl::queue& q, const QuantWeight& w) {
+    static std::map<const void*, I4T> all;
+    auto it = all.find(w.scales);
+    if (it != all.end()) return it->second;
+    I4T t;
+    const int N = w.N, RS = w.row_scales;
+    const size_t n = size_t(N) * size_t(RS);
+    t.s = sycl::malloc_device<sycl_bf16>(n, q);
+    t.z = sycl::malloc_device<uint8_t>(n, q);
+    int* bad = sycl::malloc_shared<int>(1, q);
+    if (t.s && t.z && bad) {
+        *bad = 0;
+        const uint16_t* s = static_cast<const uint16_t*>(w.scales);
+        const uint8_t* z = w.zeros;
+        uint16_t* so = reinterpret_cast<uint16_t*>(t.s);
+        uint8_t* zo = t.z;
+        q.parallel_for(sycl::range<2>(size_t(RS), size_t(N)), [=](sycl::id<2> id) {
+            const size_t g = id[0], c = id[1];
+            const uint8_t zz = z[c * RS + g];
+            so[g * N + c] = s[c * RS + g];
+            zo[g * N + c] = zz;
+            if (zz == 0xff) {   // signed s4 group (GPTQ experts): no oneDNN form
+                sycl::atomic_ref<int, sycl::memory_order::relaxed, sycl::memory_scope::device> a(*bad);
+                a.store(1);
+            }
+        }).wait();
+        t.ok = *bad == 0;
+    }
+    if (bad) sycl::free(bad, q);
+    if (!t.ok) {
+        if (t.s) sycl::free(t.s, q);
+        if (t.z) sycl::free(t.z, q);
+        t.s = nullptr; t.z = nullptr;
+    }
+    return all.emplace(w.scales, t).first->second;
+}
+
+const I4Prim& i4_prim(Ctx& c, sycl::queue& q, const QuantWeight& w, int M) {
+    static std::map<std::tuple<int, int, int, int>, I4Prim> prims;
+    const int g = i4_group(w);
+    const auto k = std::make_tuple(M, w.N, w.K, g);
+    auto it = prims.find(k);
+    if (it != prims.end()) return it->second;
+    const auto t0 = std::chrono::steady_clock::now();
+    I4Prim p;
+    p.src = dnnl::memory::desc({M, w.K}, dt::bf16, tag::ab);
+    p.wei = dnnl::memory::desc({w.K, w.N}, dt::u4, tag::ba);
+    p.dst = dnnl::memory::desc({M, w.N}, dt::f32, tag::ab);
+    p.smd = dnnl::memory::desc({w.K / g, w.N}, dt::bf16, tag::ab);
+    p.zmd = dnnl::memory::desc({w.K / g, w.N}, dt::u8, tag::ab);
+    dnnl::primitive_attr attr;
+    attr.set_scratchpad_mode(dnnl::scratchpad_mode::user);
+    attr.set_deterministic(true);
+    attr.set_scales(DNNL_ARG_WEIGHTS, (1 << 0) | (1 << 1), {g, 1}, dt::bf16);
+    attr.set_zero_points(DNNL_ARG_WEIGHTS, (1 << 0) | (1 << 1), {g, 1}, dt::u8);
+    attr.set_fpmath_mode(dnnl::fpmath_mode::bf16, true);
+    dnnl::matmul::primitive_desc pd(c.eng, p.src, p.wei, p.dst, attr);
+    if (std::string(pd.impl_info_str()).find(":ref:") != std::string::npos)
+        throw std::runtime_error("oneDNN INT4: only a reference implementation for this shape");
+    p.scr = pd.scratchpad_desc();
+    p.prim = dnnl::matmul(pd);
+    grow(q, c.scratch, c.scratch_cap, p.scr.get_size(), "scratchpad");
+    static const bool verbose = std::getenv("GRIMOIRE_ONEDNN_VERBOSE") != nullptr;
+    if (verbose)
+        std::fprintf(stderr, "  oneDNN matmul int4 g%d M=%d N=%d K=%d: %s, scratchpad %zu B, created in %.1f ms\n",
+                     g, M, w.N, w.K, pd.impl_info_str(), p.scr.get_size(),
+                     std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count());
+    return prims.emplace(k, std::move(p)).first->second;
+}
+} // namespace
+
+bool onednn_int4_ok(sycl::queue& q, const QuantWeight& w, int M) {
+    static const bool on = [] { const char* v = std::getenv("GRIMOIRE_I4_ONEDNN"); return !(v && *v == '0'); }();
+    if (!on || !enabled() || M <= 0 || !i4_shape_ok(w)) return false;
+    std::lock_guard<std::mutex> lk(mu());
+    // first use of the weight: its transposed scales / zeros are built here, so a weight oneDNN cannot
+    // take (signed s4 groups, no memory) is known before anything is enqueued for it
+    return i4_transposed(q, w).ok;
+}
+
+sycl::event onednn_gemm_int4(sycl::queue& q, const QuantWeight& w, const sycl_bf16* x, float* y, int M,
+                             const std::vector<sycl::event>& deps) {
+    using namespace dnnl::sycl_interop;
+    std::lock_guard<std::mutex> lk(mu());
+    Ctx& c = ctx_for(q);
+    const I4T& t = i4_transposed(q, w);
+    if (!t.ok) throw std::runtime_error("onednn_gemm_int4: weight not supported (check onednn_int4_ok first)");
+    // One primitive per weight shape at 32 rows: 17..31 rows run it through staging rows (the tail's rows in,
+    // its rows out), so a verify width never seen before builds nothing -- a oneDNN JIT build costs ~0.1 s.
+    const int T = M <= 32 ? 32 : M;
+    const I4Prim& p = i4_prim(c, q, w, T);
+    const size_t K = size_t(w.K), N = size_t(w.N);
+    const sycl_bf16* xin = x;
+    float* yout = y;
+    std::vector<sycl::event> ready = deps;
+    if (T != M) {
+        if (size_t(T) * K > c.xs_cap) {
+            grow(q, c.xs, c.xs_cap, size_t(T) * K, "staging");
+            q.memset(c.xs, 0, c.xs_cap * sizeof(sycl_bf16)).wait();
+        }
+        grow(q, c.ys, c.ys_cap, size_t(T) * N, "staging");
+        ready = {q.memcpy(c.xs, x, size_t(M) * K * sizeof(sycl_bf16), deps)};
+        xin = c.xs;
+        yout = c.ys;
+    }
+    std::unordered_map<int, dnnl::memory> args;
+    args[DNNL_ARG_SRC] = make_memory(p.src, c.eng, memory_kind::usm, const_cast<sycl_bf16*>(xin));
+    args[DNNL_ARG_WEIGHTS] = make_memory(p.wei, c.eng, memory_kind::usm, const_cast<uint8_t*>(w.payload));
+    args[DNNL_ARG_DST] = make_memory(p.dst, c.eng, memory_kind::usm, yout);
+    args[DNNL_ARG_ATTR_SCALES | DNNL_ARG_WEIGHTS] = make_memory(p.smd, c.eng, memory_kind::usm, t.s);
+    args[DNNL_ARG_ATTR_ZERO_POINTS | DNNL_ARG_WEIGHTS] = make_memory(p.zmd, c.eng, memory_kind::usm, t.z);
+    if (p.scr.get_size())
+        args[DNNL_ARG_SCRATCHPAD] = make_memory(p.scr, c.eng, memory_kind::usm, c.scratch);
+    sycl::event e = execute(p.prim, c.strm, args, ready);
+    if (T != M) e = q.memcpy(y, c.ys, size_t(M) * N * sizeof(float), {e});
+    return e;
+}
+
 bool onednn_gemm_ok(const QuantWeight& w, int M) {
     if (!enabled() || M <= 0 || !w.payload) return false;
     if (w.fmt == Fmt::FP8_E4M3 || w.fmt == Fmt::INT8)

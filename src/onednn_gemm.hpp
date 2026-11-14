@@ -47,6 +47,15 @@ sycl::event onednn_gemm(sycl::queue& q, const QuantWeight& w, const sycl_bf16* x
 // INT4 prompts as int8 x int8 (gemm_fast.cpp i4a8): w = int8 [N][K] whose rows are already in the
 // 128-point Hadamard domain (hadamard128.hpp), one f32 scale per row with the 1/128 folded in;
 // x is rotated the same way and quantized with one int8 scale per row here.
+// INT4 weights through oneDNN's weights decompression (2026-11-14): u4 nibbles [N][K/2] as given, the bf16
+// scales and u8 zeros copied once per weight into oneDNN's [K/G][N] order (built on first use, ~3 bytes per 128
+// weights; a weight with signed-s4 groups -- zero 0xff -- is declined).  For the 17..64-row verify GEMMs, where
+// GRIMOIRE's own INT4 small-M kernel runs at 230-340 GB/s.  Weights are rounded to bf16 after the scale (as the
+// INT4 prompt GEMM does), so not bit-identical to the small-M kernel.
+bool onednn_int4_ok(sycl::queue& q, const QuantWeight& w, int M);
+sycl::event onednn_gemm_int4(sycl::queue& q, const QuantWeight& w, const sycl_bf16* x, float* y, int M,
+                             const std::vector<sycl::event>& deps);
+
 sycl::event onednn_gemm_a8rot(sycl::queue& q, const QuantWeight& w, const sycl_bf16* x, float* y,
                               int M, bool accumulate, const std::vector<sycl::event>& deps);
 

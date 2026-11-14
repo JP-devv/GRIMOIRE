@@ -68,7 +68,7 @@ int main(int argc, char** argv) {
             w.fmt = Fmt::INT4; w.N = N; w.K = K; w.payload = p; w.scales = s; w.zeros = z;
             w.row_bytes = K / 2; w.row_scales = rsc;
         }
-        constexpr int MR = 16;
+        constexpr int MR = 32;   // 2026-11-14: 17..32 rows too (copy drafts verify 32 rows)
         std::vector<float> hx(size_t(MR) * K);
         std::vector<sycl_bf16> hxb(hx.size());
         for (size_t i = 0; i < hx.size(); ++i) {
@@ -102,8 +102,9 @@ int main(int argc, char** argv) {
         for (int m = 0; m < MR; ++m) launch_gemv(q, ws[0], x + size_t(m) * K, yr + size_t(m) * N);
         q.wait();
         launch_int4_smallm(q, ws[0], xb, y, 8); check("engine M=8", 8);
-        launch_int4_smallm(q, ws[0], xb, y, MR); check("engine M=16", MR);
-        for (int M : {7, 16}) {
+        launch_int4_smallm(q, ws[0], xb, y, 16); check("engine M=16", 16);
+        launch_int4_smallm(q, ws[0], xb, y, MR); check("engine M=32", MR);
+        for (int M : {7, 16, 24, 32}) {
             char nm[64];
             std::snprintf(nm, sizeof nm, "engine M=%d", M);
             timeit(nm, [&](const QuantWeight& w) { launch_int4_smallm(q, w, xb, y, M); });
