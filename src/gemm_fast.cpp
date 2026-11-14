@@ -3479,6 +3479,36 @@ sycl::event gemm_fast_run(sycl::queue& q, const QuantWeight& w, const sycl_bf16*
     };
     if (timed) q.wait();             // earlier work must not count here
     auto t0 = now();
+#ifdef GRIMOIRE_WITH_ONEDNN
+    // INT4 prompts past 16 rows through oneDNN's weights decompression (2026-11-14): no bf16 copy of the
+    // weight (the dequantize pass, ~160 ms a prompt, and its 2 bytes-a-weight scratch, which the prefill chunk
+    // budget pays for) -- the same bf16-rounded weights the bf16 GEMM below multiplies.  GRIMOIRE_I4_ONEDNN_PROMPT=0
+    // = the paths below.  GRIMOIRE_I4A8=1 (opt-in) keeps priority.
+    static const bool i4_dnnl_prompt = [] { const char* e = std::getenv("GRIMOIRE_I4_ONEDNN_PROMPT");
+        return !(e && *e == '0'); }();
+    if (i4_dnnl_prompt && w.fmt == Fmt::INT4 && M > 16 && w.N >= 2048 && !i4a8_ok(w, M) &&
+        onednn_int4_ok(q, w, M)) {
+        sycl::event e;
+        if constexpr (EPI == 1) {
+            // SwiGLU: gate|up rows into f32, 512 rows at a time, then the epilogue's rounding
+            Scratch& s = scratch_for(q);
+            constexpr int PR = 512;
+            float* y = grow(q, s.y8, s.y8_cap, size_t(std::min(M, PR)) * N);
+            if (!y) throw std::runtime_error("i4 oneDNN prompt: scratch allocation failed");
+            std::vector<sycl::event> d = deps;
+            for (int r0 = 0; r0 < M; r0 += PR) {
+                const int rows = std::min(PR, M - r0);
+                e = onednn_gemm_int4(q, w, x + size_t(r0) * K, y, rows, false, d);
+                e = swiglu_rows(q, y, static_cast<sycl_bf16*>(out) + size_t(r0) * (N / 2), rows, N / 2, {e});
+                d = {e};
+            }
+        } else {
+            e = onednn_gemm_int4(q, w, x, static_cast<float*>(out), M, EPI == 2, deps);
+        }
+        if (timed) { lap(stage_times().main, t0); ++stage_times().calls; }
+        return e;
+    }
+#endif
     // short INT4 prompts: the verify kernel in 32-row pieces (GRIMOIRE_I4_PIECES_MAX, see above)
     if (i4_pieces_ok(w, M, x, out)) {
         sycl::event e = i4_pieces_run<EPI>(q, w, x, out, M, deps);
@@ -4274,7 +4304,7 @@ sycl::event launch_int4_smallm_wide(sycl::queue& q, const QuantWeight& w, const 
     // At 16 rows the own kernel is as fast or faster.  GRIMOIRE_I4_ONEDNN=0 = the own kernel at every M.
     static const int i4_dnnl_min = [] { const char* e = std::getenv("GRIMOIRE_I4_ONEDNN_MIN");
         return e && *e ? std::atoi(e) : 17; }();
-    if (M >= i4_dnnl_min && w.N >= 2048 && onednn_int4_ok(q, w, M)) return onednn_gemm_int4(q, w, X, Y, M, deps);
+    if (M >= i4_dnnl_min && w.N >= 2048 && onednn_int4_ok(q, w, M)) return onednn_gemm_int4(q, w, X, Y, M, false, deps);
 #endif
     const bool g64 = (1 << w.int4_gshift()) == 64;
     SmallmPlan p = smallm_plan(w.N, w.K);

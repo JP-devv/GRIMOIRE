@@ -54,7 +54,7 @@ sycl::event onednn_gemm(sycl::queue& q, const QuantWeight& w, const sycl_bf16* x
 // INT4 prompt GEMM does), so not bit-identical to the small-M kernel.
 bool onednn_int4_ok(sycl::queue& q, const QuantWeight& w, int M);
 sycl::event onednn_gemm_int4(sycl::queue& q, const QuantWeight& w, const sycl_bf16* x, float* y, int M,
-                             const std::vector<sycl::event>& deps);
+                             bool accumulate, const std::vector<sycl::event>& deps);
 
 sycl::event onednn_gemm_a8rot(sycl::queue& q, const QuantWeight& w, const sycl_bf16* x, float* y,
                               int M, bool accumulate, const std::vector<sycl::event>& deps);

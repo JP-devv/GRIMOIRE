@@ -349,10 +349,10 @@ const I4T& i4_transposed(sycl::queue& q, const QuantWeight& w) {
     return all.emplace(w.scales, t).first->second;
 }
 
-const I4Prim& i4_prim(Ctx& c, sycl::queue& q, const QuantWeight& w, int M) {
-    static std::map<std::tuple<int, int, int, int>, I4Prim> prims;
+const I4Prim& i4_prim(Ctx& c, sycl::queue& q, const QuantWeight& w, int M, bool acc) {
+    static std::map<std::tuple<int, int, int, int, int>, I4Prim> prims;
     const int g = i4_group(w);
-    const auto k = std::make_tuple(M, w.N, w.K, g);
+    const auto k = std::make_tuple(M, w.N, w.K, g, acc ? 1 : 0);
     auto it = prims.find(k);
     if (it != prims.end()) return it->second;
     const auto t0 = std::chrono::steady_clock::now();
@@ -368,6 +368,11 @@ const I4Prim& i4_prim(Ctx& c, sycl::queue& q, const QuantWeight& w, int M) {
     attr.set_scales(DNNL_ARG_WEIGHTS, (1 << 0) | (1 << 1), {g, 1}, dt::bf16);
     attr.set_zero_points(DNNL_ARG_WEIGHTS, (1 << 0) | (1 << 1), {g, 1}, dt::u8);
     attr.set_fpmath_mode(dnnl::fpmath_mode::bf16, true);
+    if (acc) {
+        dnnl::post_ops po;
+        po.append_sum(1.0f);
+        attr.set_post_ops(po);
+    }
     dnnl::matmul::primitive_desc pd(c.eng, p.src, p.wei, p.dst, attr);
     if (std::string(pd.impl_info_str()).find(":ref:") != std::string::npos)
         throw std::runtime_error("oneDNN INT4: only a reference implementation for this shape");
@@ -376,8 +381,8 @@ const I4Prim& i4_prim(Ctx& c, sycl::queue& q, const QuantWeight& w, int M) {
     grow(q, c.scratch, c.scratch_cap, p.scr.get_size(), "scratchpad");
     static const bool verbose = std::getenv("GRIMOIRE_ONEDNN_VERBOSE") != nullptr;
     if (verbose)
-        std::fprintf(stderr, "  oneDNN matmul int4 g%d M=%d N=%d K=%d: %s, scratchpad %zu B, created in %.1f ms\n",
-                     g, M, w.N, w.K, pd.impl_info_str(), p.scr.get_size(),
+        std::fprintf(stderr, "  oneDNN matmul int4 g%d M=%d N=%d K=%d%s: %s, scratchpad %zu B, created in %.1f ms\n",
+                     g, M, w.N, w.K, acc ? " (+=)" : "", pd.impl_info_str(), p.scr.get_size(),
                      std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count());
     return prims.emplace(k, std::move(p)).first->second;
 }
@@ -393,40 +398,50 @@ bool onednn_int4_ok(sycl::queue& q, const QuantWeight& w, int M) {
 }
 
 sycl::event onednn_gemm_int4(sycl::queue& q, const QuantWeight& w, const sycl_bf16* x, float* y, int M,
-                             const std::vector<sycl::event>& deps) {
+                             bool accumulate, const std::vector<sycl::event>& deps) {
     using namespace dnnl::sycl_interop;
     std::lock_guard<std::mutex> lk(mu());
     Ctx& c = ctx_for(q);
     const I4T& t = i4_transposed(q, w);
     if (!t.ok) throw std::runtime_error("onednn_gemm_int4: weight not supported (check onednn_int4_ok first)");
-    // One primitive per weight shape at 32 rows: 17..31 rows run it through staging rows (the tail's rows in,
-    // its rows out), so a verify width never seen before builds nothing -- a oneDNN JIT build costs ~0.1 s.
-    const int T = M <= 32 ? 32 : M;
-    const I4Prim& p = i4_prim(c, q, w, T);
     const size_t K = size_t(w.K), N = size_t(w.N);
-    const sycl_bf16* xin = x;
-    float* yout = y;
-    std::vector<sycl::event> ready = deps;
-    if (T != M) {
+    auto run = [&](const I4Prim& p, const sycl_bf16* xin, float* yout, const std::vector<sycl::event>& d) {
+        std::unordered_map<int, dnnl::memory> args;
+        args[DNNL_ARG_SRC] = make_memory(p.src, c.eng, memory_kind::usm, const_cast<sycl_bf16*>(xin));
+        args[DNNL_ARG_WEIGHTS] = make_memory(p.wei, c.eng, memory_kind::usm, const_cast<uint8_t*>(w.payload));
+        args[DNNL_ARG_DST] = make_memory(p.dst, c.eng, memory_kind::usm, yout);
+        args[DNNL_ARG_ATTR_SCALES | DNNL_ARG_WEIGHTS] = make_memory(p.smd, c.eng, memory_kind::usm, t.s);
+        args[DNNL_ARG_ATTR_ZERO_POINTS | DNNL_ARG_WEIGHTS] = make_memory(p.zmd, c.eng, memory_kind::usm, t.z);
+        if (p.scr.get_size())
+            args[DNNL_ARG_SCRATCHPAD] = make_memory(p.scr, c.eng, memory_kind::usm, c.scratch);
+        return execute(p.prim, c.strm, args, d);
+    };
+    // Fixed pieces of 1024 / 512 / 256 / 128 / 64 / 32 rows and a tail of < 32 through 32 staging rows (the
+    // tail's rows in -- and its output rows when accumulating -- a 32-row primitive, its rows out), so a row count
+    // never seen before builds nothing: a oneDNN JIT build costs up to ~0.1 s.
+    static constexpr int kI4Pieces[] = {1024, 512, 256, 128, 64, 32};
+    std::vector<sycl::event> d = deps;
+    sycl::event e;
+    int r0 = 0;
+    for (const int P : kI4Pieces)
+        while (M - r0 >= P) {
+            e = run(i4_prim(c, q, w, P, accumulate), x + size_t(r0) * K, y + size_t(r0) * N, d);
+            d = {e};
+            r0 += P;
+        }
+    const int rem = M - r0;
+    if (rem > 0) {
+        constexpr int T = 32;
         if (size_t(T) * K > c.xs_cap) {
             grow(q, c.xs, c.xs_cap, size_t(T) * K, "staging");
             q.memset(c.xs, 0, c.xs_cap * sizeof(sycl_bf16)).wait();
         }
         grow(q, c.ys, c.ys_cap, size_t(T) * N, "staging");
-        ready = {q.memcpy(c.xs, x, size_t(M) * K * sizeof(sycl_bf16), deps)};
-        xin = c.xs;
-        yout = c.ys;
+        e = q.memcpy(c.xs, x + size_t(r0) * K, size_t(rem) * K * sizeof(sycl_bf16), d);
+        if (accumulate) e = q.memcpy(c.ys, y + size_t(r0) * N, size_t(rem) * N * sizeof(float), {e});
+        e = run(i4_prim(c, q, w, T, accumulate), c.xs, c.ys, {e});
+        e = q.memcpy(y + size_t(r0) * N, c.ys, size_t(rem) * N * sizeof(float), {e});
     }
-    std::unordered_map<int, dnnl::memory> args;
-    args[DNNL_ARG_SRC] = make_memory(p.src, c.eng, memory_kind::usm, const_cast<sycl_bf16*>(xin));
-    args[DNNL_ARG_WEIGHTS] = make_memory(p.wei, c.eng, memory_kind::usm, const_cast<uint8_t*>(w.payload));
-    args[DNNL_ARG_DST] = make_memory(p.dst, c.eng, memory_kind::usm, yout);
-    args[DNNL_ARG_ATTR_SCALES | DNNL_ARG_WEIGHTS] = make_memory(p.smd, c.eng, memory_kind::usm, t.s);
-    args[DNNL_ARG_ATTR_ZERO_POINTS | DNNL_ARG_WEIGHTS] = make_memory(p.zmd, c.eng, memory_kind::usm, t.z);
-    if (p.scr.get_size())
-        args[DNNL_ARG_SCRATCHPAD] = make_memory(p.scr, c.eng, memory_kind::usm, c.scratch);
-    sycl::event e = execute(p.prim, c.strm, args, ready);
-    if (T != M) e = q.memcpy(y, c.ys, size_t(M) * N * sizeof(float), {e});
     return e;
 }
 
