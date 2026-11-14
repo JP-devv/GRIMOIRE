@@ -485,7 +485,8 @@ sycl::event bisect_attn(sycl::queue& q, const AttnParams& p, const VerifyGroups&
                             es::simd<float, NK> v = s.template select<NK, 1>((ns * RB + i) * NK);
                             v.merge(es::simd<float, NK>(NINF), col + (s0 + NK * ns) >= li);
                             s.template select<NK, 1>((ns * RB + i) * NK) = v;
-                            bm[i] = sycl::fmax(bm[i], es::hmax<float>(v));
+                            const float hv = es::hmax<float>(v);
+                            bm[i] = bm[i] > hv ? float(bm[i]) : hv;
                         }
                     es::simd<float, RB> mn = es::max(m, bm);
                     es::simd<float, RB> ms = mn;
