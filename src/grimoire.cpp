@@ -4325,6 +4325,14 @@ struct Grimoire {
     // mtp_warm for n consecutive positions of the BOUND slot (hidden rows [n][H], tokens[n]): the fc and
     // the K / V projections as one small-M GEMM each instead of n GEMVs.  Falls back to the loop.
     void mtp_warm_rows(int n, const float* hidden, const int32_t* tokens, int position);
+    // GRIMOIRE_MTP_WINDOW=<tokens> (2026-11-14, 0 = off): the draft head attends only to its last ~W cached
+    // positions (start rounded down to 64 for the 2-D block loads).  Long contexts: one draft row over 61K
+    // keys is ~2 ms of attention, six a step.  Drafts change, verified tokens do not.  Returns the first key.
+    int mtp_window_start(int position) const {
+        static const int w = [] { const char* e = std::getenv("GRIMOIRE_MTP_WINDOW"); return e && *e ? std::atoi(e) : 0; }();
+        if (w <= 0 || position + 1 <= w) return 0;
+        return (position + 1 - w) / 64 * 64;
+    }
     bool dflash_draft(int bonus_token, int position,
                       std::vector<int32_t>& draft_tokens,
                       bool context_only = false);
@@ -15034,9 +15042,11 @@ int Grimoire::mtp_draft(int next_token, int position, bool from_mtp_hidden) {
                          s.d_pos, d.kv_heads, d.head_dim, max_seq, none);
 
     AttnParams ap{};
-    ap.q = qvec; ap.k_cache = d.k_cache; ap.v_cache = d.v_cache;
+    const int w0 = mtp_window_start(position);
+    ap.q = qvec; ap.k_cache = d.k_cache + w0; ap.v_cache = d.v_cache + size_t(w0) * d.head_dim;
     ap.out = s.attn_out;
-    ap.seq_len = position + 1; ap.seq_cap = max_seq;
+    ap.seq_len = position + 1 - w0; ap.seq_cap = max_seq;
+    if (w0) { int32_t* ds = s.d_seq_len; const int len = position + 1 - w0; q.single_task([=] { *ds = len; }); }
     ap.head_dim = d.head_dim; ap.num_heads = cfg.n_heads;
     ap.num_kv_heads = d.kv_heads;
     ap.softmax_scale = cfg.attn_softmax_scale(d.head_dim);
@@ -15052,7 +15062,7 @@ int Grimoire::mtp_draft(int next_token, int position, bool from_mtp_hidden) {
     if (draft_dpas && verify_dpas_ok(ap)) {
         VerifyGroups vg{};
         vg.n = 1; vg.row0[0] = 0; vg.nrows[0] = 1; vg.slot[0] = 0;
-        const int smax = verify_dpas_splits(ap, vg, position + 1);
+        const int smax = verify_dpas_splits(ap, vg, position + 1 - w0);
         launch_verify_attn_dpas(q, ap, vg, 0, s.d_seq_len, smax);
         launch_verify_merge(q, ap, 1, smax);
     } else {
@@ -15315,9 +15325,11 @@ bool Grimoire::mtp_draft_rows(int n, const int32_t* tok_in, const int* slot, con
         }
         launch_kv_append_dev(q, krow, vrow, kc, vc, s.d_pos, d.kv_heads, HD, max_seq, none);
         AttnParams ap{};
-        ap.q = qvec; ap.k_cache = kc; ap.v_cache = vc;
+        const int w0 = mtp_window_start(p);
+        ap.q = qvec; ap.k_cache = kc + w0; ap.v_cache = vc + size_t(w0) * HD;
         ap.out = row(mtpr.att, r, AD);
-        ap.seq_len = p + 1; ap.seq_cap = max_seq;
+        ap.seq_len = p + 1 - w0; ap.seq_cap = max_seq;
+        if (w0) { int32_t* ds = s.d_seq_len; const int len = p + 1 - w0; q.single_task([=] { *ds = len; }); }
         ap.head_dim = HD; ap.num_heads = QH; ap.num_kv_heads = d.kv_heads;
         ap.softmax_scale = cfg.attn_softmax_scale(HD);
         ap.partials = s.part; ap.part_m = s.pm; ap.part_l = s.pl;
@@ -15325,7 +15337,7 @@ bool Grimoire::mtp_draft_rows(int n, const int32_t* tok_in, const int* slot, con
         if (draft_dpas && verify_dpas_ok(ap)) {
             VerifyGroups vg{};
             vg.n = 1; vg.row0[0] = 0; vg.nrows[0] = 1; vg.slot[0] = 0;
-            const int smax = verify_dpas_splits(ap, vg, p + 1);
+            const int smax = verify_dpas_splits(ap, vg, p + 1 - w0);
             launch_verify_attn_dpas(q, ap, vg, 0, s.d_seq_len, smax);
             launch_verify_merge(q, ap, 1, smax);
         } else {
