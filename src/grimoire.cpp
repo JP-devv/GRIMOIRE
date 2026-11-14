@@ -2827,6 +2827,9 @@ struct Grimoire {
                       // 4: cache a sequence, 5: speculative batch step (TP + MTP)
         std::vector<int32_t> slots, positions;
         std::vector<int32_t> remaining;   // kind 5: each row's token budget left
+        // kind 5: copy drafts, per row [length, tokens...] (empty = none) -- rank 0 holds the
+        // conversations, so the workers verify the same candidates without them
+        std::vector<int32_t> copies;
     };
     bool serving_control = false; // rank 0 scheduler owns the control stream
     bool following_control = false; // a worker inside grimoire_pp_worker_loop
@@ -3620,10 +3623,12 @@ struct Grimoire {
     bool speculative_batch() const {
         return !pp_enabled() && (!tp_ranked() || tp_spec_batch()) && (mtp.ok || dflash2.ok);
     }
+    // `copies` (optional, one entry per row, may be empty): tokens copied from the row's own context
+    // (copy_propose) -- verified instead of MTP drafts where the head agrees with the first one.
     bool decode_spec_batch(const std::vector<int32_t>& tokens,
         const std::vector<int>& slots, const std::vector<int>& positions,
         const std::vector<int>& remaining, std::vector<std::vector<int32_t>>& replies,
-        std::vector<int>& consumed);
+        std::vector<int>& consumed, const std::vector<std::vector<int32_t>>* copies = nullptr);
 
     // Speculative verification advances every recurrent layer optimistically.
     // Keep one device-side checkpoint so a rejection can restore the exact
@@ -4548,6 +4553,11 @@ bool Grimoire::pp_send_request(const PPRequest& r) {
         if(rows && (!fd_write_all(fd,r.slots.data(),bytes) ||
                     !fd_write_all(fd,r.positions.data(),bytes))) return false;
         if(r.kind==5 && !fd_write_all(fd,r.remaining.data(),bytes)) return false;
+        if(r.kind==5) {
+            const int32_t nc=int32_t(r.copies.size());
+            if(!fd_write_all(fd,&nc,sizeof nc)) return false;
+            if(nc && !fd_write_all(fd,r.copies.data(),size_t(nc)*sizeof(int32_t))) return false;
+        }
     }
     return true;
 }
@@ -4589,7 +4599,13 @@ bool Grimoire::pp_recv_request(PPRequest& r) {
         r.remaining.resize(size_t(n));
         if (!fd_read_all(upstream,r.remaining.data(),size_t(n)*sizeof(int32_t))) return false;
         for (int32_t v : r.remaining) if (v < 0) return false;
-    }
+        int32_t nc=0;
+        if (!fd_read_all(upstream,&nc,sizeof nc)) return false;
+        // per row [length, tokens...]: at most n * (1 + kSpecBatch) values
+        if (nc < 0 || nc > n*(1+kSpecBatch)) return false;
+        r.copies.assign(size_t(nc),0);
+        if (nc && !fd_read_all(upstream,r.copies.data(),size_t(nc)*sizeof(int32_t))) return false;
+    } else r.copies.clear();
     // Pass it on BEFORE running it, so every stage downstream starts its
     // own prefill while this one is still working.  Forwarding after
     // would serialise the pipeline on its own control messages.
@@ -10728,6 +10744,7 @@ int Grimoire::decode_solo(int32_t tok, int slot, int position) {
 // acceptance is the one thing a drafter is for.  Zeroing is exactly the
 // condition reset() already gives every request today.
 long g_spec_batch_steps=0, g_spec_batch_proposals=0, g_spec_batch_accepted=0, g_spec_batch_sequences=0;
+long g_copy_rows=0, g_copy_declined=0, g_copy_proposed=0, g_copy_accepted=0;
 
 // MTP draft depth when GRIMOIRE_MTP_K is not set.  MEASURED 2026-10-06,
 // Qwen3.8-27B GPTQ-Int4 + its BF16 MTP head drafting in MXFP4, served,
@@ -10747,7 +10764,7 @@ static const bool g_spec_timing=std::getenv("GRIMOIRE_SPEC_TIMING")!=nullptr;
 bool Grimoire::decode_spec_batch(const std::vector<int32_t>& tokens,
         const std::vector<int>& slots, const std::vector<int>& positions,
         const std::vector<int>& remaining, std::vector<std::vector<int32_t>>& replies,
-        std::vector<int>& consumed) {
+        std::vector<int>& consumed, const std::vector<std::vector<int32_t>>* copies) {
     const int n=int(tokens.size());
     if(n==0 || n>kSpecBatch || slots.size()!=tokens.size() ||
        positions.size()!=tokens.size() || remaining.size()!=tokens.size())
@@ -10783,6 +10800,32 @@ bool Grimoire::decode_spec_batch(const std::vector<int32_t>& tokens,
         return v; }();
     int max_depth=std::max(0,std::min(requested,spec_rows/n-1));
     if(n>=1 && size_t(n)<=depth_by_n.size()) max_depth=std::min(max_depth,depth_by_n[size_t(n-1)]);
+    // COPY DRAFTS (2026-11-14).  When a reply repeats its context -- copying or editing code, quoting a
+    // document -- the tokens after the longest earlier match of the conversation's tail (copy_propose,
+    // found by the scheduler) are far better drafts than the head's: they are right for as long as the
+    // copy runs.  A row with such a proposal drafts ONE token with the head first; if the head agrees
+    // with the copy's first token the row verifies the copy instead, up to GRIMOIRE_COPY_DEPTH (15)
+    // tokens deep and GRIMOIRE_COPY_ROWS (32) verify rows over all copying rows, else it keeps its
+    // MTP drafts.  GRIMOIRE_COPY_AGREE=0 verifies every proposal without asking the head.
+    static const int copy_depth=[] { const char* e=std::getenv("GRIMOIRE_COPY_DEPTH");
+        return std::clamp(e&&*e?std::atoi(e):15,1,15); }();
+    static const int copy_rows=[] { const char* e=std::getenv("GRIMOIRE_COPY_ROWS");
+        return std::clamp(e&&*e?std::atoi(e):32,2,kSpecBatch); }();
+    static const bool copy_agree=[] { const char* e=std::getenv("GRIMOIRE_COPY_AGREE");
+        return !(e&&*e=='0'); }();
+    std::vector<int> copy_cap(size_t(n),0);
+    std::vector<char> use_copy(size_t(n),0);
+    if(copies && copies->size()==size_t(n) && !dflash2.ok)
+        for(int row=0;row<n;++row) {
+            const auto& c=(*copies)[size_t(row)];
+            bool valid=!c.empty();
+            for(int32_t t:c) valid&=t>=0 && t<cfg.vocab;
+            if(!valid) continue;
+            const int p=positions[size_t(row)];
+            copy_cap[size_t(row)]=std::max(0,std::min({copy_depth,copy_rows/n-1,int(c.size()),max_seq-p-1,
+                remaining[size_t(row)]-1}));
+            if(!copy_agree && copy_cap[size_t(row)]>0) use_copy[size_t(row)]=1;
+        }
     // Batched drafting (mtp_draft_rows): every row's depth first, then ONE pass of the head
     // per depth over the rows that still draft.  The row loop below drafts only when the
     // head cannot be batched (an MoE head, DFlash, GRIMOIRE_MTP_BATCH_DRAFT=0) or n == 1.
@@ -10800,6 +10843,8 @@ bool Grimoire::decode_spec_batch(const std::vector<int32_t>& tokens,
         for(int row=0;row<n;++row) {
             const int p=positions[size_t(row)];
             depth[size_t(row)]=std::max(0,std::min({max_depth,max_seq-p-1,remaining[size_t(row)]-1}));
+            if(gpu_draft) copy_cap[size_t(row)]=0, use_copy[size_t(row)]=0;   // proposals read back at the end
+            if(use_copy[size_t(row)]) depth[size_t(row)]=0;
             dmax=std::max(dmax,depth[size_t(row)]);
         }
         drafted.assign(size_t(n),{});
@@ -10814,6 +10859,7 @@ bool Grimoire::decode_spec_batch(const std::vector<int32_t>& tokens,
                     (gpu_draft?0:drafted[size_t(row)].back()));
                 sl.push_back(slots[size_t(row)]); ps.push_back(positions[size_t(row)]+k);
             }
+            if(act.empty()) break;   // every row stopped early (copy drafts)
             const int32_t* device_tokens=nullptr;
             if(k>0) {   // rows whose depth is reached drop out: move the others' head outputs up
                 std::vector<int> keep;
@@ -10847,6 +10893,9 @@ bool Grimoire::decode_spec_batch(const std::vector<int32_t>& tokens,
             for(size_t i=0;!gpu_draft&&i<act.size();++i) {
                 if(tout[i]<0 || tout[i]>=cfg.vocab) throw std::runtime_error("batched MTP proposal failed");
                 drafted[size_t(act[i])].push_back(tout[i]);
+                // the head agrees with the copy's first token: verify the copy, stop drafting this row
+                const size_t row=size_t(act[i]);
+                if(k==0 && copy_cap[row]>0 && tout[i]==(*copies)[row][0]) { use_copy[row]=1; depth[row]=1; }
             }
             prev=act;
         }
@@ -10881,16 +10930,24 @@ bool Grimoire::decode_spec_batch(const std::vector<int32_t>& tokens,
                     throw std::runtime_error("batched DFlash proposal failed");
                 block.insert(block.end(),draft.begin(),draft.begin()+std::min(depth,int(draft.size())));
             } else if(batched) {
-                block.insert(block.end(),drafted[size_t(row)].begin(),drafted[size_t(row)].end());
-            } else {
+                if(!use_copy[size_t(row)])
+                    block.insert(block.end(),drafted[size_t(row)].begin(),drafted[size_t(row)].end());
+            } else if(!use_copy[size_t(row)]) {
                 int token=block[0];
                 for(int k=0;k<depth;++k) {
                     token=mtp_draft(token,pos+k,k>0);
                     if(token<0 || token>=cfg.vocab)
                         throw std::runtime_error("batched MTP proposal failed");
                     block.push_back(token);
+                    if(k==0 && copy_cap[size_t(row)]>0 && token==(*copies)[size_t(row)][0]) {
+                        use_copy[size_t(row)]=1; block.resize(1); break;
+                    }
                 }
             }
+        }
+        if(use_copy[size_t(row)]) {
+            const auto& c=(*copies)[size_t(row)];
+            block.insert(block.end(),c.begin(),c.begin()+copy_cap[size_t(row)]);
         }
         begin.push_back(int(candidates.size()));
         lengths.push_back(int(block.size()));
@@ -10917,7 +10974,21 @@ bool Grimoire::decode_spec_batch(const std::vector<int32_t>& tokens,
         while(accepted<count && candidates[size_t(first+accepted)]==verified[size_t(first+accepted-1)])
             ++accepted;
         g_spec_batch_proposals+=count-1; g_spec_batch_accepted+=accepted-1;
+        if(use_copy[size_t(row)]) { ++g_copy_rows; g_copy_proposed+=count-1; g_copy_accepted+=accepted-1; }
+        else if(copy_cap[size_t(row)]>0) ++g_copy_declined;
         acc_n[size_t(row)]=accepted;
+    }
+    // GRIMOIRE_SPEC_STATS=1: every 256 speculative steps, how the rows drafted and what they kept.
+    static const bool copy_stats=[]{ const char* e=std::getenv("GRIMOIRE_SPEC_STATS"); return e&&*e&&*e!='0'; }();
+    if(copy_stats && (g_spec_batch_steps&255)==0 && !tp_rank) {
+        std::fprintf(stderr,"spec stats: %ld steps, %.2f rows/step | all drafts %ld kept %ld (%.1f%%) | copy rows %ld"
+            " (head disagreed %ld), copy drafts %ld kept %ld (%.1f%%), %.2f per copy row\n",
+            g_spec_batch_steps,double(g_spec_batch_sequences)/double(g_spec_batch_steps),
+            g_spec_batch_proposals,g_spec_batch_accepted,
+            100.0*double(g_spec_batch_accepted)/double(std::max(1L,g_spec_batch_proposals)),
+            g_copy_rows,g_copy_declined,g_copy_proposed,g_copy_accepted,
+            100.0*double(g_copy_accepted)/double(std::max(1L,g_copy_proposed)),
+            double(g_copy_accepted)/double(std::max(1L,g_copy_rows)));
     }
     // Several conversations (11-05): every conversation's DeltaNet replay in one launch per layer
     // (launch_deltanet_replay_groups) and every conv ring rebuilt in one more -- the same arithmetic
@@ -23023,6 +23094,31 @@ int grimoire_serve_generate_batch(Grimoire& e,
 //  submits either way.
 // =====================================================================
 namespace {
+// COPY DRAFTS (2026-11-14): prompt lookup decoding (vLLM's "ngram" proposer).  `hist` is the whole
+// conversation -- prompt, then the reply so far, ending with the token about to be fed.  Find the most
+// recent earlier occurrence of its longest tail (grown backward from the last token, up to 32 tokens) and
+// propose the tokens that followed it.  A tail shorter than `min_match` proposes nothing; a match of m
+// tokens proposes at most factor * m (suffix decoding's rule: a short match is weak evidence of a long copy).
+static void copy_propose(const std::vector<int32_t>& hist, int min_match, int factor, int max_out,
+                         std::vector<int32_t>& out) {
+    out.clear();
+    const size_t L=hist.size();
+    if(L<size_t(min_match)+1 || max_out<=0) return;
+    constexpr int kMaxMatch=32;
+    const int32_t* h=hist.data();
+    const int32_t last=h[L-1];
+    int best=0; size_t best_end=0;
+    for(size_t i=L-1;i-->0;) {          // i: last token of an earlier occurrence
+        if(h[i]!=last) continue;
+        int m=1;
+        while(m<kMaxMatch && size_t(m)<=i && h[i-size_t(m)]==h[L-1-size_t(m)]) ++m;
+        if(m>best) { best=m; best_end=i; if(m==kMaxMatch) break; }
+    }
+    if(best<min_match) return;
+    const size_t want=size_t(std::min(max_out,factor*best));
+    for(size_t j=best_end+1;j<L && out.size()<want;++j) out.push_back(h[j]);
+}
+
 struct SchedJob {
     SamplingOptions sampling;
     // Set by the submitting thread, read by the scheduler.
@@ -23030,6 +23126,7 @@ struct SchedJob {
     int budget = 0, eos = -1, eot = -1;
     // Scheduler-owned.
     int slot = -1, pos = 0, next = -1;
+    std::vector<int32_t> hist;      // copy drafts: prompt + reply, built as the reply grows
     // Shared, under mu.
     std::mutex mu;
     std::condition_variable cv;
@@ -23491,6 +23588,29 @@ void GrimoireScheduler::run() {
                         std::lock_guard<std::mutex> lock(job->mu);
                         remaining.push_back(job->budget-int(job->ready.size()));
                     }
+                // Copy drafts (copy_propose): GRIMOIRE_COPY=0 turns them off; GRIMOIRE_COPY_MIN = the
+                // shortest matching tail (3), GRIMOIRE_COPY_FACTOR = drafts per matched token (2).
+                static const bool copy_on=[]{ const char* v=std::getenv("GRIMOIRE_COPY"); return !(v&&*v=='0'); }();
+                static const int copy_min=[]{ const char* v=std::getenv("GRIMOIRE_COPY_MIN");
+                    return std::clamp(v&&*v?std::atoi(v):3,1,32); }();
+                static const int copy_factor=[]{ const char* v=std::getenv("GRIMOIRE_COPY_FACTOR");
+                    return std::clamp(v&&*v?std::atoi(v):2,1,64); }();
+                std::vector<std::vector<int32_t>> copies;
+                if(spec_now && copy_on && !e.dflash2.ok) {
+                    copies.resize(which.size());
+                    for(size_t i=0;i<which.size();++i) {
+                        auto& j=active[which[i]];
+                        if(j->hist.empty()) j->hist=j->prompt;
+                        {
+                            std::lock_guard<std::mutex> lock(j->mu);
+                            const size_t have=j->hist.size()-j->prompt.size();
+                            for(size_t k=have;k<j->ready.size();++k) j->hist.push_back(j->ready[k]);
+                        }
+                        // the history must end with the token this step feeds, at its position
+                        if(j->hist.size()!=size_t(j->pos)+1 || j->hist.back()!=j->next) continue;
+                        copy_propose(j->hist,copy_min,copy_factor,15,copies[i]);
+                    }
+                }
                 if (e.pp_enabled() || e.tp_ranked()) {
                     // Decided above, sent here: a worker runs the same kind of step
                     // (5 = speculative under Megatron TP + MTP, 3 = plain), or the
@@ -23500,11 +23620,16 @@ void GrimoireScheduler::run() {
                     request.slots.assign(slots.begin(),slots.end());
                     request.positions.assign(poss.begin(),poss.end());
                     if(spec_now) request.remaining.assign(remaining.begin(),remaining.end());
+                    for(const auto& c:copies) {   // per row [length, tokens...]
+                        request.copies.push_back(int32_t(c.size()));
+                        request.copies.insert(request.copies.end(),c.begin(),c.end());
+                    }
                     if (!e.pp_send_request(request))
                         throw std::runtime_error("pipeline batch broadcast failed");
                 }
                 if(spec_now) {
-                    e.decode_spec_batch(toks,slots,poss,remaining,blocks,consumed);
+                    e.decode_spec_batch(toks,slots,poss,remaining,blocks,consumed,
+                                        copies.empty()?nullptr:&copies);
                 } else if(toks.size()==1 && e.solo_ok()) {
                     const int t=e.decode_solo(toks[0],slots[0],poss[0]);
                     if(t<0) { failed=true; err="decode step failed"; }
@@ -23750,7 +23875,22 @@ void grimoire_pp_worker_loop(Grimoire& e) {
                     throw std::runtime_error("speculative batch step on a rank without speculation");
                 std::vector<std::vector<int32_t>> blocks;
                 std::vector<int> consumed;
-                e.decode_spec_batch(req.prompt,slots,positions,remaining,blocks,consumed);
+                // rank 0's copy drafts, per row [length, tokens...]
+                std::vector<std::vector<int32_t>> copies;
+                if(!req.copies.empty()) {
+                    size_t at=0;
+                    for(size_t row=0;row<req.prompt.size();++row) {
+                        if(at>=req.copies.size()) throw std::runtime_error("copy drafts: short message");
+                        const size_t len=size_t(req.copies[at++]);
+                        if(len>size_t(Grimoire::kSpecBatch) || at+len>req.copies.size())
+                            throw std::runtime_error("copy drafts: bad length");
+                        copies.emplace_back(req.copies.begin()+long(at),req.copies.begin()+long(at+len));
+                        at+=len;
+                    }
+                    if(at!=req.copies.size()) throw std::runtime_error("copy drafts: long message");
+                }
+                e.decode_spec_batch(req.prompt,slots,positions,remaining,blocks,consumed,
+                                    copies.empty()?nullptr:&copies);
                 continue;
             }
             grimoire_serve_generate(e, req.prompt, req.budget, req.eos, out,
