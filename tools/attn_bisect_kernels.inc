@@ -667,7 +667,7 @@ sycl::event bisect_attn(sycl::queue& q, const AttnParams& p, const VerifyGroups&
                 }
                 // S = Q K^T over 256 dims: 8 loads of [32 dims][16 keys], 2 dpas each.
                 es::simd<float, RB * NK> s = 0.0f;
-                if constexpr (MODE == 12 || MODE == 14) {
+                if constexpr (MODE == 12 || MODE == 14 || MODE == 15) {
                     // K key-major: one transposed 2-D load per 32 dims = u32[8 dim quads][16 keys], each u32 four
                     // consecutive dims of one key; dim pair 2c = bytes 0,1, pair 2c+1 = bytes 2,3.
                     #pragma unroll
@@ -677,7 +677,7 @@ sycl::event bisect_attn(sycl::queue& q, const AttnParams& p, const VerifyGroups&
                         #pragma unroll
                         for (int hh = 0; hh < 2; ++hh) {
                             es::simd<uint32_t, 128> b;
-                            if constexpr (MODE == 14) {
+                            if constexpr (MODE == 14 || MODE == 15) {
                                 // 16-bit lanes (llm-scaler's dequantFp8): place each byte in its own u16 by register
                                 // moves, then one (b & 0x7F) << 7 | (b & 0x80) << 8 over 32 lanes = 16 keys x 2 dims.
                                 #pragma unroll
@@ -788,6 +788,18 @@ sycl::event bisect_attn(sycl::queue& q, const AttnParams& p, const VerifyGroups&
                     #pragma unroll
                     for (int w = 0; w < 4; ++w) {
                         es::simd<uint32_t, 128> b;
+                        if constexpr (MODE == 15) {
+                            // V pairs (key 2pr, key 2pr+1) x 16 dims through 16-bit lanes
+                            #pragma unroll
+                            for (int pr = 0; pr < 8; ++pr) {
+                                es::simd<uint16_t, 32> b16 = 0;
+                                auto bv = b16.template bit_cast_view<uint8_t>();
+                                bv.template select<16, 4>(0) = vb.template select<16, 1>((2 * pr) * 64 + 16 * w);
+                                bv.template select<16, 4>(2) = vb.template select<16, 1>((2 * pr + 1) * 64 + 16 * w);
+                                es::simd<uint16_t, 32> h16 = ((b16 & 0x7F) << 7) | ((b16 & 0x80) << 8);
+                                b.template select<16, 1>(16 * pr) = h16.template bit_cast_view<uint32_t>();
+                            }
+                        } else
                         #pragma unroll
                         for (int pr = 0; pr < 8; ++pr) {
                             es::simd<uint32_t, 16> lo =
