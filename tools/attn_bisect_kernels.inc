@@ -667,7 +667,7 @@ sycl::event bisect_attn(sycl::queue& q, const AttnParams& p, const VerifyGroups&
                 }
                 // S = Q K^T over 256 dims: 8 loads of [32 dims][16 keys], 2 dpas each.
                 es::simd<float, RB * NK> s = 0.0f;
-                if constexpr (MODE == 12) {
+                if constexpr (MODE == 12 || MODE == 14) {
                     // K key-major: one transposed 2-D load per 32 dims = u32[8 dim quads][16 keys], each u32 four
                     // consecutive dims of one key; dim pair 2c = bytes 0,1, pair 2c+1 = bytes 2,3.
                     #pragma unroll
@@ -677,6 +677,24 @@ sycl::event bisect_attn(sycl::queue& q, const AttnParams& p, const VerifyGroups&
                         #pragma unroll
                         for (int hh = 0; hh < 2; ++hh) {
                             es::simd<uint32_t, 128> b;
+                            if constexpr (MODE == 14) {
+                                // 16-bit lanes (llm-scaler's dequantFp8): place each byte in its own u16 by register
+                                // moves, then one (b & 0x7F) << 7 | (b & 0x80) << 8 over 32 lanes = 16 keys x 2 dims.
+                                #pragma unroll
+                                for (int c = 0; c < 4; ++c) {
+                                    es::simd<uint32_t, 16> t = tq.template select<16, 1>((4 * hh + c) * 16);
+                                    es::simd<uint8_t, 64> row = t.template bit_cast_view<uint8_t>();
+                                    #pragma unroll
+                                    for (int hp = 0; hp < 2; ++hp) {          // dims 4c+2hp, 4c+2hp+1
+                                        es::simd<uint16_t, 32> b16 = 0;
+                                        auto bv = b16.template bit_cast_view<uint8_t>();
+                                        bv.template select<16, 4>(0) = row.template select<16, 4>(2 * hp);
+                                        bv.template select<16, 4>(2) = row.template select<16, 4>(2 * hp + 1);
+                                        es::simd<uint16_t, 32> h = ((b16 & 0x7F) << 7) | ((b16 & 0x80) << 8);
+                                        b.template select<16, 1>(16 * (2 * c + hp)) = h.template bit_cast_view<uint32_t>();
+                                    }
+                                }
+                            } else
                             #pragma unroll
                             for (int c = 0; c < 4; ++c) {
                                 es::simd<uint32_t, 16> t = tq.template select<16, 1>((4 * hh + c) * 16);

@@ -110,6 +110,7 @@ int main(int argc, char** argv) {
             const double kmn = timeit([&] { bisect_attn<11>(q, base, vg, slot_bytes, dlens, smax, {}); });
             AttnParams basem = base; basem.k_cache = dkm;
             const double kmj = timeit([&] { bisect_attn<12>(q, basem, vg, slot_bytes, dlens, smax, {}); });
+            const double kmj16 = timeit([&] { bisect_attn<14>(q, basem, vg, slot_bytes, dlens, smax, {}); });
 
             // correctness of the 64-key steps: merged output against the production kernel's
             const size_t nout = size_t(c.groups) * c.rows * H * HD;
@@ -141,10 +142,15 @@ int main(int argc, char** argv) {
                 double md3 = 0; size_t nd = 0;
                 for (size_t i = 0; i < nout; ++i) { md3 = std::max(md3, double(std::fabs(o0[i] - o12[i]))); nd += o0[i] != o12[i]; }
                 std::printf("    KEY-MAJOR vs production: max |diff| %.3g, %zu of %zu differ\n", md3, nd, nout);
+                bisect_attn<14>(q, basem, vg, slot_bytes, dlens, smax, {});
+                launch_verify_merge(q, basem, c.groups * c.rows, smax);
+                q.memcpy(o12.data(), dout, nout * 4).wait();
+                nd = 0; for (size_t i = 0; i < nout; ++i) nd += o0[i] != o12[i];
+                std::printf("    KEY-MAJOR u16 conv vs production: %zu of %zu differ\n", nd, nout);
             }
             const double bytes = double(c.groups) * L * KVH * HD * 2;
-            std::printf("%7d %2dx%-2d | %9.1f %9.1f %9.1f %9.1f | %8.1f | %d | prefetch 1/4/8: %9.1f %9.1f %9.1f | K key-major: %9.1f | WG16: %9.1f | 64-key steps: %9.1f | SLM 64-key: %9.1f | neither, K contiguous: %9.1f | KEY-MAJOR full: %9.1f\n", L,
-                        c.groups, c.rows, us[0], us[1], us[2], us[3], bytes / us[0] / 1e3, smax, pf[0], pf[1], pf[2], kmaj, wg16, k64, slm, kmn, kmj);
+            std::printf("%7d %2dx%-2d | %9.1f %9.1f %9.1f %9.1f | %8.1f | %d | prefetch 1/4/8: %9.1f %9.1f %9.1f | K key-major: %9.1f | WG16: %9.1f | 64-key steps: %9.1f | SLM 64-key: %9.1f | neither, K contiguous: %9.1f | KEY-MAJOR full: %9.1f | KEY-MAJOR u16 conv: %9.1f\n", L,
+                        c.groups, c.rows, us[0], us[1], us[2], us[3], bytes / us[0] / 1e3, smax, pf[0], pf[1], pf[2], kmaj, wg16, k64, slm, kmn, kmj, kmj16);
         }
     return 0;
 }
