@@ -95,6 +95,7 @@ int main(int argc, char** argv) {
             const double wg16 = timeit([&] { bisect_attn<8>(q, base, vg, slot_bytes, dlens, smax, {}); });
             const double k64 = timeit([&] { bisect_attn<9>(q, base, vg, slot_bytes, dlens, smax, {}); });
             const double slm = timeit([&] { bisect_attn<10>(q, base, vg, slot_bytes, dlens, smax, {}); });
+            const double kmn = timeit([&] { bisect_attn<11>(q, base, vg, slot_bytes, dlens, smax, {}); });
 
             // correctness of the 64-key steps: merged output against the production kernel's
             const size_t nout = size_t(c.groups) * c.rows * H * HD;
@@ -118,8 +119,8 @@ int main(int argc, char** argv) {
                 std::printf("    SLM-staged vs production: max |diff| %.3g\n", md2);
             }
             const double bytes = double(c.groups) * L * KVH * HD * 2;
-            std::printf("%7d %2dx%-2d | %9.1f %9.1f %9.1f %9.1f | %8.1f | %d | prefetch 1/4/8: %9.1f %9.1f %9.1f | K key-major: %9.1f | WG16: %9.1f | 64-key steps: %9.1f | SLM 64-key: %9.1f\n", L,
-                        c.groups, c.rows, us[0], us[1], us[2], us[3], bytes / us[0] / 1e3, smax, pf[0], pf[1], pf[2], kmaj, wg16, k64, slm);
+            std::printf("%7d %2dx%-2d | %9.1f %9.1f %9.1f %9.1f | %8.1f | %d | prefetch 1/4/8: %9.1f %9.1f %9.1f | K key-major: %9.1f | WG16: %9.1f | 64-key steps: %9.1f | SLM 64-key: %9.1f | neither, K contiguous: %9.1f\n", L,
+                        c.groups, c.rows, us[0], us[1], us[2], us[3], bytes / us[0] / 1e3, smax, pf[0], pf[1], pf[2], kmaj, wg16, k64, slm, kmn);
         }
     return 0;
 }

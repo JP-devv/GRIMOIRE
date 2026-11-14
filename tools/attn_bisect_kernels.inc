@@ -338,13 +338,13 @@ namespace {
 
 template <int MODE, int N>
 SYCL_ESIMD_FUNCTION inline es::simd<uint32_t, N> convf(es::simd<uint8_t, N> b) {
-    if constexpr (MODE == 1 || MODE == 3) return es::simd<uint32_t, N>(b);
+    if constexpr (MODE == 1 || MODE == 3 || MODE == 11) return es::simd<uint32_t, N>(b);
     else return e4m3_h16<N>(b);
 }
 template <int MODE, int RB>
 SYCL_ESIMD_FUNCTION inline es::simd<float, RB * 16> dpasf(es::simd<float, RB * 16> acc, es::simd<fp16, 256> b,
                                                           es::simd<fp16, RB * 16> a) {
-    if constexpr (MODE == 2 || MODE == 3) {
+    if constexpr (MODE == 2 || MODE == 3 || MODE == 11) {
         es::simd<float, RB * 16> t = b.template select<RB * 16, 1>(0);
         es::simd<float, RB * 16> u = a;
         return acc + t * u;
@@ -668,7 +668,7 @@ sycl::event bisect_attn(sycl::queue& q, const AttnParams& p, const VerifyGroups&
                 #pragma unroll
                 for (int dc = 0; dc < HD / 32; ++dc) {
                     es::simd<uint32_t, 128> kr;
-                    if constexpr (MODE == 7) {
+                    if constexpr (MODE == 7 || MODE == 11) {
                         // TIMING ONLY (wrong numbers): the same 4 KB of K per 16 keys read key-major, contiguous --
                         // [seq][256 bytes] like V -- instead of 256 dim rows 61 KB apart.
                         es::simd<uint32_t, 256> kt = es::load_2d<uint32_t, 16, 16>(
