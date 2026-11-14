@@ -341,7 +341,7 @@ SYCL_ESIMD_FUNCTION inline es::simd<uint32_t, N> convf(es::simd<uint8_t, N> b) {
     else return e4m3_h16<N>(b);
 }
 template <int MODE, int RB>
-SYCL_ESIMD_FUNCTION inline es::simd<float, RB * 16> dpasf(es::simd<float, RB * 16> acc, es::simd<fp16, 128> b,
+SYCL_ESIMD_FUNCTION inline es::simd<float, RB * 16> dpasf(es::simd<float, RB * 16> acc, es::simd<fp16, 256> b,
                                                           es::simd<fp16, RB * 16> a) {
     if constexpr (MODE == 2 || MODE == 3) {
         es::simd<float, RB * 16> t = b.template select<RB * 16, 1>(0);
