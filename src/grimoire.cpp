@@ -10798,9 +10798,13 @@ bool Grimoire::decode_spec_batch(const std::vector<int32_t>& tokens,
     // 178.6 / 137.5 / 128.4; 8 users depth 1 / 2 / 3 (16 / 24 / 32 rows) 249.8 / 195.7 / 236.3 --
     // a verify past 16 rows costs more than its extra drafts return.  kSpecBatch 32 stays the buffer
     // size, so GRIMOIRE_SPEC_ROWS=32 is the 0786428 behaviour.
-    // 32 rows only where 17..32-row verify GEMMs are fast: INT4 weights (oneDNN INT4, 2026-11-14).  FP8 / INT8 /
-    // BF16 keep 16: past 16 rows their verify GEMM has no small-M path here (per-row GEMVs) -- not measured.
-    const bool wide_verify=!L.empty() && L[0].sh_gu.w.fmt==Fmt::INT4;
+    // 32 rows where 17..32-row verify GEMMs are fast: INT4 (oneDNN INT4, 2026-11-14) and FP8 / INT8 through oneDNN
+    // (28c664a: oneDNN at 17..32 rows and a batched output head).  MEASURED 2026-11-14, two B70s TP, Qwen3.8-27B-
+    // Uncensored as INT8, copybench total tok/s, rows 16 -> 32: 1 user copy-code 329 -> 472, docstring 298 -> 397;
+    // 4 users edits 297 -> 473; 8 users docstring 302 -> 439, code-new 298 -> 383; 4-user new text equal.
+    const Fmt vfmt=L.empty()?Fmt::BF16:L[0].sh_gu.w.fmt;
+    const bool wide_verify=!L.empty() && (vfmt==Fmt::INT4 ||
+        ((vfmt==Fmt::INT8 || vfmt==Fmt::FP8_E4M3) && onednn_gemm_ok(L[0].sh_gu.w,kSpecBatch)));
     static const char* const rows_env=std::getenv("GRIMOIRE_SPEC_ROWS");
     const int spec_rows=std::clamp(rows_env&&*rows_env?std::atoi(rows_env):wide_verify?32:16,2,kSpecBatch);
     // Depth cap per number of conversations, on top of the row rule: GRIMOIRE_SPEC_DEPTHS=d1,d2,d3,... (the n-th
