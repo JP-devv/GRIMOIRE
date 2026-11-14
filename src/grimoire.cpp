@@ -10809,11 +10809,13 @@ bool Grimoire::decode_spec_batch(const std::vector<int32_t>& tokens,
     // document -- the tokens after the longest earlier match of the conversation's tail (copy_propose,
     // found by the scheduler) are far better drafts than the head's: they are right for as long as the
     // copy runs.  A row with such a proposal drafts ONE token with the head first; if the head agrees
-    // with the copy's first token the row verifies the copy instead, up to GRIMOIRE_COPY_DEPTH (15, at
-    // most 31) tokens deep and GRIMOIRE_COPY_ROWS (32) verify rows over all copying rows, else it keeps its
+    // with the copy's first token the row verifies the copy instead, up to GRIMOIRE_COPY_DEPTH (31)
+    // tokens deep.  MEASURED 2026-11-14, one B70, Swift INT4, 1 user, depth 15 / 31 (verify 16 rows 40 ms,
+    // 32 rows 60 ms): copy-code 365 / 467, copy-prose 363 / 479, edit-rename 347 / 454, docstrings 336 / 420
+    // tok/s (MTP alone ~162); and GRIMOIRE_COPY_ROWS (32) verify rows over all copying rows, else it keeps its
     // MTP drafts.  GRIMOIRE_COPY_AGREE=0 verifies every proposal without asking the head.
     static const int copy_depth=[] { const char* e=std::getenv("GRIMOIRE_COPY_DEPTH");
-        return std::clamp(e&&*e?std::atoi(e):15,1,kSpecBatch-1); }();
+        return std::clamp(e&&*e?std::atoi(e):31,1,kSpecBatch-1); }();
     static const int copy_rows=[] { const char* e=std::getenv("GRIMOIRE_COPY_ROWS");
         return std::clamp(e&&*e?std::atoi(e):32,2,kSpecBatch); }();
     static const bool copy_agree=[] { const char* e=std::getenv("GRIMOIRE_COPY_AGREE");
@@ -23660,6 +23662,8 @@ void GrimoireScheduler::run() {
                     return v&&*v?float(std::atof(v)):0.5f; }();
                 static const int copy_strong=[]{ const char* v=std::getenv("GRIMOIRE_COPY_STRONG");
                     return std::clamp(v&&*v?std::atoi(v):12,1,32); }();
+                static const float copy_trust_multi=[]{ const char* v=std::getenv("GRIMOIRE_COPY_TRUST_MULTI");
+                    return v&&*v?float(std::atof(v)):0.8f; }();
                 std::vector<std::pair<int,int>> copy_result;
                 std::vector<std::vector<int32_t>> copies;
                 if(spec_now && copy_on && !e.dflash2.ok) {
@@ -23678,7 +23682,14 @@ void GrimoireScheduler::run() {
                         // CONFIDENCE GATE: a conversation whose copies keep failing (new text that happens
                         // to repeat a phrase) proposes only on a long match.  MEASURED 2026-11-14, one B70,
                         // without it: 4 users writing new code 281 -> 216 tok/s, reviewing 237 -> 200.
-                        if(j->copy_score<copy_trust && m<copy_strong) copies[i].clear();
+                        // Several users: a copy row widens the shared verify past 16 rows, where every row
+                        // costs more (11-12), so only a conversation that is copying (most copies kept) or
+                        // a long match from one that copies half the time.  MEASURED 2026-11-14 (gate
+                        // above only): 4 users reviewing code 237 -> 221 tok/s, 3% of rows copying.
+                        const bool ok=which.size()>1
+                            ? j->copy_score>=copy_trust_multi || (m>=copy_strong && j->copy_score>=copy_trust)
+                            : j->copy_score>=copy_trust || m>=copy_strong;
+                        if(!ok) copies[i].clear();
                     }
                 }
                 if (e.pp_enabled() || e.tp_ranked()) {
