@@ -380,9 +380,11 @@ sycl::event bisect_attn(sycl::queue& q, const AttnParams& p, const VerifyGroups&
         // MEASURED 2026-10-09: with every tile its own work-group (consecutive groups = other
         // splits) each tile streamed K/V separately -- 6x the cache traffic at 7 rows, which
         // the L2 hid at 8K and cannot at 64K+ (268 MB of K/V per layer at 131K).
-        h.parallel_for(sycl::nd_range<1>(nthreads, grouped ? size_t(tiles) : 1), [=](sycl::nd_item<1> it) SYCL_ESIMD_KERNEL {
+        // MODE 8: work-groups of 16 threads (16 consecutive ids) instead of 1 when not grouped
+        const size_t wg = grouped ? size_t(tiles) : (MODE == 8 && nthreads % 16 == 0 ? 16 : 1);
+        h.parallel_for(sycl::nd_range<1>(nthreads, wg), [=](sycl::nd_item<1> it) SYCL_ESIMD_KERNEL {
             constexpr float NINF = -std::numeric_limits<float>::infinity();
-            int id = int(it.get_group(0));
+            int id = grouped ? int(it.get_group(0)) : int(it.get_global_id(0));
             const int part = id % smax; id /= smax;
             const int tile = grouped ? int(it.get_local_id(0)) : id % tiles;
             if (!grouped) id /= tiles;

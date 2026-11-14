@@ -59,7 +59,7 @@ int main(int argc, char** argv) {
     for (int i = 0; i < 100; ++i) q.memset(dpart, 0, pcount * HD * 4);
     q.wait();
     struct Case { int groups, rows; };
-    const Case cases[] = {{1, 1}, {1, 7}, {4, 4}};
+    const Case cases[] = {{1, 1}, {1, 7}, {4, 1}, {4, 4}};
     std::printf("%7s %5s | %9s %9s %9s %9s | GB/s full | splits\n", "keys", "case", "full", "noconv", "nodpas", "neither");
     for (int L : Ls)
         for (const Case c : cases) {
@@ -91,9 +91,10 @@ int main(int argc, char** argv) {
             pf[1] = timeit([&] { bisect_attn<5>(q, base, vg, slot_bytes, dlens, smax, {}); });
             pf[2] = timeit([&] { bisect_attn<6>(q, base, vg, slot_bytes, dlens, smax, {}); });
             const double kmaj = timeit([&] { bisect_attn<7>(q, base, vg, slot_bytes, dlens, smax, {}); });
+            const double wg16 = timeit([&] { bisect_attn<8>(q, base, vg, slot_bytes, dlens, smax, {}); });
             const double bytes = double(c.groups) * L * KVH * HD * 2;
-            std::printf("%7d %2dx%-2d | %9.1f %9.1f %9.1f %9.1f | %8.1f | %d | prefetch 1/4/8: %9.1f %9.1f %9.1f | K key-major: %9.1f\n", L,
-                        c.groups, c.rows, us[0], us[1], us[2], us[3], bytes / us[0] / 1e3, smax, pf[0], pf[1], pf[2], kmaj);
+            std::printf("%7d %2dx%-2d | %9.1f %9.1f %9.1f %9.1f | %8.1f | %d | prefetch 1/4/8: %9.1f %9.1f %9.1f | K key-major: %9.1f | WG16: %9.1f\n", L,
+                        c.groups, c.rows, us[0], us[1], us[2], us[3], bytes / us[0] / 1e3, smax, pf[0], pf[1], pf[2], kmaj, wg16);
         }
     return 0;
 }
