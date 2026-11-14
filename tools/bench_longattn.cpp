@@ -43,7 +43,7 @@ int main(int argc, char** argv) {
     // random E4M3 bytes in a sane range: sign | exponent 4..9 | mantissa
     {
         std::mt19937 rng(7);
-        std::vector<uint8_t> h(size_t(slot_bytes));
+        std::vector<uint8_t> h(static_cast<size_t>(slot_bytes));
         for (auto& b : h) b = uint8_t((rng() & 0x80) | ((4 + rng() % 6) << 3) | (rng() & 7));
         for (int s = 0; s < SLOTS; ++s) {
             q.memcpy(dk + size_t(s) * slot_bytes, h.data(), h.size());
