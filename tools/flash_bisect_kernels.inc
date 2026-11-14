@@ -47,12 +47,13 @@ sycl::event flash_bisect(sycl::queue& q, sycl::event dep, const sycl_bf16* Qb, i
                             es::simd<uint32_t, 512> k4 = es::load_2d<uint32_t, 16, 32>(
                                 kh, Sp * 4 - 1, D / 2 - 1, Sp * 4 - 1, s0 + b * 16, d4 * 32);
                             #pragma unroll
-                            for (int j = 0; j < 4; ++j)
+                            for (int j = 0; j < 4; ++j) {
+                                es::simd<uint32_t, 128> kt = k4.template select<128, 1>(j * 128);
                                 scores.template select<RB * 16, 1>(b * RB * 16) =
                                     xmx::dpas<8, RB, float, float, sycl_bf16, sycl_bf16>(
                                         es::simd<float, RB * 16>(scores.template select<RB * 16, 1>(b * RB * 16)),
-                                        es::simd<uint32_t, 128>(k4.template select<128, 1>(j * 128)).template bit_cast_view<sycl_bf16>().read(),
-                                        a4[j]);
+                                        kt.template bit_cast_view<sycl_bf16>().read(), a4[j]);
+                            }
                         }
                     }
                 } else
@@ -137,12 +138,14 @@ sycl::event flash_bisect(sycl::queue& q, sycl::event dep, const sycl_bf16* Qb, i
                             es::simd<uint32_t, 512> v4 = es::load_2d<uint32_t, 16, 32>(
                                 vh, D * 4 - 1, Sp / 2 - 1, D * 4 - 1, dt * 16, (s0 + b4 * 64) / 2);
                             #pragma unroll
-                            for (int j = 0; j < 4; ++j)
+                            for (int j = 0; j < 4; ++j) {
+                                es::simd<uint32_t, 128> vt = v4.template select<128, 1>(j * 128);
                                 o.template select<RB * 16, 1>(dt * RB * 16) =
                                     xmx::dpas<8, RB, float, float, sycl_bf16, sycl_bf16>(
                                         es::simd<float, RB * 16>(o.template select<RB * 16, 1>(dt * RB * 16)),
-                                        es::simd<uint32_t, 128>(v4.template select<128, 1>(j * 128)).template bit_cast_view<sycl_bf16>().read(),
+                                        vt.template bit_cast_view<sycl_bf16>().read(),
                                         es::simd<sycl_bf16, RB * 16>(probabilities.template select<RB * 16, 1>((b4 * 4 + j) * RB * 16)));
+                            }
                         }
                     }
                 } else
