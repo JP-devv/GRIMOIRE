@@ -50,6 +50,7 @@
 #include "native_dequant.hpp"
 #include "native_smallm.hpp"
 #include "hadamard128.hpp"
+#include "flash_team.hpp"
 #include <sycl/ext/oneapi/matrix/matrix.hpp>
 #include <sycl/ext/intel/esimd.hpp>
 #include <sycl/ext/oneapi/experimental/prefetch.hpp>
@@ -954,6 +955,14 @@ sycl::event flash_fast_impl(sycl::queue& q, const float* qv, const uint8_t* kc,
     });
     static const int tpw = [] { const char* v = std::getenv("GRIMOIRE_FLASH_TPW"); const int n = v ? std::atoi(v) : 8;
         return n == 16 || n == 32 ? n : 8; }();
+    // GRIMOIRE_FLASH_TEAM=2|4 (0 = off, 2026-11-15, src/flash_team.hpp): NT threads share 8 * NT query rows, so each
+    // loaded K / V tile feeds NT times more rows (the 8-row kernel is load-bound: ~33 TFLOP/s at 61K).
+    static const int team = [] { const char* v = std::getenv("GRIMOIRE_FLASH_TEAM"); const int n = v ? std::atoi(v) : 0;
+        return n == 2 || n == 4 ? n : 0; }();
+    if (use_esimd && block == 128 && team == 4)
+        return flash_team<D, 128, 4, 2>(q, e, Qb, Tp, Kp, Vp, Sp, out, tokens, start, H, KVH);
+    if (use_esimd && block == 128 && team == 2)
+        return flash_team<D, 128, 2, 4>(q, e, Qb, Tp, Kp, Vp, Sp, out, tokens, start, H, KVH);
     if (use_esimd && block == 128 && tpw == 16)
         return flash_esimd<D, 128, 16>(q, e, Qb, Tp, Kp, Vp, Sp, out, tokens, start, H, KVH);
     if (use_esimd && block == 128 && tpw == 32)
