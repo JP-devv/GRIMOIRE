@@ -404,6 +404,9 @@ sycl::event verify_attn_team_impl(sycl::queue& q, const AttnParams& p, const Ver
     const AttnParams pp = p;
     const VerifyGroups vg = g;
     const size_t nwg = size_t(g.n) * KVH * smax;
+    // GRIMOIRE_VERIFY_TEAM_PF (default 1): at the top of each block, prefetch this thread's K rows and V slice of
+    // the NEXT block to L1/L2 (no registers), so its loads stop waiting on memory right before use.
+    static const int pf = env_int("GRIMOIRE_VERIFY_TEAM_PF", 1);
     return q.submit([&](sycl::handler& h) {
         h.depends_on(deps);
         h.parallel_for(sycl::nd_range<1>(nwg * TN, TN), [=](sycl::nd_item<1> it) SYCL_ESIMD_KERNEL {
@@ -461,8 +464,19 @@ sycl::event verify_attn_team_impl(sycl::queue& q, const AttnParams& p, const Ver
             es::simd<float, NRBM * RB * DP> o = 0.0f;  // [rb][dpt][8][16]
             es::simd<float, RMAX> m = NINF, l = 0.0f;  // l: this thread's key slices only
             const es::simd<int, NK> col(0, 1);
+            const int pfo = pf;
             for (int s0 = s_beg; s0 < s_end; s0 += BK) {
                 const int ks = s0 + t * NK;
+                if (pfo && s0 + BK < s_end) {
+                    constexpr auto PFH = sycl::ext::oneapi::experimental::properties{
+                        es::cache_hint_L1<es::cache_hint::cached>, es::cache_hint_L2<es::cache_hint::cached>};
+                    #pragma unroll
+                    for (int x = 0; x < 4; ++x)          // K: 16 keys x 256 bytes
+                        es::prefetch_2d<uint32_t, 16, 16>(kh32, HD - 1, CAPM, HD - 1, 16 * x, ks + BK, PFH);
+                    #pragma unroll
+                    for (int y = 0; y < BK / 32; ++y)    // V: 128 keys x this thread's 32 bytes
+                        es::prefetch_2d<uint32_t, DP / 4, 32>(vh32, HD - 1, CAPM, HD - 1, t * (DP / 4), s0 + BK + 32 * y, PFH);
+                }
                 es::simd<float, NRBM * RB * NK> sc = NINF;   // [rb][8][16]
                 if (ks < s_end) {
                     sc = 0.0f;
