@@ -503,8 +503,9 @@ sycl::event verify_attn_team_impl(sycl::queue& q, const AttnParams& p, const Ver
                     // mask: each row its own length
                     #pragma unroll
                     for (int j = 0; j < RMAX; ++j) {
+                        const int lj = lim[j];
                         es::simd<float, NK> v = sc.template select<NK, 1>(NK * j);
-                        v.merge(es::simd<float, NK>(NINF), col + ks >= lim[j]);
+                        v.merge(es::simd<float, NK>(NINF), col + ks >= lj);
                         sc.template select<NK, 1>(NK * j) = v;
                     }
                 }
