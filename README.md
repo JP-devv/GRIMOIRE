@@ -10,7 +10,7 @@ The aim is straightforward: make high-performance local LLM inference possible o
 
 > **Project status: Experimental.** GRIMOIRE is actively developed, but it is not yet a stable, production-ready release. Expect incomplete features, changing model support, and performance or compatibility issues. Ready-to-use Docker images are on the [Releases](https://github.com/doopeworld/GRIMOIRE/releases) page (latest: **v1.10.6**, 2026-11-13); [Run a model](#run-a-model) below lists every model with its Hugging Face download, launch flags and measured speed.
 >
-> **main is the current code.** Two-GPU tensor parallel, Intel oneDNN for the prompt GEMMs and the Qwen3.8-Flash-Next two-card speed-ups were merged into main on 2026-10-28 (before, they were on the `dual-1022` / `onednn-1025` branches) and are in release **v1.10.0**. **GGUF support** joined main on 2026-10-29 (it was on `feature/gguf-battlemage`) and is in release **v1.10.1**; **v1.10.2** includes the native GGUF decode and prompt speed-ups and MTP on GGUF; **v1.10.3** adds three opt-in speed modes and changes no default; **v1.10.4** (2026-11-05) makes MXFP4 speculative decoding faster (Qwen3.8-27B MXFP4 + MTP: +26% for one user), lets 4-bit models use the overlapped two-GPU prompt path (Qwen3.8-27B GPTQ on two B70s: pp4096 1,733 -> 3,093), halves the two-GPU decode exchange, and keeps Flash-Next fast on a busy machine ([details](#served-image-validation-2026-11-05-v1104)). **v1.10.6** (2026-11-13) makes speculative decoding serve several users at once on one and two cards: Swift-1.5 Qwen3.8-27B GPTQ-Int4 on two B70s scores **133.6** in BetterBench against vLLM's 131.0 on the same machine and wins at 1, 2, 4 and 8 users; it also runs Qwen3.8-27B-Uncensored (FP8 as INT8) on two cards with a 262K context ([details](#release-v1106-2026-11-13)). v1.10.6's source is on branch [`i4a8-prompt-1112`](https://github.com/doopeworld/GRIMOIRE/tree/i4a8-prompt-1112), not merged into main yet. Still on a branch: the not validated for release Flash-Next MTP head on [`flashnext-mtp`](https://github.com/doopeworld/GRIMOIRE/tree/flashnext-mtp).
+> **main is the current code.** Two-GPU tensor parallel, Intel oneDNN for the prompt GEMMs and the Qwen3.8-Flash-Next two-card speed-ups were merged into main on 2026-10-28 (before, they were on the `dual-1022` / `onednn-1025` branches) and are in release **v1.10.0**. **GGUF support** joined main on 2026-10-29 (it was on `feature/gguf-battlemage`) and is in release **v1.10.1**; **v1.10.2** includes the native GGUF decode and prompt speed-ups and MTP on GGUF; **v1.10.3** adds three opt-in speed modes and changes no default; **v1.10.4** (2026-11-05) makes MXFP4 speculative decoding faster (Qwen3.8-27B MXFP4 + MTP: +26% for one user), lets 4-bit models use the overlapped two-GPU prompt path (Qwen3.8-27B GPTQ on two B70s: pp4096 1,733 -> 3,093), halves the two-GPU decode exchange, and keeps Flash-Next fast on a busy machine ([details](#served-image-validation-2026-11-05-v1104)). **v1.10.6** (2026-11-13) makes speculative decoding serve several users at once on one and two cards: Swift-1.5 Qwen3.8-27B GPTQ-Int4 on two B70s scores **133.6** in BetterBench against vLLM's 131.0 on the same machine and wins at 1, 2, 4 and 8 users; it also runs Qwen3.8-27B-Uncensored (FP8 as INT8) on two cards with a 262K context ([details](#release-v1106-2026-11-13)). v1.10.6's source joined main on 2026-11-15 together with **copy drafting** and faster long prompts (no release image yet, [details](#on-main-since-2026-11-15-no-release-image-yet)). Still on a branch: the not validated for release Flash-Next MTP head on [`flashnext-mtp`](https://github.com/doopeworld/GRIMOIRE/tree/flashnext-mtp).
 
 ## Our test system
 
@@ -118,6 +118,46 @@ the file's own `nextn` head 28.0 -> 71.6 tok/s (a DPAS kernel that checks up to 
 about the cost of one).  The BF16 GGUF gives **token-identical** output to the safetensors release;
 UD-IQ4_XS, UD-IQ2_XXS, Q4_0 and Q8_0 files load and generate correctly (Q8_0 as `--proj int8`: 99.2%
 top-1).  Qwen3.8-Flash-Next GGUF: not supported yet.
+
+### On main since 2026-11-15 (no release image yet)
+
+**Copy drafting** (prompt lookup) next to MTP: when the reply repeats text already in the conversation (code being
+edited, a document being rewritten), GRIMOIRE proposes up to 63 tokens from the earlier copy and checks them in the
+same verify pass as the MTP drafts (up to 64 rows a pass). New text is drafted by MTP as before. Off with
+`GRIMOIRE_COPY=0`. Also: the FP8 K cache is stored key-major (long-context attention reads were scattered), prompt
+attention runs in 4-thread teams, and the INT8 / FP8 output head no longer runs one GEMV per verify row past 8 rows.
+
+Bench: [`tools/bench/copy1115/copybench1114.py`](tools/bench/copy1115/copybench1114.py), greedy, thinking off, total
+tok/s while every user decodes; copy / edit = 4 prompts (copy code, copy prose, rename, add docstrings). Main = `55a9eea`
+built for the B70. "Before" = the same branch on 2026-11-14 with `GRIMOIRE_COPY=0` (v1.10.6 speed); rows marked
+(11-14) are that day's build with copies on, before the key-major cache, prompt-attention teams and 32 / 64-row verify.
+
+Swift-1.5 Qwen3.8-27B GPTQ-Int4 + MTP (K=6), one B70:
+
+| | Before | Main |
+|---|---:|---:|
+| 1 user, copy / edit | 161-163 (1,536 tokens) | **646-687** (512 tokens) |
+| 4 users, copy / edit (1,024 tokens each) | 305-316 | **748-828** |
+| 4 users, new text: code / review / essay | 283 / 234 / 210 | 286 / 235 / 209 |
+| 8 users, copy / edit | -- | **751-779** |
+| 8 users, new text: code / review / essay | 308 / 264 / 283 (11-14, 16 verify rows) | **431 / 347 / 321** |
+| 61K-token prompt: time to first token (1 user) | 51.1 s (11-14) | **41.9 s** |
+| 61K-token prompt: 4 users copy / write (total) | 265 / 99.1 (11-14) | **397 / 127** |
+
+Qwen3.8-27B-Uncensored (FP8 checkpoint as `--proj int8`), two B70s, tensor parallel, MTP K=6, 1,024 tokens each:
+
+| | Copies off (11-14) | Main |
+|---|---:|---:|
+| 1 user, copy / edit | 150-152 | **462-605** |
+| 4 users, copy / edit | 183-186 | **590-637** |
+| 8 users, copy / edit | 188-191 | **610-629** |
+| 4 users, new text: code / review / essay | 159 / 139 / 119 | **253 / 220 / 191** |
+| 8 users, new text: code / review / essay | 184 / 175 / 172 | **379 / 326 / 285** |
+| 1 user, new text: code / review / essay | 102 / 86 / 61 | 102 / 76 / 64 |
+
+Copy and edit answers are identical with copies on and off. New text keeps its speed; at near-ties a different
+verify shape can pick a different greedy token, so some new-text answers differ word for word. Results and run
+scripts: [`tools/bench/copy1115/`](tools/bench/copy1115/).
 
 ### Release v1.10.6, 2026-11-13
 

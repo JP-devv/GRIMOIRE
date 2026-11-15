@@ -2,7 +2,11 @@
 
 ## >>> CURRENT PRIORITY (read this before anything else) <<<
 
-**2026-11-05 17:15: RESUMED by Ian. 17:17 Ian: THE ARC B580 (0b:00.0, renderD131) IS ONLY FOR COMFYUI -- never run
+**2026-11-15: main = v1.10.6 source (i4a8-prompt-1112) + copy drafting (copy-draft-1114, 55a9eea), merged at Ian's
+request. Results, open items and the run scripts: [tools/bench/copy1115/RESULTS-2026-11-14-15.md](tools/bench/copy1115/RESULTS-2026-11-14-15.md).
+Next: a release image (G31 + G21) with the full regression; INT8 prompt math; two-card 61K only when Ian names it.**
+
+**2026-11-05 17:15 (historical, superseded above): RESUMED by Ian. 17:17 Ian: THE ARC B580 (0b:00.0, renderD131) IS ONLY FOR COMFYUI -- never run
 anything on it; GRIMOIRE work uses the two B70s only (small-card code paths are checked on gpu0 with a small expert
 budget). Queue on the Tower and next steps: top of [HANDOFF-2026-11-05.md](HANDOFF-2026-11-05.md). v1.10.4 is PUBLISHED
 (315167c) and the five profiles run it.**
