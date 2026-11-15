@@ -52,6 +52,13 @@ sycl::event launch_verify_attn_dpas(sycl::queue& q, const AttnParams& p, const V
 // this library keeps its own copy of the flag.
 void set_verify_kv_kmajor(bool on);
 bool verify_kv_kmajor();
+// TEAM verify attention (2026-11-15, key-major cache only): one work-group of 8 threads per (conversation, KV head,
+// split) holds ALL of that KV head's verify rows (<= 48 = 8 tokens x 6 heads); thread t computes S for its own 16 of
+// every 128-key block, the team shares the block max and P through SLM, then thread t accumulates O for its own 32 of
+// the 256 dims.  Each K / V byte is loaded and widened ONCE (the per-tile kernel: once per 8-row tile, 6x for one
+// user's 7 rows).  -1 = GRIMOIRE_VERIFY_TEAM (default off), 0 off, 1 on.
+void set_verify_team(int mode);
+bool verify_team_on();
 // out[row][head] = the merge of that row's splits.  Empty splits (m = -inf) are skipped.
 sycl::event launch_verify_merge(sycl::queue& q, const AttnParams& p, int rows, int splits_max,
                                 const std::vector<sycl::event>& deps = {});

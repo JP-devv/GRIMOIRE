@@ -74,9 +74,15 @@ int env_int(const char* name, int fallback) {
 }
 } // namespace
 
-namespace { bool g_verify_kmajor = false; }
+namespace { bool g_verify_kmajor = false; int g_verify_team = -1; }
 void set_verify_kv_kmajor(bool on) { g_verify_kmajor = on; }
 bool verify_kv_kmajor() { return g_verify_kmajor; }
+void set_verify_team(int mode) { g_verify_team = mode; }
+bool verify_team_on() {
+    if (g_verify_team >= 0) return g_verify_team != 0;
+    static const bool on = env_int("GRIMOIRE_VERIFY_TEAM", 0) != 0;
+    return on;
+}
 
 bool verify_dpas_ok(const AttnParams& p) {
     return p.head_dim == 256 && p.num_kv_heads > 0 && p.num_heads % p.num_kv_heads == 0 &&
@@ -368,11 +374,259 @@ sycl::event verify_attn_dpas_impl(sycl::queue& q, const AttnParams& p, const Ver
     });
 }
 
+
+// ---- TEAM verify attention (2026-11-15) ---------------------------------------------------------------------------
+// One work-group = TN threads = one (group, KV head, split).  Rows j < nr = nrows * G of that KV head (token j / G,
+// head kvh * G + j % G) in NRB = ceil(nr / 8) row blocks, all of them in every thread.  Per BK = 16 * TN key block:
+//   1. thread t: S[rb][8][16] for keys s0 + 16 t .. + 15 (its own K bytes, widened once; Q row blocks from SLM);
+//   2. row max of its 16 keys -> SLM; barrier; every thread takes the block max over the TN slices;
+//   3. P = exp2(S - m) as fp16 -> SLM [rb][t]; its l slice += row sums; barrier;
+//   4. thread t: O[rb][8][its 32 dims] += P[rb][all BK keys] V[BK keys][its 32 dims] (its own V bytes, widened once).
+// The math per row is the per-tile kernel's (same Q scaling, same widening, same exp2 / fp16 P), with the block max
+// taken over BK keys instead of 16 and l summed per key slice: fp32 reassociation, not a different result.
+constexpr int kTeamThreads = 8;
+constexpr int kTeamMaxRB = 6;                 // 48 rows: 8 tokens x 6 query heads per KV head
+
+sycl::event verify_attn_team_impl(sycl::queue& q, const AttnParams& p, const VerifyGroups& g,
+                                  int64_t kv_stride, const int32_t* d_lens, int splits_max,
+                                  const std::vector<sycl::event>& deps) {
+    constexpr int HD = 256, RB = 8, NK = 16, DT = HD / 16, TN = kTeamThreads, BK = NK * TN;
+    constexpr int DP = HD / TN, DPT = DP / 16, NRBM = kTeamMaxRB, RMAX = NRBM * RB;
+    constexpr uint32_t Q_OFF = 0, Q_BYTES = NRBM * DT * RB * 16 * 2;          // [rb][dt][8][16] fp16
+    constexpr int RMXP = 64;                                                 // SLM row vectors padded to 64
+    constexpr uint32_t MX_OFF = Q_BYTES, MX_BYTES = TN * RMXP * 4;           // [t][row] fp32
+    constexpr uint32_t P_OFF = MX_OFF + MX_BYTES, P_BYTES = NRBM * TN * RB * NK * 2;   // [rb][t][8][16] fp16
+    constexpr uint32_t SLM = P_OFF + P_BYTES;
+    static_assert(DP % 16 == 0 && DPT >= 1, "team geometry");
+    const int G = p.num_heads / p.num_kv_heads;
+    const int KVH = p.num_kv_heads, H = p.num_heads;
+    const int smax = splits_max;
+    const AttnParams pp = p;
+    const VerifyGroups vg = g;
+    const size_t nwg = size_t(g.n) * KVH * smax;
+    return q.submit([&](sycl::handler& h) {
+        h.depends_on(deps);
+        h.parallel_for(sycl::nd_range<1>(nwg * TN, TN), [=](sycl::nd_item<1> it) SYCL_ESIMD_KERNEL {
+            es::slm_init<SLM>();
+            constexpr float NINF = -std::numeric_limits<float>::infinity();
+            int id = int(it.get_group(0));
+            const int t = int(it.get_local_id(0));
+            const int part = id % smax; id /= smax;
+            const int kvh = id % KVH;
+            const int grp = id / KVH;
+            const int row0 = vg.row0[grp], nrows = vg.nrows[grp];
+            const int nr = nrows * G;
+            const int nrb = (nr + RB - 1) / RB;
+            const int len_max = d_lens[row0 + nrows - 1];
+            int nsp = (len_max + BK - 1) / BK;
+            if (nsp > smax) nsp = smax;
+            if (nsp < 1) nsp = 1;
+            int per = (len_max + nsp - 1) / nsp;
+            per = (per + BK - 1) / BK * BK;
+            const int s_beg = part * per;
+            const int s_end = s_beg + per < len_max ? s_beg + per : len_max;
+            if (s_beg >= s_end) {                       // uniform over the work-group: no barrier reached
+                for (int j = t; j < nr; j += TN) {
+                    const int64_t pidx = (int64_t(row0 + j / G) * H + kvh * G + j % G) * smax + part;
+                    pp.part_m[pidx] = NINF;
+                    pp.part_l[pidx] = 0.0f;
+                }
+                return;
+            }
+            // Q -> SLM, scaled into the log2 domain (and by 2^8 for K's 2^-8); rows past nr are zero.
+            const float qs = pp.softmax_scale * 256.0f * 1.4426950408889634f;
+            for (int j = t; j < nrb * RB; j += TN) {
+                const int rb = j / RB, i = j % RB;
+                es::simd<fp16, HD> qh = 0.0f;
+                if (j < nr) {
+                    es::simd<float, HD> qf = es::block_load<float, HD>(
+                        pp.q + (int64_t(row0 + j / G) * H + kvh * G + j % G) * HD) * qs;
+                    qh = qf;
+                }
+                #pragma unroll
+                for (int dt = 0; dt < DT; ++dt)
+                    es::slm_block_store<fp16, 16>(Q_OFF + uint32_t(((rb * DT + dt) * RB + i) * 16 * 2),
+                                                 qh.template select<16, 1>(16 * dt));
+            }
+            es::simd<int, RMAX> lim = 0;                // row j sees keys < lim[j]
+            #pragma unroll
+            for (int j = 0; j < RMAX; ++j)
+                if (j < nr) lim[j] = d_lens[row0 + j / G];
+            es::barrier();
+
+            const int64_t cbase = int64_t(vg.slot[grp]) * kv_stride;
+            const uint32_t* kh32 = reinterpret_cast<const uint32_t*>(pp.k_cache + cbase + int64_t(kvh) * HD * pp.seq_cap);
+            const uint32_t* vh32 = reinterpret_cast<const uint32_t*>(pp.v_cache + cbase + int64_t(kvh) * pp.seq_cap * HD);
+            const unsigned CAPM = unsigned(pp.seq_cap) - 1;
+            es::simd<float, NRBM * RB * DP> o = 0.0f;  // [rb][dpt][8][16]
+            es::simd<float, RMAX> m = NINF, l = 0.0f;  // l: this thread's key slices only
+            const es::simd<int, NK> col(0, 1);
+            for (int s0 = s_beg; s0 < s_end; s0 += BK) {
+                const int ks = s0 + t * NK;
+                es::simd<float, NRBM * RB * NK> sc = NINF;   // [rb][8][16]
+                if (ks < s_end) {
+                    sc = 0.0f;
+                    #pragma unroll
+                    for (int dc = 0; dc < HD / 32; ++dc) {
+                        es::simd<uint32_t, 128> tq = es::load_2d<uint32_t, 8, 16, 1, true, false>(
+                            kh32, HD - 1, CAPM, HD - 1, 8 * dc, ks);
+                        #pragma unroll
+                        for (int hh = 0; hh < 2; ++hh) {
+                            es::simd<uint32_t, 128> b;
+                            #pragma unroll
+                            for (int c = 0; c < 4; ++c) {
+                                es::simd<uint32_t, 16> tt = tq.template select<16, 1>((4 * hh + c) * 16);
+                                es::simd<uint8_t, 64> row = tt.template bit_cast_view<uint8_t>();
+                                #pragma unroll
+                                for (int hp = 0; hp < 2; ++hp) {
+                                    es::simd<uint16_t, 32> b16 = 0;
+                                    auto bv = b16.template bit_cast_view<uint8_t>();
+                                    bv.template select<16, 4>(0) = row.template select<16, 4>(2 * hp);
+                                    bv.template select<16, 4>(2) = row.template select<16, 4>(2 * hp + 1);
+                                    es::simd<uint16_t, 32> h16 = ((b16 & 0x7F) << 7) | ((b16 & 0x80) << 8);
+                                    b.template select<16, 1>(16 * (2 * c + hp)) = h16.template bit_cast_view<uint32_t>();
+                                }
+                            }
+                            const int dt = 2 * dc + hh;
+                            #pragma unroll
+                            for (int rb = 0; rb < NRBM; ++rb) {
+                                if (rb >= nrb) break;
+                                es::simd<fp16, RB * 16> a = es::slm_block_load<fp16, RB * 16>(
+                                    Q_OFF + uint32_t((rb * DT + dt) * RB * 16 * 2));
+                                sc.template select<RB * NK, 1>(rb * RB * NK) =
+                                    xmx::dpas<8, RB, float, float, fp16, fp16>(
+                                        es::simd<float, RB * NK>(sc.template select<RB * NK, 1>(rb * RB * NK)),
+                                        b.template bit_cast_view<fp16>().read(), a);
+                            }
+                        }
+                    }
+                    // mask: each row its own length
+                    #pragma unroll
+                    for (int j = 0; j < RMAX; ++j) {
+                        es::simd<float, NK> v = sc.template select<NK, 1>(NK * j);
+                        v.merge(es::simd<float, NK>(NINF), col + ks >= lim[j]);
+                        sc.template select<NK, 1>(NK * j) = v;
+                    }
+                }
+                es::simd<float, RMAX> bm;
+                #pragma unroll
+                for (int j = 0; j < RMAX; ++j)
+                    bm[j] = es::hmax<float>(es::simd<float, NK>(sc.template select<NK, 1>(NK * j)));
+                {
+                    es::simd<float, RMXP> w = NINF;
+                    w.template select<RMAX, 1>(0) = bm;
+                    es::slm_block_store<float, RMXP>(MX_OFF + uint32_t(t * RMXP * 4), w);
+                }
+                es::barrier();
+                #pragma unroll
+                for (int u = 0; u < TN; ++u) {
+                    es::simd<float, RMXP> w = es::slm_block_load<float, RMXP>(MX_OFF + uint32_t(u * RMXP * 4));
+                    bm = es::max(bm, es::simd<float, RMAX>(w.template select<RMAX, 1>(0)));
+                }
+                es::simd<float, RMAX> mn = es::max(m, bm);
+                es::simd<float, RMAX> ms = mn;
+                ms.merge(es::simd<float, RMAX>(0.0f), mn == NINF);
+                es::simd<float, RMAX> corr = es::exp2(m - ms);
+                es::simd<float, RMAX> rs;
+                #pragma unroll
+                for (int j = 0; j < RMAX; ++j) {
+                    const float msj = ms[j];
+                    es::simd<float, NK> pv = es::exp2(es::simd<float, NK>(sc.template select<NK, 1>(NK * j)) - msj);
+                    sc.template select<NK, 1>(NK * j) = pv;
+                    rs[j] = es::reduce<float>(pv, std::plus<>());
+                }
+                l = l * corr + rs;
+                m = mn;
+                #pragma unroll
+                for (int rb = 0; rb < NRBM; ++rb) {
+                    if (rb >= nrb) break;
+                    es::simd<fp16, RB * NK> ph = sc.template select<RB * NK, 1>(rb * RB * NK);
+                    es::slm_block_store<fp16, RB * NK>(P_OFF + uint32_t(((rb * TN + t) * RB * NK) * 2), ph);
+                }
+                es::barrier();
+                float cr[RMAX];
+                #pragma unroll
+                for (int j = 0; j < RMAX; ++j) cr[j] = corr[j];
+                #pragma unroll
+                for (int rb = 0; rb < NRBM; ++rb)
+                    #pragma unroll
+                    for (int dp = 0; dp < DPT; ++dp)
+                        #pragma unroll
+                        for (int i = 0; i < RB; ++i)
+                            o.template select<16, 1>(((rb * DPT + dp) * RB + i) * 16) *= cr[rb * RB + i];
+                // O += P V over the block's TN key chunks, this thread's DP dims: [16 keys][DP bytes] per chunk
+                #pragma unroll 2
+                for (int c = 0; c < TN; ++c) {
+                    if (s0 + c * NK >= s_end) break;
+                    es::simd<uint32_t, NK * DP / 4> vr = es::load_2d<uint32_t, DP / 4, NK>(
+                        vh32, HD - 1, CAPM, HD - 1, t * (DP / 4), s0 + c * NK);
+                    es::simd<uint8_t, NK * DP> vb = vr.template bit_cast_view<uint8_t>();
+                    #pragma unroll
+                    for (int dp = 0; dp < DPT; ++dp) {
+                        es::simd<uint32_t, 128> b;
+                        #pragma unroll
+                        for (int pr = 0; pr < 8; ++pr) {
+                            es::simd<uint32_t, 16> lo = e4m3_h16<16>(vb.template select<16, 1>((2 * pr) * DP + 16 * dp));
+                            es::simd<uint32_t, 16> hi = e4m3_h16<16>(vb.template select<16, 1>((2 * pr + 1) * DP + 16 * dp));
+                            b.template select<16, 1>(16 * pr) = lo | (hi << 16);
+                        }
+                        #pragma unroll
+                        for (int rb = 0; rb < NRBM; ++rb) {
+                            if (rb >= nrb) break;
+                            es::simd<fp16, RB * NK> pa = es::slm_block_load<fp16, RB * NK>(
+                                P_OFF + uint32_t(((rb * TN + c) * RB * NK) * 2));
+                            o.template select<RB * 16, 1>((rb * DPT + dp) * RB * 16) =
+                                xmx::dpas<8, RB, float, float, fp16, fp16>(
+                                    es::simd<float, RB * 16>(o.template select<RB * 16, 1>((rb * DPT + dp) * RB * 16)),
+                                    b.template bit_cast_view<fp16>().read(), pa);
+                        }
+                    }
+                }
+            }
+            // l over the team's key slices (the MX area is free: every thread read it before the last barrier)
+            {
+                es::simd<float, RMXP> w = 0.0f;
+                w.template select<RMAX, 1>(0) = l;
+                es::slm_block_store<float, RMXP>(MX_OFF + uint32_t(t * RMXP * 4), w);
+            }
+            es::barrier();
+            es::simd<float, RMAX> lt = 0.0f;
+            #pragma unroll
+            for (int u = 0; u < TN; ++u) {
+                es::simd<float, RMXP> w = es::slm_block_load<float, RMXP>(MX_OFF + uint32_t(u * RMXP * 4));
+                lt += es::simd<float, RMAX>(w.template select<RMAX, 1>(0));
+            }
+            for (int j = 0; j < nr; ++j) {
+                const int64_t pidx = (int64_t(row0 + j / G) * H + kvh * G + j % G) * smax + part;
+                const int rb = j / RB, i = j % RB;
+                #pragma unroll
+                for (int dp = 0; dp < DPT; ++dp) {
+                    es::simd<float, 16> ov = o.template select<16, 1>(((rb * DPT + dp) * RB + i) * 16);
+                    es::block_store<float, 16>(pp.partials + pidx * HD + t * DP + dp * 16, ov * 256.0f);
+                }
+                if (t == 0) {
+                    pp.part_m[pidx] = m[j];
+                    pp.part_l[pidx] = lt[j];
+                }
+            }
+        });
+    });
+}
+
 } // namespace
 
 sycl::event launch_verify_attn_dpas(sycl::queue& q, const AttnParams& p, const VerifyGroups& g,
                                     int64_t kv_stride, const int32_t* d_lens, int splits_max,
                                     const std::vector<sycl::event>& deps) {
+    if (g_verify_kmajor && verify_team_on()) {
+        // team path: 2..8 rows per conversation (1-row MTP drafts keep the per-tile kernel, which streams its keys
+        // once already); G = 6 here -> at most 48 rows per KV head
+        const int G = p.num_heads / p.num_kv_heads;
+        int lo = 1 << 30, hi = 0;
+        for (int i = 0; i < g.n; ++i) { lo = g.nrows[i] < lo ? g.nrows[i] : lo; hi = g.nrows[i] > hi ? g.nrows[i] : hi; }
+        if (g.n > 0 && lo >= 2 && hi * G <= kTeamMaxRB * 8)
+            return verify_attn_team_impl(q, p, g, kv_stride, d_lens, splits_max, deps);
+    }
     return g_verify_kmajor ? verify_attn_dpas_impl<true>(q, p, g, kv_stride, d_lens, splits_max, deps)
                            : verify_attn_dpas_impl<false>(q, p, g, kv_stride, d_lens, splits_max, deps);
 }
