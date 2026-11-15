@@ -358,6 +358,80 @@ sycl::event dequant_int4_stream(sycl::queue& q, const QuantWeight& w, sycl_bf16*
         });
     });
 }
+// 2026-11-15: the same walk with FOUR adjacent output columns per work-item, so every store is 16 bytes (the walk above
+// stores 4 bytes per lane: 64-byte messages, ~121 GB/s at prompt sizes -- 3.6 s of a 61K prompt, unitrace 11-15).
+// Same arithmetic per value, so the bf16 output is identical bit for bit (GRIMOIRE_I4_DQ4_CHECK=1 compares the two
+// once).  GRIMOIRE_I4_DQ4=0 = the walk above.
+sycl::event dequant_int4_stream4(sycl::queue& q, const QuantWeight& w, sycl_bf16* dst,
+                                 const std::vector<sycl::event>& deps, int ilv_fi = 0) {
+    const int N = w.N, K = w.K, gsh = w.int4_gshift();
+    return q.submit([&](sycl::handler& h) {
+        h.depends_on(deps);
+        const QuantWeight wc = w;
+        const int KB = K / 128, NB = N / 256;
+        h.parallel_for(sycl::nd_range<1>(size_t(KB) * NB * 64, 64),
+            [=](sycl::nd_item<1> it) [[sycl::reqd_sub_group_size(SG_SIZE)]] {
+            const int L = int(it.get_group(0));
+            const int n0 = (L % NB) * 256 + int(it.get_local_id(0)) * 4;
+            const int kb = L / NB;
+            // ilv_fi is a multiple of 4: n0 .. n0 + 3 stay adjacent inside one 32-column block
+            const int col = ilv_fi == 0 ? n0
+                          : n0 < ilv_fi ? (n0 / 32) * 64 + n0 % 32
+                                        : ((n0 - ilv_fi) / 32) * 64 + 32 + (n0 - ilv_fi) % 32;
+            uint32_t* o = reinterpret_cast<uint32_t*>(dst) + int64_t(kb) * 64 * N + col;
+            const bf16_t* sc0 = static_cast<const bf16_t*>(wc.scales);
+            #pragma unroll
+            for (int c = 0; c < 4; ++c) {
+                const int g = (kb * 128 + c * 32) >> gsh;
+                float sc[4];
+                uint32_t zero[4];
+                sycl::uint4 v[4];
+                #pragma unroll
+                for (int j = 0; j < 4; ++j) {
+                    const int64_t n = n0 + j;
+                    sc[j] = bf16_to_f32(sc0[n * wc.row_scales + g]);
+                    zero[j] = wc.zeros ? uint32_t(wc.zeros[n * wc.row_scales + g]) : 0u;
+                    v[j] = *reinterpret_cast<const sycl::uint4*>(wc.payload + n * wc.row_bytes + kb * 64 + c * 16);
+                }
+                #pragma unroll
+                for (int d = 0; d < 4; ++d)
+                    #pragma unroll
+                    for (int b = 0; b < 4; ++b) {
+                        sycl::uint4 ov;
+                        #pragma unroll
+                        for (int j = 0; j < 4; ++j)
+                            ov[j] = int4_pair_bf16((v[j][d] >> (8 * b)) & 0xFFu, sc[j], zero[j]);
+                        *reinterpret_cast<sycl::uint4*>(o + int64_t(c * 16 + d * 4 + b) * N) = ov;
+                    }
+            }
+        });
+    });
+}
+// Dispatch: the 4-column walk unless GRIMOIRE_I4_DQ4=0; GRIMOIRE_I4_DQ4_CHECK=1 runs both once and prints the result.
+sycl::event dequant_int4_any(sycl::queue& q, const QuantWeight& w, sycl_bf16* dst,
+                             const std::vector<sycl::event>& deps, int ilv_fi = 0) {
+    static const bool four = [] { const char* e = std::getenv("GRIMOIRE_I4_DQ4"); return !(e && *e == '0'); }();
+    static int check = [] { const char* e = std::getenv("GRIMOIRE_I4_DQ4_CHECK"); return e ? std::atoi(e) : 0; }();
+    if (!four) return dequant_int4_stream(q, w, dst, deps, ilv_fi);
+    if (check > 0) {
+        --check;
+        const size_t n = size_t(w.N) * w.K;
+        sycl_bf16* ref = sycl::malloc_device<sycl_bf16>(n, q);
+        if (ref) {
+            dequant_int4_stream(q, w, ref, deps, ilv_fi).wait();
+            dequant_int4_stream4(q, w, dst, {}, ilv_fi).wait();
+            std::vector<uint16_t> a(n), b(n);
+            q.memcpy(a.data(), ref, n * 2);
+            q.memcpy(b.data(), dst, n * 2).wait();
+            size_t diff = 0;
+            for (size_t i = 0; i < n; ++i) diff += a[i] != b[i];
+            std::fprintf(stderr, "  I4_DQ4 check N=%d K=%d ilv=%d: %zu of %zu bf16 differ\n", w.N, w.K, ilv_fi, diff, n);
+            sycl::free(ref, q);
+            return {};
+        }
+    }
+    return dequant_int4_stream4(q, w, dst, deps, ilv_fi);
+}
 bool int4_stream_ok(const QuantWeight& w) {
     if (w.fmt != Fmt::INT4 || !w.payload || !w.scales) return false;
     const int gs = 1 << w.int4_gshift();
@@ -431,7 +505,7 @@ sycl::event dequant_any(sycl::queue& q, const QuantWeight& w, sycl_bf16* dst,
         w.K % 128 == 0 && w.N % 256 == 0)
         return dequant_mxfp4_stream(q, w, dst, deps);
     if (!no_stream && int4_stream_ok(w))
-        return dequant_int4_stream(q, w, dst, deps);
+        return dequant_int4_any(q, w, dst, deps);
     if (!no_stream && native_stream_ok(w))          // GGUF native blocks (native_dequant.hpp)
         return dequant_native_stream(q, w, dst, deps);
     if (w.N % 64 == 0 && w.K % 64 == 0) {
@@ -3593,7 +3667,7 @@ sycl::event gemm_fast_run(sycl::queue& q, const QuantWeight& w, const sycl_bf16*
         e = q.memset(s.w, 0, size_t(Np) * K * sizeof(sycl_bf16), deps);
         e = dequant_any(q, w, s.w, {e}, Np);
     } else if (EPI == 1) {
-        e = w.fmt == Fmt::INT4 ? dequant_int4_stream(q, w, s.w, deps, N / 2)
+        e = w.fmt == Fmt::INT4 ? dequant_int4_any(q, w, s.w, deps, N / 2)
           : native_stream_ok(w) ? dequant_native_stream(q, w, s.w, deps, N / 2)
                                 : dequant_mxfp4_stream(q, w, s.w, deps, N / 2);
     } else {

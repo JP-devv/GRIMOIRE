@@ -44,9 +44,10 @@ int verify_dpas_splits(const AttnParams& p, const VerifyGroups& g, int len_max);
 // p: row 0's q / out (row stride num_heads * head_dim), k/v_cache = the slot-0 bases,
 // partials / part_m / part_l with room for rows * num_heads * splits_max.
 // splits_max >= verify_dpas_splits(len_max) of every group.
+// len_hint: the longest row's length (host-known at the call); 0 = unknown -> never the team kernel.
 sycl::event launch_verify_attn_dpas(sycl::queue& q, const AttnParams& p, const VerifyGroups& g,
                                     int64_t kv_stride, const int32_t* d_lens, int splits_max,
-                                    const std::vector<sycl::event>& deps = {});
+                                    const std::vector<sycl::event>& deps = {}, int len_hint = 0);
 // KEY-MAJOR K CACHE (2026-11-14): when set, K is stored like V, [kv_head][seq_cap][head_dim] bytes, and the
 // verify kernel reads it with transposed 2-D block loads.  Set once at load (Grimoire::build, kv_kmajor_flag()) --
 // this library keeps its own copy of the flag.
@@ -56,7 +57,10 @@ bool verify_kv_kmajor();
 // split) holds ALL of that KV head's verify rows (<= 48 = 8 tokens x 6 heads); thread t computes S for its own 16 of
 // every 128-key block, the team shares the block max and P through SLM, then thread t accumulates O for its own 32 of
 // the 256 dims.  Each K / V byte is loaded and widened ONCE (the per-tile kernel: once per 8-row tile, 6x for one
-// user's 7 rows).  -1 = GRIMOIRE_VERIFY_TEAM (default off), 0 off, 1 on.
+// user's 7 rows).  -1 = GRIMOIRE_VERIFY_TEAM (default on), 0 off, 1 on.  Used for >= 4 rows per conversation at
+// len_hint >= GRIMOIRE_VERIFY_TEAM_MIN (32768).  MEASURED 2026-11-15 (tools/bench_verify_team, one B70, us per layer,
+// per-tile -> team): 61K 1x7 577 -> 403, 2x7 991 -> 793, 4x7 1954 -> 1467, 4x4 1288 -> 1196, 8x4 2325 -> 2305;
+// 32K 4x7 1131 -> 798; slower for 2-row groups (61K 1x2 254 -> 320) and short contexts (8K 1x7 74 -> 88).
 void set_verify_team(int mode);
 bool verify_team_on();
 // out[row][head] = the merge of that row's splits.  Empty splits (m = -inf) are skipped.

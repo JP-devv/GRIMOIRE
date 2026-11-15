@@ -80,7 +80,7 @@ bool verify_kv_kmajor() { return g_verify_kmajor; }
 void set_verify_team(int mode) { g_verify_team = mode; }
 bool verify_team_on() {
     if (g_verify_team >= 0) return g_verify_team != 0;
-    static const bool on = env_int("GRIMOIRE_VERIFY_TEAM", 0) != 0;
+    static const bool on = env_int("GRIMOIRE_VERIFY_TEAM", 1) != 0;
     return on;
 }
 
@@ -618,14 +618,15 @@ sycl::event verify_attn_team_impl(sycl::queue& q, const AttnParams& p, const Ver
 
 sycl::event launch_verify_attn_dpas(sycl::queue& q, const AttnParams& p, const VerifyGroups& g,
                                     int64_t kv_stride, const int32_t* d_lens, int splits_max,
-                                    const std::vector<sycl::event>& deps) {
-    if (g_verify_kmajor && verify_team_on()) {
+                                    const std::vector<sycl::event>& deps, int len_hint) {
+    static const int team_min = env_int("GRIMOIRE_VERIFY_TEAM_MIN", 32768);
+    if (g_verify_kmajor && verify_team_on() && (g_verify_team == 1 || (len_hint > 0 && len_hint >= team_min))) {
         // team path: 2..8 rows per conversation (1-row MTP drafts keep the per-tile kernel, which streams its keys
         // once already); G = 6 here -> at most 48 rows per KV head
         const int G = p.num_heads / p.num_kv_heads;
         int lo = 1 << 30, hi = 0;
         for (int i = 0; i < g.n; ++i) { lo = g.nrows[i] < lo ? g.nrows[i] : lo; hi = g.nrows[i] > hi ? g.nrows[i] : hi; }
-        if (g.n > 0 && lo >= 2 && hi * G <= kTeamMaxRB * 8)
+        if (g.n > 0 && lo >= (g_verify_team == 1 ? 2 : 4) && hi * G <= kTeamMaxRB * 8)
             return verify_attn_team_impl(q, p, g, kv_stride, d_lens, splits_max, deps);
     }
     return g_verify_kmajor ? verify_attn_dpas_impl<true>(q, p, g, kv_stride, d_lens, splits_max, deps)

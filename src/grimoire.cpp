@@ -21439,7 +21439,7 @@ bool Grimoire::prefill(const std::vector<int32_t>& tokens,
                 }
                 if(use_vdpas){
                     const int smax=verify_dpas_splits(apr,vg,len_max);
-                    launch_verify_attn_dpas(q,apr,vg,int64_t(d.kv_slot),d_lens,smax);
+                    launch_verify_attn_dpas(q,apr,vg,int64_t(d.kv_slot),d_lens,smax,{},len_max);
                     launch_verify_merge(q,apr,M,smax);
                 }else
                 if(rows_ok && d_lens==rows_len_dev && M<=kSpecBatch && flash_decode_rows_ok(apr)){
@@ -21521,7 +21521,7 @@ bool Grimoire::prefill(const std::vector<int32_t>& tokens,
                     });
                     VerifyGroups vg{}; vg.n=1; vg.row0[0]=0; vg.nrows[0]=M; vg.slot[0]=0;
                     const int splits=verify_dpas_splits(solo_ap,vg,pos+M);
-                    launch_verify_attn_dpas(q,solo_ap,vg,int64_t(d.kv_slot),dtok,splits);
+                    launch_verify_attn_dpas(q,solo_ap,vg,int64_t(d.kv_slot),dtok,splits,{},pos+M);
                     launch_verify_merge(q,solo_ap,M,splits);
                 }else if(next_tokens && M<=kSpecBatch &&
                    !std::getenv("GRIMOIRE_LEGACY_VERIFY_ATTN")){
