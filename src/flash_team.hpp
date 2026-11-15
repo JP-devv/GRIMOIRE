@@ -19,15 +19,17 @@
 #include <sycl/ext/intel/esimd.hpp>
 #include <limits>
 namespace b70 {
-template <int D, int BK, int NT, int TEAMS>
+// RTX (2026-11-15): rows per team, default 8 * NT.  RTX < 8 * NT gives each thread fewer output dims (DP = D / NT)
+// and more keys of S per Q load (KS = BK / NT): e.g. <D, 256, 8, 2, 32> = 32 rows, 8 threads, 32 keys each.
+template <int D, int BK, int NT, int TEAMS, int RTX = 8 * NT>
 sycl::event flash_team(sycl::queue& q, sycl::event dep, const sycl_bf16* Qb, int Tp,
                        const sycl_bf16* Kp, const sycl_bf16* Vp, int Sp, float* out,
                        int tokens, int start, int H, int KVH) {
     namespace es = sycl::ext::intel::esimd;
     namespace xmx = sycl::ext::intel::esimd::xmx;
-    constexpr int RT = 8 * NT, NRB = RT / 8, DP = D / NT, DPT = DP / 16, KS = BK / NT, KC = KS / 16;
+    constexpr int RT = RTX, NRB = RT / 8, DP = D / NT, DPT = DP / 16, KS = BK / NT, KC = KS / 16;
     constexpr int NBK = BK / 16, DT = D / 16, WGT = NT * TEAMS, WROWS = RT * TEAMS, QU = KC >= 2 ? 1 : 2;
-    static_assert(KS % 16 == 0 && DP % 16 == 0 && RT <= 32, "team geometry");
+    static_assert(KS % 16 == 0 && DP % 16 == 0 && RT <= 32 && RT % 8 == 0, "team geometry");
     constexpr int MAXB = NT * RT * 4;                 // per-row block max (later l) of every thread
     constexpr int PB = BK * RT * 2;                   // P [kc][rb][8][16] bf16
     constexpr int TEAM_SLM = MAXB + PB;

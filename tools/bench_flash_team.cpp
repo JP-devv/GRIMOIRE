@@ -79,10 +79,18 @@ int main() {
 #define TEAM(BKX, NT, TEAMS) do { q.memset(out, 0, n * 4).wait(); \
         const double ms = timeit([&] { flash_team<D, BKX, NT, TEAMS>(q, e, Qb, Tp, Kp, Vp, Sp, out, T, start, H, KVH); }); \
         check("team BK" #BKX " NT" #NT " x" #TEAMS, ms); } while (0)
+#define TEAMR(BKX, NT, TEAMS, RTX) do { q.memset(out, 0, n * 4).wait(); \
+        const double ms = timeit([&] { flash_team<D, BKX, NT, TEAMS, RTX>(q, e, Qb, Tp, Kp, Vp, Sp, out, T, start, H, KVH); }); \
+        check("team BK" #BKX " NT" #NT " x" #TEAMS " RT" #RTX, ms); } while (0)
         TEAM(128, 4, 2);
-        TEAM(128, 4, 4);
         TEAM(64, 4, 2);
-        TEAM(64, 4, 4);
+        // 2026-11-15: rows per team decoupled from threads per team (fewer O dims per thread, more keys per Q load)
+        TEAMR(256, 8, 2, 32);
+        TEAMR(256, 8, 1, 32);
+        TEAMR(128, 8, 2, 32);
+        TEAMR(128, 8, 4, 32);
+        TEAMR(256, 8, 2, 24);
+        TEAMR(128, 4, 2, 24);
         // the 64-key block changes the softmax block max (so the bf16 P rounding): compare with production at 64
         {
             q.memset(out, 0, n * 4).wait();
