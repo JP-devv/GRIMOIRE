@@ -527,6 +527,99 @@ sycl::event launch_deltanet_prefill(sycl::queue& q, const DeltaNetPrefillParams&
     return deltanet_prefill_wg(q, p, deps);
 }
 
+namespace {
+// One work-group of WG items per token; each item keeps EPT elements of its row in registers, so every
+// load is issued up front and the second pass does not re-read h.
+template <int WG, int EPT>
+sycl::event rmsnorm_residual_regs(sycl::queue& q, float* h, const float* r0, const float* r1,
+                                  const bf16_t* weight, float* out, int tokens, int hidden, float eps,
+                                  sycl_bf16* out_bf, const std::vector<sycl::event>& deps, float weight_offset) {
+    return q.submit([&](sycl::handler& hd) {
+        hd.depends_on(deps);
+        sycl::local_accessor<float, 1> partial(WG / SG_SIZE, hd);
+        hd.parallel_for(
+            sycl::nd_range<1>(size_t(tokens) * WG, WG),
+            [=](sycl::nd_item<1> it) [[sycl::reqd_sub_group_size(SG_SIZE)]] {
+                const auto sg = it.get_sub_group();
+                const int t = int(it.get_group(0));
+                const int lid = int(it.get_local_id(0));
+                const int sgid = int(sg.get_group_id()[0]);
+                const int lane = int(sg.get_local_id()[0]);
+                float* ht = h + int64_t(t) * hidden;
+                float* ot = out ? out + int64_t(t) * hidden : nullptr;
+                sycl_bf16* obt = out_bf ? out_bf + int64_t(t) * hidden : nullptr;
+                const float* a = r0 ? r0 + int64_t(t) * hidden : nullptr;
+                const float* b = r1 ? r1 + int64_t(t) * hidden : nullptr;
+                float vals[EPT];
+                #pragma unroll
+                for (int e = 0; e < EPT; ++e) {
+                    const int i = lid + e * WG;
+                    vals[e] = i < hidden ? ht[i] : 0.0f;
+                }
+                // WG 1024 (verify rows): the norm weights load with the row instead of after the reduction
+                float wv[WG == 1024 ? EPT : 1];
+                if constexpr (WG == 1024) {
+                    #pragma unroll
+                    for (int e = 0; e < EPT; ++e) {
+                        const int i = lid + e * WG;
+                        wv[e] = i < hidden ? weight_offset + bf16_to_f32(weight[i]) : 0.0f;
+                    }
+                }
+                if (a) {
+                    #pragma unroll
+                    for (int e = 0; e < EPT; ++e) {
+                        const int i = lid + e * WG;
+                        if (i < hidden) vals[e] += a[i];
+                    }
+                }
+                if (b) {
+                    #pragma unroll
+                    for (int e = 0; e < EPT; ++e) {
+                        const int i = lid + e * WG;
+                        if (i < hidden) vals[e] += b[i];
+                    }
+                }
+                float ss = 0.0f;
+                #pragma unroll
+                for (int e = 0; e < EPT; ++e) {
+                    const int i = lid + e * WG;
+                    if (i < hidden) {
+                        if (a || b) ht[i] = vals[e];
+                        ss = sycl::fma(vals[e], vals[e], ss);
+                    }
+                }
+                ss = sycl::reduce_over_group(sg, ss, sycl::plus<float>());
+                float* pt = partial.template get_multi_ptr<sycl::access::decorated::no>().get();
+                if (lane == 0) pt[sgid] = ss;
+                sycl::group_barrier(it.get_group());
+                float total = 0.0f;
+                if constexpr (WG == 1024) {
+                    // 64 partials: 4 per lane, then one sub-group reduction (every sub-group gets the same
+                    // sum in the same order), instead of 64 dependent SLM reads per item
+                    #pragma unroll
+                    for (int j = 0; j < WG / SG_SIZE / SG_SIZE; ++j) total += pt[lane + j * SG_SIZE];
+                    total = sycl::reduce_over_group(sg, total, sycl::plus<float>());
+                } else {
+                    for (int i = 0; i < WG / SG_SIZE; ++i) total += pt[i];
+                }
+                const float scale = sycl::rsqrt(total / float(hidden) + eps);
+                #pragma unroll
+                for (int e = 0; e < EPT; ++e) {
+                    const int i = lid + e * WG;
+                    if (i < hidden) {
+                        float wgt;
+                        if constexpr (WG == 1024) wgt = wv[e];
+                        else wgt = weight_offset + bf16_to_f32(weight[i]);
+                        const float v = vals[e] * scale * wgt;
+                        if (ot) ot[i] = v;
+                        if (obt) obt[i] = sycl_bf16(v);
+                    }
+                }
+            });
+    });
+}
+}  // namespace
+
 // One work-group per token.  This is the batched counterpart of the
 // decode residual+RMSNorm fusion and intentionally uses the same reduction
 // order inside each row, making state-equivalence failures easy to localise.
@@ -549,71 +642,22 @@ sycl::event launch_rmsnorm_residual_batched(
     // 2026-10-09, Qwen3.8-27B MTP verify (7 rows): the loop form was 21 us (input norm)
     // and 16 us (post norm) per layer, latency-bound on one dependent load per element.
     constexpr int EPT = 32;
-    if (hidden <= EPT * WG) {
-        return q.submit([&](sycl::handler& hd) {
-            hd.depends_on(deps);
-            sycl::local_accessor<float, 1> partial(WG / SG_SIZE, hd);
-            hd.parallel_for(
-                sycl::nd_range<1>(size_t(tokens) * WG, WG),
-                [=](sycl::nd_item<1> it) [[sycl::reqd_sub_group_size(SG_SIZE)]] {
-                    const auto sg = it.get_sub_group();
-                    const int t = int(it.get_group(0));
-                    const int lid = int(it.get_local_id(0));
-                    const int sgid = int(sg.get_group_id()[0]);
-                    const int lane = int(sg.get_local_id()[0]);
-                    float* ht = h + int64_t(t) * hidden;
-                    float* ot = out ? out + int64_t(t) * hidden : nullptr;
-                    sycl_bf16* obt = out_bf ? out_bf + int64_t(t) * hidden : nullptr;
-                    const float* a = r0 ? r0 + int64_t(t) * hidden : nullptr;
-                    const float* b = r1 ? r1 + int64_t(t) * hidden : nullptr;
-                    float vals[EPT];
-                    #pragma unroll
-                    for (int e = 0; e < EPT; ++e) {
-                        const int i = lid + e * WG;
-                        vals[e] = i < hidden ? ht[i] : 0.0f;
-                    }
-                    if (a) {
-                        #pragma unroll
-                        for (int e = 0; e < EPT; ++e) {
-                            const int i = lid + e * WG;
-                            if (i < hidden) vals[e] += a[i];
-                        }
-                    }
-                    if (b) {
-                        #pragma unroll
-                        for (int e = 0; e < EPT; ++e) {
-                            const int i = lid + e * WG;
-                            if (i < hidden) vals[e] += b[i];
-                        }
-                    }
-                    float ss = 0.0f;
-                    #pragma unroll
-                    for (int e = 0; e < EPT; ++e) {
-                        const int i = lid + e * WG;
-                        if (i < hidden) {
-                            if (a || b) ht[i] = vals[e];
-                            ss = sycl::fma(vals[e], vals[e], ss);
-                        }
-                    }
-                    ss = sycl::reduce_over_group(sg, ss, sycl::plus<float>());
-                    float* pt = partial.template get_multi_ptr<sycl::access::decorated::no>().get();
-                    if (lane == 0) pt[sgid] = ss;
-                    sycl::group_barrier(it.get_group());
-                    float total = 0.0f;
-                    for (int i = 0; i < WG / SG_SIZE; ++i) total += pt[i];
-                    const float scale = sycl::rsqrt(total / float(hidden) + eps);
-                    #pragma unroll
-                    for (int e = 0; e < EPT; ++e) {
-                        const int i = lid + e * WG;
-                        if (i < hidden) {
-                            const float v = vals[e] * scale * (weight_offset + bf16_to_f32(weight[i]));
-                            if (ot) ot[i] = v;
-                            if (obt) obt[i] = sycl_bf16(v);
-                        }
-                    }
-                });
-        });
-    }
+    // Verify-sized batches (MTP verify = 7 rows for one user, <= 16 rows): one 256-item group per row
+    // leaves 25 of the 32 Xe cores idle and each row latency-bound.  MEASURED 2026-11-13 (unitrace, one
+    // B70, Swift INT4 MTP K6, single user): 15.5 us per call, 130 calls per step = 2.0 ms of a ~41 ms
+    // step.  A 1024-item group per row (5 elements per item at hidden 5120) puts 4x the loads in flight.
+    // Different per-item element split = different fp32 summation order (not bit-identical to 256).
+    // GRIMOIRE_NORM_WG=256 restores the 256-item kernel at every size.
+    static const int small_wg = [] {
+        const char* e = std::getenv("GRIMOIRE_NORM_WG");
+        return e && std::atoi(e) == 256 ? 256 : 1024;
+    }();
+    if (small_wg == 1024 && tokens <= 64 && hidden <= 8 * 1024)
+        return rmsnorm_residual_regs<1024, 8>(q, h, r0, r1, weight, out, tokens, hidden, eps, out_bf, deps,
+                                              weight_offset);
+    if (hidden <= EPT * WG)
+        return rmsnorm_residual_regs<WG, EPT>(q, h, r0, r1, weight, out, tokens, hidden, eps, out_bf, deps,
+                                              weight_offset);
     return q.submit([&](sycl::handler& hd) {
         hd.depends_on(deps);
         sycl::local_accessor<float, 1> partial(WG / SG_SIZE, hd);
@@ -1143,6 +1187,47 @@ sycl::event launch_causal_conv1d_split_rows(sycl::queue& q, const float* x,
       });});
 }
 
+// Speculative verify, kernel width 4 (11-05): every conversation's rows in ONE launch.  Group g
+// is rows row0[g] .. row0[g] + nrows[g] - 1 of the conversation in slot[g]; its history is its
+// ring (ring_base + slot[g] * ring_stride), copied first to save_base + row0[g] * save_stride for
+// the commit's rebuild.  The ring itself is not shifted: the commit rebuilds it from that copy and
+// the accepted rows' inputs.  The kernel-4 path of launch_causal_conv1d_split_prefill per group
+// (same fma order, same SiLU): bit-identical outputs.  The per-conversation loop it replaces made
+// three launches per conversation and layer (ring copy, conv, ring shift).
+sycl::event launch_causal_conv1d_split_groups(sycl::queue& q, const float* x,
+    const bf16_t* weight, float* ring_base, int64_t ring_stride, const DnGroups& g,
+    int channels, float* qv, float* kv, float* vv, int qk_size, int v_size,
+    float* save_base, int64_t save_stride, const std::vector<sycl::event>& deps){
+    return q.submit([&](sycl::handler& hd){hd.depends_on(deps);
+      const DnGroups gg=g;
+      hd.parallel_for(sycl::range<2>(size_t(g.n),size_t(channels)),[=](sycl::id<2>id){
+        const int gi=int(id[0]),c=int(id[1]),ch=channels;
+        const bf16_t*w=weight+int64_t(c)*4;
+        const float w0=bf16_to_f32(w[0]),w1=bf16_to_f32(w[1]),
+                    w2=bf16_to_f32(w[2]),w3=bf16_to_f32(w[3]);
+        const float*ring=ring_base+int64_t(gg.slot[gi])*ring_stride+int64_t(c)*3;
+        float h0=ring[0],h1=ring[1],h2=ring[2];
+        const int r0=gg.row0[gi],nr=gg.nrows[gi];
+        if(save_base){
+          float*sv=save_base+int64_t(gi)*save_stride+int64_t(c)*3;   // per GROUP (11-15; was its first row)
+          sv[0]=h0;sv[1]=h1;sv[2]=h2;
+        }
+        for(int t=r0;t<r0+nr;++t){
+          const float xt=x[int64_t(t)*ch+c];
+          float acc=0.0f;
+          acc=sycl::fma(h0,w0,acc);
+          acc=sycl::fma(h1,w1,acc);
+          acc=sycl::fma(h2,w2,acc);
+          acc=sycl::fma(xt,w3,acc);
+          const float y=acc/(1.0f+sycl::exp(-acc));
+          if(c<qk_size)qv[int64_t(t)*qk_size+c]=y;
+          else if(c<2*qk_size)kv[int64_t(t)*qk_size+c-qk_size]=y;
+          else vv[int64_t(t)*v_size+c-2*qk_size]=y;
+          h0=h1;h1=h2;h2=xt;
+        }
+      });});
+}
+
 sycl::event launch_causal_conv1d_split_bf16_prefill(sycl::queue& q,
     const sycl_bf16* x,const bf16_t* weight,float* ring,int channels,int kernel,
     int tokens,sycl_bf16* qv,sycl_bf16* kv,sycl_bf16* vv,int qk_size,int v_size,
@@ -1340,6 +1425,7 @@ sycl::event launch_kv_append_batched(
     sycl::queue& q, const float* k, const float* v, uint8_t* k_cache,
     uint8_t* v_cache, int tokens, int start_pos, int n_kv_heads,
     int head_dim, int seq_cap, const std::vector<sycl::event>& deps) {
+    const bool km = kv_kmajor_flag();
     return q.submit([&](sycl::handler& h) {
         h.depends_on(deps);
         h.parallel_for(sycl::range<1>(size_t(tokens) * n_kv_heads * head_dim),
@@ -1351,7 +1437,8 @@ sycl::event launch_kv_append_batched(
                 const int pos = start_pos + t;
                 if (pos >= seq_cap) return;
                 const int64_t src = (int64_t(t) * n_kv_heads + kh) * head_dim + d;
-                k_cache[(int64_t(kh) * head_dim + d) * seq_cap + pos] =
+                k_cache[km ? (int64_t(kh) * seq_cap + pos) * head_dim + d
+                           : (int64_t(kh) * head_dim + d) * seq_cap + pos] =
                     f32_to_e4m3(k[src]);
                 v_cache[(int64_t(kh) * seq_cap + pos) * head_dim + d] =
                     f32_to_e4m3(v[src]);
@@ -1411,6 +1498,7 @@ sycl::event launch_qk_norm_rope_rows(sycl::queue& q, float* qv, float* kv, const
 sycl::event launch_kv_append_rows(sycl::queue& q, const float* k, const float* v,
     uint8_t* k_base, uint8_t* v_base, int64_t kv_stride, const RowSlots& rs, int rows,
     int n_kv_heads, int head_dim, int seq_cap, const std::vector<sycl::event>& deps) {
+    const bool km = kv_kmajor_flag();
     return q.submit([&](sycl::handler& h) {
         h.depends_on(deps);
         const RowSlots slots = rs;
@@ -1425,7 +1513,8 @@ sycl::event launch_kv_append_rows(sycl::queue& q, const float* k, const float* v
                 uint8_t* k_cache = k_base + int64_t(slots.slot[t]) * kv_stride;
                 uint8_t* v_cache = v_base + int64_t(slots.slot[t]) * kv_stride;
                 const int64_t src = (int64_t(t) * n_kv_heads + kh) * head_dim + d;
-                k_cache[(int64_t(kh) * head_dim + d) * seq_cap + pos] =
+                k_cache[km ? (int64_t(kh) * seq_cap + pos) * head_dim + d
+                           : (int64_t(kh) * head_dim + d) * seq_cap + pos] =
                     f32_to_e4m3(k[src]);
                 v_cache[(int64_t(kh) * seq_cap + pos) * head_dim + d] =
                     f32_to_e4m3(v[src]);
@@ -1897,6 +1986,7 @@ sycl::event launch_flash_prefill(
         return launch_flash_prefill_fast(q, qv, k_cache, v_cache, out, tokens, start_pos,
                                          num_heads, num_kv_heads, head_dim, seq_cap,
                                          softmax_scale, deps);
+    kv_kmajor_refuse("launch_flash_prefill (generic kernel)");
     return head_dim > MAX_HEAD_DIM
          ? launch_flash_prefill_impl<MAX_DPL_WIDE>(q, qv, k_cache, v_cache, out, tokens, start_pos, num_heads,
            num_kv_heads, head_dim, seq_cap, softmax_scale, deps)
@@ -2004,7 +2094,17 @@ static sycl::event launch_dflash2_block_attention_split(
     int sliding_window, bool causal, float softmax_scale, int splits,
     float* pacc, float* pm, float* pl, const std::vector<sycl::event>& deps) {
     constexpr int QT=16, KT=16, WG=QT*SG_SIZE;
-    const int qtiles=(tokens+QT-1)/QT;
+    // 11-06: a work-group's 16 query rows are (token, head) pairs of ONE KV head's group, not one head's tokens:
+    // the K / V tile it converts into SLM then serves every query head that reads it (Qwen3.8-27B's drafter: a
+    // tile was loaded and FP8-decoded once per query head, and a 7-8 row draft left half of each 16-row tile
+    // idle -- 2.3 of a 9.3 ms draft on two cards).  A row's keys, tiles and arithmetic are unchanged, so every
+    // row is bit for bit what it was.  GRIMOIRE_DFLASH_ATTN_GQA=0 = one query head a work-group.
+    static const bool gqa_env=[]{const char* e=std::getenv("GRIMOIRE_DFLASH_ATTN_GQA");return !(e&&*e=='0');}();
+    const bool gqa=gqa_env&&num_kv_heads>0&&num_heads%num_kv_heads==0&&num_heads>num_kv_heads;
+    const int hpg=gqa?num_heads/num_kv_heads:1;                 // query heads a KV head serves
+    const int qrows=gqa?tokens*hpg:tokens;                       // rows a work-group column covers
+    const int qtiles=(qrows+QT-1)/QT;
+    const int heads_dim=gqa?num_kv_heads:num_heads;              // the grid's head dimension
     const int end=context_len+tokens;
     const int begin=(causal&&sliding_window>0)
         ? std::max(0,context_len+1-sliding_window)
@@ -2015,7 +2115,7 @@ static sycl::event launch_dflash2_block_attention_split(
         sycl::local_accessor<float,1> ks(size_t(head_dim)*KT,h);
         sycl::local_accessor<float,1> vs(size_t(KT)*head_dim,h);
         h.parallel_for(
-            sycl::nd_range<1>(size_t(qtiles)*num_heads*splits*WG,WG),
+            sycl::nd_range<1>(size_t(qtiles)*heads_dim*splits*WG,WG),
             [=](sycl::nd_item<1> it) [[sycl::reqd_sub_group_size(SG_SIZE)]] {
                 const auto sg=it.get_sub_group();
                 const int lane=int(sg.get_local_id()[0]);
@@ -2023,9 +2123,12 @@ static sycl::event launch_dflash2_block_attention_split(
                 const int lid=int(it.get_local_id(0));
                 const int g=int(it.get_group(0));
                 const int sp=g%splits,rest=g/splits;
-                const int qt=rest/num_heads,qh0=rest%num_heads;
-                const int t=qt*QT+qslot;
-                const int kvh=qh0/(num_heads/num_kv_heads);
+                const int qt=rest/heads_dim,hd=rest%heads_dim;
+                // gqa: hd is the KV head, the row a (token, head-in-group) pair; else hd is the query head
+                const int r=qt*QT+qslot;
+                const int t=gqa?(r<qrows?r/hpg:tokens):r;
+                const int qh0=gqa?hd*hpg+(r<qrows?r%hpg:0):hd;
+                const int kvh=gqa?hd:qh0/(num_heads/num_kv_heads);
                 const uint8_t* kh=k_cache+int64_t(kvh)*head_dim*seq_cap;
                 const uint8_t* vh=v_cache+int64_t(kvh)*seq_cap*head_dim;
                 float* ksl=ks.template get_multi_ptr<sycl::access::decorated::no>().get();
@@ -2117,6 +2220,7 @@ sycl::event launch_dflash2_block_attention(
     int num_heads, int num_kv_heads, int head_dim, int seq_cap,
     int sliding_window, bool causal, float softmax_scale,
     const std::vector<sycl::event>& deps, bool split_keys) {
+    kv_kmajor_refuse("launch_dflash2_block_attention");
     const int end=context_len+tokens;
     const int begin=(causal&&sliding_window>0)
         ? std::max(0,context_len+1-sliding_window)
@@ -2281,12 +2385,13 @@ sycl::event launch_qk_norm_rope_bf16_batched(sycl::queue&q,sycl_bf16*qv,
 sycl::event launch_kv_append_bf16_batched(sycl::queue&q,const sycl_bf16*k,
     const sycl_bf16*v,uint8_t*k_cache,uint8_t*v_cache,int tokens,int start_pos,
     int n_kv_heads,int head_dim,int seq_cap,const std::vector<sycl::event>&deps){
+ const bool km=kv_kmajor_flag();
  return q.submit([&](sycl::handler&h){h.depends_on(deps);
   h.parallel_for(sycl::range<1>(size_t(tokens)*n_kv_heads*head_dim),[=](sycl::id<1>id){
    int64_t z=id[0];int d=int(z%head_dim);int64_t th=z/head_dim;
    int kh=int(th%n_kv_heads),t=int(th/n_kv_heads),pos=start_pos+t;if(pos>=seq_cap)return;
    int64_t src=(int64_t(t)*n_kv_heads+kh)*head_dim+d;
-   k_cache[(int64_t(kh)*head_dim+d)*seq_cap+pos]=f32_to_e4m3(float(k[src]));
+   k_cache[km?(int64_t(kh)*seq_cap+pos)*head_dim+d:(int64_t(kh)*head_dim+d)*seq_cap+pos]=f32_to_e4m3(float(k[src]));
    v_cache[(int64_t(kh)*seq_cap+pos)*head_dim+d]=f32_to_e4m3(float(v[src]));});});
 }
 

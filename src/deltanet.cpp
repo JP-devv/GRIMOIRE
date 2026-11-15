@@ -404,29 +404,38 @@ static sycl::event dn_verify_sg(sycl::queue& q_, const DeltaNetParams& p, const 
                 for (int u = 0; u < PL; ++u) sv[u] = S[u * SG_SIZE + lane];
 
                 const int r0 = gg.row0[grp], nr = gg.nrows[grp];
-                for (int t = 0; t < nr; ++t) {
-                    const int r = r0 + t;
+                // Prefetch (11-13): row t+1's k / q / v / a / beta are loaded while row t computes, so
+                // the rows' load latencies overlap instead of adding up (same arithmetic, same bits).
+                float kn[PL], qn[PL], an = 0.0f, bn = 0.0f, vn = 0.0f;
+                auto fetch = [&](int r) {
                     const float* kr = pp.k + (int64_t(r) * nk + khead) * KD;
                     const float* qr = pp.q + (int64_t(r) * nk + khead) * KD;
-                    float kv[PL];
+                    #pragma unroll
+                    for (int u = 0; u < PL; ++u) { kn[u] = kr[u * SG_SIZE + lane]; qn[u] = qr[u * SG_SIZE + lane]; }
+                    an = pp.a[int64_t(r) * pp.n_heads + head];
+                    bn = pp.beta[int64_t(r) * pp.n_heads + head];
+                    vn = pp.v[(int64_t(r) * pp.n_heads + head) * VD + row];
+                };
+                if (nr > 0) fetch(r0);
+                for (int t = 0; t < nr; ++t) {
+                    const int r = r0 + t;
+                    float kv[PL], qv[PL];
+                    #pragma unroll
+                    for (int u = 0; u < PL; ++u) { kv[u] = kn[u]; qv[u] = qn[u]; }
+                    const float av = an, bv = bn, vi = vn;
+                    if (t + 1 < nr) fetch(r + 1);
                     float w = 0.0f;
                     #pragma unroll
-                    for (int u = 0; u < PL; ++u) {
-                        kv[u] = kr[u * SG_SIZE + lane];
-                        w = sycl::fma(sv[u], kv[u], w);
-                    }
+                    for (int u = 0; u < PL; ++u) w = sycl::fma(sv[u], kv[u], w);
                     w = sycl::reduce_over_group(sg, w, sycl::plus<float>());
 
-                    const float av = pp.a[int64_t(r) * pp.n_heads + head];
-                    const float bv = pp.beta[int64_t(r) * pp.n_heads + head];
-                    const float vi = pp.v[(int64_t(r) * pp.n_heads + head) * VD + row];
                     const float corr = bv * (vi - av * w);
                     float o = 0.0f;
                     #pragma unroll
                     for (int u = 0; u < PL; ++u) {
                         const float sN = sycl::fma(av, sv[u], corr * kv[u]);
                         sv[u] = sN;
-                        o = sycl::fma(sN, qr[u * SG_SIZE + lane], o);
+                        o = sycl::fma(sN, qv[u], o);
                     }
                     o = sycl::reduce_over_group(sg, o, sycl::plus<float>());
                     if (lane == 0)
@@ -481,8 +490,83 @@ static sycl::event dn_replay_sg(sycl::queue& q_, const DeltaNetParams& p, const 
                 float sv[PL];
                 #pragma unroll
                 for (int u = 0; u < PL; ++u) sv[u] = S[u * SG_SIZE + lane];
-                for (int t = 0; t < nrows; ++t) {
+                // prefetch of row t+1 under row t, as dn_verify_sg (same arithmetic, same bits)
+                float kn[PL], an = 0.0f, bn = 0.0f, vn = 0.0f;
+                auto fetch = [&](int t) {
                     const float* sr = sv_base + int64_t(t) * srow;
+                    const float* kr = sr + int64_t(khead) * KD;
+                    #pragma unroll
+                    for (int u = 0; u < PL; ++u) kn[u] = kr[u * SG_SIZE + lane];
+                    an = sr[aoff + head];
+                    bn = sr[aoff + pp.n_heads + head];
+                    vn = sr[voff + int64_t(head) * VD + row];
+                };
+                if (nrows > 0) fetch(0);
+                for (int t = 0; t < nrows; ++t) {
+                    float kv[PL];
+                    #pragma unroll
+                    for (int u = 0; u < PL; ++u) kv[u] = kn[u];
+                    const float av = an, bv = bn, vi = vn;
+                    if (t + 1 < nrows) fetch(t + 1);
+                    float w = 0.0f;
+                    #pragma unroll
+                    for (int u = 0; u < PL; ++u) w = sycl::fma(sv[u], kv[u], w);
+                    w = sycl::reduce_over_group(sg, w, sycl::plus<float>());
+                    const float corr = bv * (vi - av * w);
+                    #pragma unroll
+                    for (int u = 0; u < PL; ++u) sv[u] = sycl::fma(av, sv[u], corr * kv[u]);
+                }
+                #pragma unroll
+                for (int u = 0; u < PL; ++u) S[u * SG_SIZE + lane] = sv[u];
+            });
+    });
+}
+
+// The commit's replay for several conversations in ONE launch (11-05): group g advances the
+// state at p.state + slot[g] * state_stride by its nrows[g] rows saved at saved + row0[g] * the
+// row size -- dn_replay_sg's arithmetic per group, so every state equals the one-launch-per-
+// conversation replay's.  Four users had 48 replay launches per conversation and step.
+template <int PL>
+static sycl::event dn_replay_groups_sg(sycl::queue& q_, const DeltaNetParams& p, const DnGroups& g,
+                                       int64_t state_stride, const float* saved,
+                                       const std::vector<sycl::event>& deps) {
+    const int KD = p.k_dim, VD = p.v_dim;
+    const int wg_threads   = kDnRowsPerWG * SG_SIZE;
+    const int wgs_per_head = VD / kDnRowsPerWG;
+    const int per_group    = p.n_heads * wgs_per_head;
+    const int64_t srow     = deltanet_saved_row_floats(p);
+
+    return q_.submit([&](sycl::handler& h) {
+        h.depends_on(deps);
+        const DeltaNetParams pp = p;
+        const DnGroups gg = g;
+        const int64_t sst = state_stride;
+        const float* const sv_base = saved;
+        const int wph = wgs_per_head, pg = per_group;
+
+        h.parallel_for(
+            sycl::nd_range<1>(size_t(per_group) * size_t(g.n) * size_t(wg_threads), size_t(wg_threads)),
+            [=](sycl::nd_item<1> it) [[sycl::reqd_sub_group_size(SG_SIZE)]] {
+                const auto sg   = it.get_sub_group();
+                const int  lane = int(sg.get_local_id()[0]);
+                const int  sgid = int(sg.get_group_id()[0]);
+                const int  grp  = int(it.get_group(0)) / pg;
+                const int  gid  = int(it.get_group(0)) % pg;
+                const int  head = gid / wph;
+                const int  row  = (gid % wph) * kDnRowsPerWG + sgid;
+                const int  nk    = pp.n_k_heads ? pp.n_k_heads : pp.n_heads;
+                const int  khead = (nk == pp.n_heads) ? head : head / (pp.n_heads / nk);
+                const int64_t voff = int64_t(nk) * KD;
+                const int64_t aoff = voff + int64_t(pp.n_heads) * VD;
+
+                float* S = pp.state + int64_t(gg.slot[grp]) * sst + (int64_t(head) * VD + row) * KD;
+                float sv[PL];
+                #pragma unroll
+                for (int u = 0; u < PL; ++u) sv[u] = S[u * SG_SIZE + lane];
+                const float* gbase = sv_base + int64_t(gg.row0[grp]) * srow;
+                const int nrows = gg.nrows[grp];
+                for (int t = 0; t < nrows; ++t) {
+                    const float* sr = gbase + int64_t(t) * srow;
                     const float* kr = sr + int64_t(khead) * KD;
                     float kv[PL];
                     float w = 0.0f;
@@ -503,6 +587,16 @@ static sycl::event dn_replay_sg(sycl::queue& q_, const DeltaNetParams& p, const 
                 for (int u = 0; u < PL; ++u) S[u * SG_SIZE + lane] = sv[u];
             });
     });
+}
+
+sycl::event launch_deltanet_replay_groups(sycl::queue& q_, const DeltaNetParams& p, const DnGroups& g,
+                                          int64_t state_stride, const float* saved,
+                                          const std::vector<sycl::event>& deps) {
+    switch (p.k_dim / SG_SIZE) {
+        case 4:  return dn_replay_groups_sg<4> (q_, p, g, state_stride, saved, deps);
+        case 8:  return dn_replay_groups_sg<8> (q_, p, g, state_stride, saved, deps);
+        default: return dn_replay_groups_sg<16>(q_, p, g, state_stride, saved, deps);
+    }
 }
 
 sycl::event launch_deltanet_verify_rows(sycl::queue& q_, const DeltaNetParams& p, const DnGroups& g,

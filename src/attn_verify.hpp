@@ -26,6 +26,9 @@ namespace b70 {
 // One group = the verify rows of one conversation: rows row0 .. row0+nrows-1, one KV
 // slot, consecutive positions (row r has length d_lens[r]; the last row is the longest).
 constexpr int kMaxVerifyGroups = 16;
+// Attention partials are sized for kVerifyPartRows rows x MAX_SPLITS (grimoire.cpp s.part); verify_dpas_splits
+// keeps rows x splits within that (a 33..64-row copy verify takes at most MAX_SPLITS / 2 splits).  11-15.
+constexpr int kVerifyPartRows = 32;
 struct VerifyGroups {
     int32_t n = 0;
     int32_t row0[kMaxVerifyGroups];
@@ -44,6 +47,11 @@ int verify_dpas_splits(const AttnParams& p, const VerifyGroups& g, int len_max);
 sycl::event launch_verify_attn_dpas(sycl::queue& q, const AttnParams& p, const VerifyGroups& g,
                                     int64_t kv_stride, const int32_t* d_lens, int splits_max,
                                     const std::vector<sycl::event>& deps = {});
+// KEY-MAJOR K CACHE (2026-11-14): when set, K is stored like V, [kv_head][seq_cap][head_dim] bytes, and the
+// verify kernel reads it with transposed 2-D block loads.  Set once at load (Grimoire::build, kv_kmajor_flag()) --
+// this library keeps its own copy of the flag.
+void set_verify_kv_kmajor(bool on);
+bool verify_kv_kmajor();
 // out[row][head] = the merge of that row's splits.  Empty splits (m = -inf) are skipped.
 sycl::event launch_verify_merge(sycl::queue& q, const AttnParams& p, int rows, int splits_max,
                                 const std::vector<sycl::event>& deps = {});

@@ -259,6 +259,16 @@ sycl::event launch_gemm_fast_predq(sycl::queue& q, const QuantWeight& w, const s
 bool onednn_gemm_ok(const QuantWeight& w, int M);
 sycl::event onednn_gemm(sycl::queue& q, const QuantWeight& w, const sycl_bf16* x, float* y,
                         int M, bool accumulate, const std::vector<sycl::event>& deps = {});
+// KEY-MAJOR FP8 K CACHE (2026-11-14).  K was stored [kv_head][head_dim][seq_cap] (dim-major): one 16-key step of
+// the decode / verify attention touched 256 rows seq_cap bytes apart -- at 61K, 4 users, the reads alone took
+// 1.9-3.8 ms a layer against 0.24-0.28 ms key-major (tools/bench_kvread.cpp).  With kv_kmajor_flag() set, K is
+// [kv_head][seq_cap][head_dim] like V.  Set once in Grimoire::build for the models whose every K reader handles
+// it (Qwen3.5 / 3.8 dense, head_dim 256, no window, no DFlash); every other K reader refuses while it is set.
+// The two kernel libraries keep their own copies: set_flash_kv_kmajor (libgrimoire_gemm.so, the prompt
+// attention's K packing) and set_verify_kv_kmajor (libgrimoire_attn.so, attn_verify.hpp).
+bool& kv_kmajor_flag();
+void kv_kmajor_refuse(const char* who);    // throws if kv_kmajor_flag() is set
+void set_flash_kv_kmajor(bool on);
 // Matrix-unit causal prefill attention (src/gemm_fast.cpp);
 // launch_flash_prefill() takes it whenever the geometry fits.
 bool flash_fast_supported(int head_dim, int num_heads, int num_kv_heads);
@@ -507,6 +517,7 @@ sycl::event launch_bf16_smallm(sycl::queue& q, const QuantWeight& w, const sycl_
 // The same for INT4 weights (GPTQ / AutoRound / GRIMOIRE's own, groups of 64
 // or 128): the w4a16 DPAS engine for batched decode and speculative verify.
 bool int4_smallm_ok(const QuantWeight& w, int M, const void* X, const void* Y);
+bool int4_smallm_wide_ok(const QuantWeight& w, int M, const void* X, const void* Y);   // <= 64 rows, verify only
 sycl::event launch_int4_smallm(sycl::queue& q, const QuantWeight& w, const sycl_bf16* X,
     float* Y, int M, const std::vector<sycl::event>& deps = {});
 // FP8 E4M3 (per-row scale) at 1..8 rows: the same DPAS small-M design (gemv_decode.cpp).
@@ -620,6 +631,18 @@ sycl::event launch_hc_down_inject1(sycl::queue& q, const bf16_t* down, const bf1
     const std::vector<sycl::event>& deps = {});
 sycl::event launch_hc_up_mean1(sycl::queue& q, const bf16_t* up, const float* lora,
     const float* normed, float* block, int hc_count, int hidden, int lowrank,
+    const std::vector<sycl::event>& deps = {});
+// The same three over `rows` tokens at once (an MTP verify's rows): each weight row read once for all of
+// them, 3 launches instead of 3 x rows; a row's result is bit for bit the one-token kernels'.  More than 8
+// rows (or GRIMOIRE_HC_SGROW) run the one-token kernels row by row.
+sycl::event launch_hc_combine_norm_rows(sycl::queue& q, float* hyper, const float* pend,
+    const float* pinj, const bf16_t* w, float* normed, int rows, int hc_count, int hidden,
+    float eps, const std::vector<sycl::event>& deps = {});
+sycl::event launch_hc_down_inject_rows(sycl::queue& q, const bf16_t* down, const bf16_t* inj_w,
+    const float* normed, float* lora, float* inj, int rows, int lowrank, int hc_count, int wide,
+    const std::vector<sycl::event>& deps = {});
+sycl::event launch_hc_up_mean_rows(sycl::queue& q, const bf16_t* up, const float* lora,
+    const float* normed, float* block, int rows, int hc_count, int hidden, int lowrank,
     const std::vector<sycl::event>& deps = {});
 // The kernels B and C were before 10-27 (one sub-group per output row, one
 // dot at a time): GRIMOIRE_HC_SGROW=1 selects them, GRIMOIRE_HC_CHECK=1
@@ -983,7 +1006,11 @@ sycl::event launch_deltanet_step(sycl::queue& q, const DeltaNetParams& p,
 // Batched decode: row r of one launch is one token of the conversation in
 // sequence slot slot[r].  Passed BY VALUE as a kernel argument: no upload,
 // no host sync.  Batches above kMaxRowSlots keep the per-row loops.
-constexpr int kMaxRowSlots = 16;
+// 32 since 2026-11-11 (was 16): a verify of several conversations has up to 32 rows (kSpecBatch 64 since 11-15:
+// the q/k rope + KV append run 33..64-row verify blocks in 32-row launches); past this the conv / DeltaNet row
+// launches fall back to one launch per row.  Kept at 32 (11-15): at 64 the by-value RowSlots / DnGroups made one
+// user's copying ~1.2% slower (build w vs u, repeatable).
+constexpr int kMaxRowSlots = 32;
 struct RowSlots { int32_t slot[kMaxRowSlots]; int32_t pos[kMaxRowSlots]; };
 // launch_deltanet_step for `rows` rows in one launch.  p.q/k/v/a/beta/out
 // point at row 0 (row strides: n_k_heads*k_dim, n_heads*v_dim, n_heads);
@@ -1007,6 +1034,14 @@ struct DnGroups {
 };
 bool deltanet_verify_ok(const DeltaNetParams& p);
 int64_t deltanet_saved_row_floats(const DeltaNetParams& p);
+// Speculative verify, conv kernel width 4: every group's rows in one launch (group g = rows row0[g]
+// .. row0[g]+nrows[g]-1 over the ring ring_base + slot[g] * ring_stride), each ring copied first to
+// save_base + row0[g] * save_stride (null = no copy) and NOT shifted (the commit rebuilds it).
+// launch_causal_conv1d_split_prefill's kernel-4 arithmetic per group: bit-identical outputs.
+sycl::event launch_causal_conv1d_split_groups(sycl::queue& q, const float* x,
+    const bf16_t* weight, float* ring_base, int64_t ring_stride, const DnGroups& g,
+    int channels, float* qv, float* kv, float* vv, int qk_size, int v_size,
+    float* save_base, int64_t save_stride, const std::vector<sycl::event>& deps = {});
 sycl::event launch_deltanet_verify_rows(sycl::queue& q, const DeltaNetParams& p, const DnGroups& g,
                                         int64_t state_stride, float* saved,
                                         const std::vector<sycl::event>& deps = {});
@@ -1014,6 +1049,11 @@ sycl::event launch_deltanet_verify_rows(sycl::queue& q, const DeltaNetParams& p,
 // the same arithmetic again, so the state equals the per-row loop's after those n rows.
 sycl::event launch_deltanet_replay(sycl::queue& q, const DeltaNetParams& p, const float* saved, int n,
                                    const std::vector<sycl::event>& deps = {});
+// launch_deltanet_replay for every group in one launch: group g advances p.state + slot[g] *
+// state_stride by the nrows[g] rows saved at saved + row0[g] * deltanet_saved_row_floats(p).
+sycl::event launch_deltanet_replay_groups(sycl::queue& q, const DeltaNetParams& p, const DnGroups& g,
+                                          int64_t state_stride, const float* saved,
+                                          const std::vector<sycl::event>& deps = {});
 // launch_causal_conv1d_split_prefill(tokens = 1) for `rows` rows in one
 // launch, kernel width 4 only: row r convolves x[r] over its own ring
 // (ring_base + slot[r] * ring_stride) and shifts it.  Bit-identical per row.

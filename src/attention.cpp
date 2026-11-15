@@ -42,8 +42,11 @@
 //  bytes per step, irrelevant next to streaming the whole cache.
 // =====================================================================
 #include "kernels.hpp"
+#include "attn_verify.hpp"
 #include <sycl/ext/intel/esimd.hpp>
 #include <limits>
+#include <map>
+#include <mutex>
 
 namespace b70 {
 
@@ -635,8 +638,42 @@ bool flash_esimd_on() {
 }
 } // namespace
 
+namespace {
+// Key-major K cache (kernels.hpp, kv_kmajor_flag): decode attention runs on the verify kernel (attn_verify.hpp),
+// which reads that layout, and merges itself; launch_flash_merge / launch_flash_merge_rows are then no-ops.
+int32_t* kmajor_len_scratch(sycl::queue& q) {
+    static std::mutex mu;
+    static std::map<const sycl::queue*, int32_t*> all;
+    std::lock_guard<std::mutex> lk(mu);
+    auto it = all.find(&q);
+    if (it != all.end()) return it->second;
+    int32_t* d = sycl::malloc_device<int32_t>(kMaxRowSlots, q);
+    if (!d) throw std::runtime_error("key-major decode: length scratch allocation failed");
+    return all.emplace(&q, d).first->second;
+}
+sycl::event kmajor_decode(sycl::queue& q, const AttnParams& p, const std::vector<sycl::event>& deps) {
+    if (!verify_dpas_ok(p) || p.window_left > 0 || p.qbits)
+        throw std::runtime_error("key-major K cache: decode attention needs head_dim 256, FP8, no window");
+    VerifyGroups vg{};
+    vg.n = 1; vg.row0[0] = 0; vg.nrows[0] = 1; vg.slot[0] = 0;
+    std::vector<sycl::event> d = deps;
+    const int32_t* lens = p.d_seq_len;
+    if (!lens) {
+        int32_t* scratch = kmajor_len_scratch(q);
+        const int len = p.seq_len;
+        d = {q.single_task(deps, [=] { scratch[0] = len; })};
+        lens = scratch;
+    }
+    const int smax = std::max(1, std::min(MAX_SPLITS,
+        verify_dpas_splits(p, vg, p.capture || p.d_seq_len ? p.seq_cap : p.seq_len)));
+    sycl::event e = launch_verify_attn_dpas(q, p, vg, 0, lens, smax, d);
+    return launch_verify_merge(q, p, 1, smax, {e});
+}
+} // namespace
+
 sycl::event launch_flash_decode(sycl::queue& q, const AttnParams& p,
                                 const std::vector<sycl::event>& deps) {
+    if (kv_kmajor_flag()) return kmajor_decode(q, p, deps);
     if (flash_esimd_on() && p.head_dim == 256 && p.num_kv_heads > 0 &&
         p.num_heads % p.num_kv_heads == 0 && (p.num_heads / p.num_kv_heads) % 2 == 0 &&
         p.window_left <= 0 && !p.qbits && (p.seq_cap % 16) == 0)
@@ -693,6 +730,7 @@ sycl::event launch_flash_decode(sycl::queue& q, const AttnParams& p,
 // ---------------------------------------------------------------------
 sycl::event launch_flash_merge(sycl::queue& q, const AttnParams& p,
                                const std::vector<sycl::event>& deps) {
+    if (kv_kmajor_flag()) return q.ext_oneapi_submit_barrier(deps);   // kmajor_decode merged already
     return q.submit([&](sycl::handler& h) {
         h.depends_on(deps);
         const AttnParams pp = p;
@@ -904,12 +942,31 @@ sycl::event launch_flash_decode_rows(sycl::queue& q, const AttnParams& p, int ro
                                      const RowSlots& rs, int64_t kv_stride,
                                      const int32_t* d_lens, int splits_max,
                                      const std::vector<sycl::event>& deps) {
+    if (kv_kmajor_flag()) {
+        // one verify group per row (its own slot and length), up to kMaxVerifyGroups a launch
+        if (!verify_dpas_ok(p)) throw std::runtime_error("key-major K cache: rows decode needs head_dim 256, FP8");
+        VerifyGroups all{};
+        all.n = std::min(rows, kMaxVerifyGroups);
+        for (int i = 0; i < all.n; ++i) { all.row0[i] = i; all.nrows[i] = 1; all.slot[i] = rs.slot[i]; }
+        const int smax = std::max(1, std::min(MAX_SPLITS, verify_dpas_splits(p, all, p.seq_cap)));
+        std::vector<sycl::event> d = deps;
+        sycl::event e;
+        for (int r0 = 0; r0 < rows; r0 += kMaxVerifyGroups) {
+            VerifyGroups vg{};
+            vg.n = std::min(kMaxVerifyGroups, rows - r0);
+            for (int i = 0; i < vg.n; ++i) { vg.row0[i] = r0 + i; vg.nrows[i] = 1; vg.slot[i] = rs.slot[r0 + i]; }
+            e = launch_verify_attn_dpas(q, p, vg, kv_stride, d_lens, smax, d);
+            d = {e};
+        }
+        return launch_verify_merge(q, p, rows, smax, d);
+    }
     return flash_decode_esimd256_rows<2>(q, p, rows, rs, kv_stride, d_lens, splits_max, deps);
 }
 
 sycl::event launch_flash_merge_rows(sycl::queue& q, const AttnParams& p, int rows,
                                     const int32_t* d_lens, int splits_max,
                                     const std::vector<sycl::event>& deps) {
+    if (kv_kmajor_flag()) return q.ext_oneapi_submit_barrier(deps);   // launch_flash_decode_rows merged
     return q.submit([&](sycl::handler& h) {
         h.depends_on(deps);
         const AttnParams pp = p;
@@ -1130,6 +1187,7 @@ sycl::event launch_flash_decode_batched(
     int num_heads, int num_kv_heads, int head_dim, int seq_cap,
     float softmax_scale, float* partials, float* part_m, float* part_l,
     int splits, const std::vector<sycl::event>& deps) {
+    kv_kmajor_refuse("launch_flash_decode_batched");
     return head_dim > MAX_HEAD_DIM
          ? launch_flash_decode_batched_impl<MAX_DPL_WIDE>(q, qv, k_cache, v_cache, out, tokens, base_seq_len, num_heads,
            num_kv_heads, head_dim, seq_cap, softmax_scale, partials,
@@ -1239,6 +1297,7 @@ sycl::event launch_qsa_attention(
     const uint8_t* v_cache, const int32_t* idx, float* out, int rows,
     int n_heads, int kv_heads, int head_dim, int seq_cap, int n_idx,
     float softmax_scale, const std::vector<sycl::event>& deps) {
+    kv_kmajor_refuse("launch_qsa_attention");
     return head_dim > MAX_HEAD_DIM
          ? launch_qsa_attention_impl<MAX_DPL_WIDE>(q, qv, k_cache, v_cache,
              idx, out, rows, n_heads, kv_heads, head_dim, seq_cap, n_idx,

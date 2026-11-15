@@ -17,7 +17,13 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
 #include "b70/generation.hpp"
+#include "b70/generation_control.hpp"
+#include <future>
+#include <sys/socket.h>
+#include <unistd.h>
+#include "b70/sampling.hpp"
 #include <algorithm>
+#include <array>
 #include <cassert>
 #include <iostream>
 
@@ -143,8 +149,100 @@ struct DeferredEngine : Engine {
         return true;
     }
 };
+// A seeded stochastic Markov target. Each verifier row draws from the
+// same target distribution at that absolute position; deterministic drafts
+// may be accepted or rejected. Exact arithmetic isolates protocol/RNG
+// correctness from real GEMM/GEMV rounding differences.
+struct SampledEngine : Engine {
+    uint64_t seed=0;
+    static std::array<float,4> probability(int previous) {
+        return previous%4==0?std::array<float,4>{.65f,.15f,.15f,.05f}:
+                             std::array<float,4>{.10f,.50f,.30f,.10f};
+    }
+    int argmax_token(){
+        const auto p=probability(history.back());
+        const float u=b70::sampling_uniform_f32(seed,uint64_t(pos));
+        float sum=0;for(int i=0;i<4;++i){sum+=p[i];if(u<sum)return i;}return 3;
+    }
+    bool prefill(const std::vector<int32_t>& ids,std::vector<int32_t>* next=nullptr){
+        for(int t:ids){forward(t);if(next)next->push_back(argmax_token());}
+        return true;
+    }
+    int mtp_draft(int token,int,bool){
+        ++draft_calls;const auto p=probability(token);
+        return int(std::max_element(p.begin(),p.end())-p.begin());
+    }
+};
 template<class F> void throws(F f){bool did=false;try{f();}catch(const std::exception&){did=true;}assert(did);}
+// Actual Unix control streams plus the production generation loop: cancellation
+// inside accepted MTP blocks must leave every rank at the next request header.
+static void ranked_cancel_tests() {
+    using namespace b70;
+    auto read_all=[](int fd,void* p,size_t n) {
+        auto* b=static_cast<char*>(p);
+        while(n) { const auto k=::read(fd,b,n); if(k<=0)return false; b+=k;n-=size_t(k); }
+        return true;
+    };
+    auto write_all=[](int fd,const void* p,size_t n) {
+        auto* b=static_cast<const char*>(p);
+        while(n) { const auto k=::write(fd,b,n); if(k<=0)return false; b+=k;n-=size_t(k); }
+        return true;
+    };
+    for(bool chain:{false,true}) for(int depth:{0,1,6}) for(int stop_after:{1,3,10}) {
+        constexpr int ranks=3;
+        std::array<int,ranks> up{-1,-1,-1};
+        std::array<std::vector<int>,ranks> down;
+        std::vector<int> fds;
+        for(int r=1;r<ranks;++r) {
+            int pair[2]; assert(socketpair(AF_UNIX,SOCK_STREAM,0,pair)==0);
+            timeval timeout{3,0};
+            for(int fd:pair) {
+                assert(setsockopt(fd,SOL_SOCKET,SO_RCVTIMEO,&timeout,sizeof timeout)==0);
+                assert(setsockopt(fd,SOL_SOCKET,SO_SNDTIMEO,&timeout,sizeof timeout)==0);
+                fds.push_back(fd);
+            }
+            down[chain?r-1:0].push_back(pair[0]); up[r]=pair[1];
+        }
+        std::array<std::vector<int32_t>,ranks> cancelled_out,next_out;
+        std::vector<std::future<void>> workers;
+        for(int rank=0;rank<ranks;++rank) workers.push_back(std::async(std::launch::async,[&,rank] {
+            Engine e;e.recurrent=true;e.snap_enabled=true;
+            for(int request=0;request<2;++request) {
+                // A fresh header after cancellation must not be consumed as
+                // a continuation word (nor have a leftover word before it).
+                uint32_t header=0x12340000u+uint32_t(request);
+                if(up[rank]>=0) { uint32_t got=0;assert(read_all(up[rank],&got,sizeof got));assert(got==header); }
+                for(int fd:down[rank])assert(write_all(fd,&header,sizeof header));
+                GenerationOptions o{40,-1,-1,depth,false,depth>0,false};
+                if(request==1)o.max_tokens=12;
+                FinishReason reason;int seen=0;
+                auto& out=request==0?cancelled_out[rank]:next_out[rank];
+                generate_tokens(e,{3,4,5,6},o,out,[&](int32_t) {
+                    ++seen;
+                    bool keep=rank!=0 || request!=0 || seen<stop_after;
+                    return b70::generation_continue(keep,up[rank],down[rank],read_all,write_all);
+                },reason);
+                assert(out.size()==size_t(request==0?stop_after:12));
+                assert(reason==(request==0?FinishReason::Cancelled:FinishReason::Length));
+            }
+        }));
+        for(auto& w:workers)w.get();
+        for(int rank=1;rank<ranks;++rank) {
+            assert(cancelled_out[rank]==cancelled_out[0]); assert(next_out[rank]==next_out[0]);
+        }
+        for(int fd:fds)::close(fd);
+    }
+    // Invalid protocol phase must fail rather than turn a header into a bool.
+    bool threw=false;
+    try {
+        b70::generation_continue(true,0,{},[](int,void* p,size_t){*static_cast<uint32_t*>(p)=42;return true;},write_all);
+    } catch(const std::runtime_error&) {threw=true;}
+    assert(threw);
+    std::cout<<"ranked cancellation: TP/PP streams, speculative blocks, next request PASS\n";
+}
+
 int main(){
+    ranked_cancel_tests();
     using namespace b70;
     std::vector<int32_t> out;FinishReason reason;
     const std::vector<int32_t> prompt{3,4,5,6};
@@ -184,6 +282,27 @@ int main(){
         GenerationOptions o{count,-1,-1,15,false,true,false};
         const int n=generate_tokens(e,prompt,o,out,{},reason);
         assert(n==std::min(count,capacity-4));assert(e.pos<=capacity);
+    }
+    {   // Sampling must preserve the target law for every seeded path,
+        // not merely produce plausible text. Check every width and both
+        // proposal styles, including many partial acceptance prefixes.
+        long accepted=0,rejected=0;
+        for(uint64_t seed=0;seed<256;++seed){
+            SampledEngine target;target.seed=seed;
+            GenerationOptions plain{40,-1,-1,0,false,false,false};
+            std::vector<int32_t> reference;
+            generate_tokens(target,prompt,plain,reference,{},reason);
+            for(bool df:{false,true})for(int depth=1;depth<=15;++depth){
+                SampledEngine spec;spec.seed=seed;SpecStats stats;
+                GenerationOptions options{40,-1,-1,depth,df,!df,false,&stats};
+                std::vector<int32_t> sampled;
+                generate_tokens(spec,prompt,options,sampled,{},reason);
+                assert(sampled==reference);
+                accepted+=stats.accepted;rejected+=stats.drafted-stats.accepted;
+            }
+        }
+        assert(accepted>0&&rejected>0);
+        std::cout<<"sampled generation: 7680 seeded speculative paths preserve target draws PASS\n";
     }
     Engine e;GenerationOptions o{5,-1,-1,3,false,true,false};
     generate_tokens(e,prompt,o,out,[](int){return false;},reason);
