@@ -979,6 +979,38 @@ sycl::event flash_fast_impl(sycl::queue& q, const float* qv, const uint8_t* kc,
         throw std::runtime_error("flash_fast: K/V scratch allocation failed");
     sycl_bf16* Kp = fs.kp; sycl_bf16* Vp = fs.vp; const sycl_bf16* lut = fs.lut;
     sycl::event e;
+    // 2026-11-15: the packs below, rewritten so every store is a coalesced u32 (the element-wise K pack scattered
+    // 2-byte stores Sp apart: ~80 GB/s, 0.5 s of a 61K prompt; V 0.3 s).  Same LUT, same bf16 bits.
+    // GRIMOIRE_FLASH_PACK2=0 = the element-wise packs.
+    static const bool pack2 = [] { const char* v = std::getenv("GRIMOIRE_FLASH_PACK2"); return !(v && *v == '0'); }();
+    if (flash_kv_kmajor() && pack2 && Sp % 32 == 0) {
+        // K: a 32-key x D tile through local memory -> [D/2][Sp] u32 rows of 32 keys (128 bytes per row piece)
+        constexpr int TK = 32, DPR = D / 2;
+        e = q.submit([&](sycl::handler& h) {
+            h.depends_on(deps);
+            sycl::local_accessor<uint32_t, 1> sh(sycl::range<1>(size_t(DPR) * (TK + 1)), h);
+            h.parallel_for(sycl::nd_range<1>(size_t(KVH) * (Sp / TK) * 256, 256), [=](sycl::nd_item<1> it) {
+                const int g = int(it.get_group(0)), i = int(it.get_local_id(0));
+                const int hh = g / (Sp / TK), s0 = (g % (Sp / TK)) * TK;
+                const uint16_t* lu = reinterpret_cast<const uint16_t*>(lut);
+                for (int idx = i; idx < TK * DPR; idx += 256) {
+                    const int key = idx / DPR, dp = idx % DPR, s = s0 + key;
+                    uint32_t v = 0;
+                    if (s < kend) {
+                        const uint16_t two = *reinterpret_cast<const uint16_t*>(kc + (size_t(hh) * seq_cap + s) * D + 2 * dp);
+                        v = uint32_t(lu[two & 0xFFu]) | (uint32_t(lu[two >> 8]) << 16);
+                    }
+                    sh[size_t(dp) * (TK + 1) + key] = v;
+                }
+                it.barrier(sycl::access::fence_space::local_space);
+                uint32_t* K32 = reinterpret_cast<uint32_t*>(Kp);
+                for (int idx = i; idx < TK * DPR; idx += 256) {
+                    const int dp = idx / TK, key = idx % TK;
+                    K32[(size_t(hh) * DPR + dp) * Sp + s0 + key] = sh[size_t(dp) * (TK + 1) + key];
+                }
+            });
+        });
+    } else
     if (flash_kv_kmajor()) {
         // key-major K cache ([KVH][seq_cap][D], kernels.hpp): read with d fastest, same packed result
         e = q.submit([&](sycl::handler& h) {
@@ -998,6 +1030,19 @@ sycl::event flash_fast_impl(sycl::queue& q, const float* qv, const uint8_t* kc,
                 s < kend ? lut[kc[(size_t(hh) * D + d) * seq_cap + s]] : sycl_bf16(0.0f);
         });
     });
+    if (pack2)
+    e = q.submit([&](sycl::handler& h) {                                     // V: one u32 (a key pair) per item
+        h.depends_on(e);
+        h.parallel_for(sycl::range<3>(size_t(KVH), size_t(Sp / 2), size_t(D)), [=](sycl::id<3> id) {
+            const int hh = int(id[0]), sp = int(id[1]), d = int(id[2]);
+            const int s = 2 * sp;
+            const uint16_t* lu = reinterpret_cast<const uint16_t*>(lut);
+            const uint32_t a = s < kend ? lu[vc[(size_t(hh) * seq_cap + s) * D + d]] : 0u;
+            const uint32_t b = s + 1 < kend ? lu[vc[(size_t(hh) * seq_cap + s + 1) * D + d]] : 0u;
+            reinterpret_cast<uint32_t*>(Vp)[(size_t(hh) * (Sp / 2) + sp) * D + d] = a | (b << 16);
+        });
+    });
+    else
     e = q.submit([&](sycl::handler& h) {
         h.depends_on(e);
         h.parallel_for(sycl::range<3>(size_t(KVH), size_t(Sp), size_t(D)), [=](sycl::id<3> id) {
