@@ -406,7 +406,8 @@ sycl::event verify_attn_team_impl(sycl::queue& q, const AttnParams& p, const Ver
     const size_t nwg = size_t(g.n) * KVH * smax;
     // GRIMOIRE_VERIFY_TEAM_PF (default 1): at the top of each block, prefetch this thread's K rows and V slice of
     // the NEXT block to L1/L2 (no registers), so its loads stop waiting on memory right before use.
-    static const int pf = env_int("GRIMOIRE_VERIFY_TEAM_PF", 1);
+    static const int pf_env = env_int("GRIMOIRE_VERIFY_TEAM_PF", 1);
+    const int pf = pf_env;                     // a local: kernels cannot read the static
     return q.submit([&](sycl::handler& h) {
         h.depends_on(deps);
         h.parallel_for(sycl::nd_range<1>(nwg * TN, TN), [=](sycl::nd_item<1> it) SYCL_ESIMD_KERNEL {
