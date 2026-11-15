@@ -3668,7 +3668,10 @@ struct Grimoire {
     size_t spec_conv_input_elems = 0;
     // 32 since 2026-11-11 (was 16): MTP depth is min(K, kSpecBatch/n - 1), so 16 rows gave 4 users
     // depth 3 and 8 users depth 1.  INT4 verify GEMMs take 17..32 rows in one pass (int4_smallm_ok).
-    static constexpr int kSpecBatch = 32;
+    // 64 since 2026-11-15 for COPY rows only (GRIMOIRE_COPY_ROWS, below): 4 users copying verified 8 rows each
+    // (copies 99.8% kept at 61K); MTP rows keep GRIMOIRE_SPEC_ROWS (32).  33..64-row INT4 GEMMs: oneDNN, or the
+    // own kernel in 32-row pieces (launch_int4_smallm_wide).
+    static constexpr int kSpecBatch = 64;
     // Read EVERY time, not captured in a static.  A static answers with
     // whatever the environment was at the FIRST call in the process,
     // which is a different engine's answer -- and the call sites are all
@@ -10852,7 +10855,8 @@ bool Grimoire::decode_spec_batch(const std::vector<int32_t>& tokens,
     static const int copy_depth=[] { const char* e=std::getenv("GRIMOIRE_COPY_DEPTH");
         return std::clamp(e&&*e?std::atoi(e):31,1,kSpecBatch-1); }();
     static const char* const copy_rows_env=std::getenv("GRIMOIRE_COPY_ROWS");
-    const int copy_rows=std::clamp(copy_rows_env&&*copy_rows_env?std::atoi(copy_rows_env):wide_verify?32:16,2,kSpecBatch);
+    // GRIMOIRE_COPY_ROWS default 64 where the verify GEMMs are wide (2026-11-15; was 32): 4 users copy 15 deep, not 7.
+    const int copy_rows=std::clamp(copy_rows_env&&*copy_rows_env?std::atoi(copy_rows_env):wide_verify?64:16,2,kSpecBatch);
     static const bool copy_agree=[] { const char* e=std::getenv("GRIMOIRE_COPY_AGREE");
         return !(e&&*e=='0'); }();
     std::vector<int> copy_cap(size_t(n),0);
@@ -20013,7 +20017,7 @@ bool Grimoire::prefill(const std::vector<int32_t>& tokens,
         // only other INT4 engines here are the SIMT GEMVs, whose FMAs grow with
         // M: Qwen3.8-27B-W4A16 served 19.9 / 18.3 / 19.5 / 19.5 tok/s at 1 / 2 /
         // 4 / 8 users through them (2026-10-04).
-        const bool dpas_i4 = smallm_dpas && M>=2 && M<=32 && !exact_verify && !smallm_gemv &&
+        const bool dpas_i4 = smallm_dpas && M>=2 && M<=kSpecBatch && !exact_verify && !smallm_gemv &&
                              !w.has_i4() && int4_smallm_ok(w.w,M,nullptr,y);
         // FP8 E4M3 (2026-10-06): before this it took launch_gemv_batch below,
         // the SIMT GEMV at ~50 GB/s -- Qwen3.8-27B FP8 + MTP on two B70s 4.1
@@ -22333,7 +22337,7 @@ bool Grimoire::prefill(const std::vector<int32_t>& tokens,
                     batch_logits, lm_head.w.N, lm_head.w.K, M, {});
             }
         } else if ((lm_head.w.fmt == Fmt::MXFP4 ||
-                    (lm_head.w.fmt == Fmt::INT4 && M <= 32 && int4_smallm_ok(lm_head.w, M, nullptr, nullptr)) ||
+                    (lm_head.w.fmt == Fmt::INT4 && M <= kSpecBatch && int4_smallm_ok(lm_head.w, M, nullptr, nullptr)) ||
                     ((lm_head.w.fmt == Fmt::FP8_E4M3 || lm_head.w.fmt == Fmt::INT8) &&
                      fp8_smallm_ok(lm_head.w, M, nullptr, nullptr)) ||
                     lm_dnnl ||
@@ -22346,7 +22350,7 @@ bool Grimoire::prefill(const std::vector<int32_t>& tokens,
             mm(lm_head, bn, batch_logits);
         }
         const bool lm_batched = lm_head.w.fmt == Fmt::MXFP4 ||
-            (lm_head.w.fmt == Fmt::INT4 && M <= 32 && int4_smallm_ok(lm_head.w, M, nullptr, nullptr)) ||
+            (lm_head.w.fmt == Fmt::INT4 && M <= kSpecBatch && int4_smallm_ok(lm_head.w, M, nullptr, nullptr)) ||
             ((lm_head.w.fmt == Fmt::FP8_E4M3 || lm_head.w.fmt == Fmt::INT8) &&
              fp8_smallm_ok(lm_head.w, M, nullptr, nullptr)) || lm_dnnl ||
             // GGUF native heads (2026-10-29): the Qwen3.8-27B Q6_K head row by row was 5 x 1.8 ms

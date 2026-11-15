@@ -4321,7 +4321,8 @@ sycl::event launch_bf16_smallm(sycl::queue& q, const QuantWeight& w, const sycl_
 bool int4_smallm_ok(const QuantWeight& w, int M, const void* X, const void* Y) {
     // 17..32 rows (2026-11-11): several conversations' verify blocks in one pass (kSpecBatch 32),
     // int4_smallm_fdq_impl<4, GS> -- the weights are read once for all 32 rows.
-    if (w.fmt != Fmt::INT4 || !w.payload || !w.scales || !w.zeros || M < 1 || M > 32) return false;
+    // 33..64 rows (2026-11-15, copy verify): oneDNN, or 32-row pieces of the own kernel (launch_int4_smallm_wide).
+    if (w.fmt != Fmt::INT4 || !w.payload || !w.scales || !w.zeros || M < 1 || M > 64) return false;
     const int gs = 1 << w.int4_gshift();
     return (gs == 64 || gs == 128) && int64_t(w.row_scales) * gs == w.K && w.K % 512 == 0 &&
            w.N % 16 == 0 && w.row_bytes >= int64_t(w.K / 2) && w.row_bytes % 16 == 0 &&
@@ -4343,6 +4344,11 @@ sycl::event launch_int4_smallm_wide(sycl::queue& q, const QuantWeight& w, const 
         return e && *e ? std::atoi(e) : 17; }();
     if (M >= i4_dnnl_min && w.N >= 2048 && onednn_int4_ok(q, w, M)) return onednn_gemm_int4(q, w, X, Y, M, false, deps);
 #endif
+    // the own kernel takes at most 32 rows (int4_smallm_fdq_impl<4>): 33..64 in 32-row pieces
+    if (M > 32) {
+        sycl::event e0 = launch_int4_smallm_wide(q, w, X, Y, 32, deps);
+        return launch_int4_smallm_wide(q, w, X + size_t(32) * w.K, Y + size_t(32) * w.N, M - 32, {e0});
+    }
     const bool g64 = (1 << w.int4_gshift()) == 64;
     SmallmPlan p = smallm_plan(w.N, w.K);
     // 9..16 rows (2026-11-05): MXFP4's rule (mxfp4_smallm_impl) -- 4 K slices for the wide outputs, 2 for the

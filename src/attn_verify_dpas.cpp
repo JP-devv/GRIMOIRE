@@ -146,7 +146,8 @@ sycl::event verify_attn_dpas_impl(sycl::queue& q, const AttnParams& p, const Ver
     // splits (64K/128K keys: 1552/3166 -> 837/1525 us at equal split counts).
     // Keep the committed layout until the long-context split floor exceeds
     // the ordinary thread target. One-row drafting keeps its original layout.
-    const bool grouped = tiles > 1 && smax > short_splits;
+    // tiles <= 32 (2026-11-15): a 64-row copy verify has 48 tiles per KV head; keep work-groups at <= 32 threads
+    const bool grouped = tiles > 1 && tiles <= 32 && smax > short_splits;
     return q.submit([&](sycl::handler& h) {
         h.depends_on(deps);
         // One work-group = the `tiles` threads of one (KV head, split): they read the same K/V
