@@ -26,7 +26,7 @@ sycl::event flash_team(sycl::queue& q, sycl::event dep, const sycl_bf16* Qb, int
     namespace es = sycl::ext::intel::esimd;
     namespace xmx = sycl::ext::intel::esimd::xmx;
     constexpr int RT = 8 * NT, NRB = RT / 8, DP = D / NT, DPT = DP / 16, KS = BK / NT, KC = KS / 16;
-    constexpr int NBK = BK / 16, DT = D / 16, WGT = NT * TEAMS, WROWS = RT * TEAMS;
+    constexpr int NBK = BK / 16, DT = D / 16, WGT = NT * TEAMS, WROWS = RT * TEAMS, QU = KC >= 2 ? 1 : 2;
     static_assert(KS % 16 == 0 && DP % 16 == 0 && RT <= 32, "team geometry");
     constexpr int MAXB = NT * RT * 4;                 // per-row block max (later l) of every thread
     constexpr int PB = BK * RT * 2;                   // P [kc][rb][8][16] bf16
@@ -53,7 +53,8 @@ sycl::event flash_team(sycl::queue& q, sycl::event dep, const sycl_bf16* Qb, int
             for (int s0 = 0; s0 < kmax; s0 += BK) {
                 const int ks0 = s0 + t * KS;
                 es::simd<float, KS * RT> sc = 0.0f;   // [c][rb][8][16]
-                #pragma unroll 2
+                // BK 128 (KC 2) spills 1,280 bytes with this at 2 or 1 (11-15 build log), so the server uses BK 64
+                #pragma unroll QU
                 for (int dt = 0; dt < DT; ++dt) {
                     es::simd<sycl_bf16, RT * 16> a = es::load_2d<sycl_bf16, 16, RT>(
                         qh, D * 2 - 1, Tp - 1, D * 2 - 1, dt * 16, r0);
@@ -120,13 +121,12 @@ sycl::event flash_team(sycl::queue& q, sycl::event dep, const sycl_bf16* Qb, int
                     }
                 l = l * corr + rs;
                 m = mn;
-                {
-                    es::simd<sycl_bf16, KS * RT> p = sc;
-                    es::simd<uint32_t, KS * RT / 2> pu = p.template bit_cast_view<uint32_t>().read();
-                    #pragma unroll
-                    for (int i = 0; i < KS * RT / 128; ++i)
-                        es::slm_block_store<uint32_t, 64>(sp + (t * KS * RT + i * 128) * 2,
-                                                          es::simd<uint32_t, 64>(pu.template select<64, 1>(i * 64)));
+                // one 8 x 16 tile at a time: a whole bf16 copy of sc (+ its u32 view) next to o spilled at BK 128
+                #pragma unroll
+                for (int i = 0; i < KS * RT / 128; ++i) {
+                    es::simd<sycl_bf16, 128> pt = sc.template select<128, 1>(i * 128);
+                    es::slm_block_store<uint32_t, 64>(sp + (t * KS * RT + i * 128) * 2,
+                                                      pt.template bit_cast_view<uint32_t>().read());
                 }
                 float cr[RT];
                 #pragma unroll

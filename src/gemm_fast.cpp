@@ -955,14 +955,14 @@ sycl::event flash_fast_impl(sycl::queue& q, const float* qv, const uint8_t* kc,
     });
     static const int tpw = [] { const char* v = std::getenv("GRIMOIRE_FLASH_TPW"); const int n = v ? std::atoi(v) : 8;
         return n == 16 || n == 32 ? n : 8; }();
-    // GRIMOIRE_FLASH_TEAM=2|4 (0 = off, 2026-11-15, src/flash_team.hpp): NT threads share 8 * NT query rows, so each
-    // loaded K / V tile feeds NT times more rows (the 8-row kernel is load-bound: ~33 TFLOP/s at 61K).
-    static const int team = [] { const char* v = std::getenv("GRIMOIRE_FLASH_TEAM"); const int n = v ? std::atoi(v) : 0;
-        return n == 2 || n == 4 ? n : 0; }();
-    if (use_esimd && block == 128 && team == 4)
-        return flash_team<D, 128, 4, 2>(q, e, Qb, Tp, Kp, Vp, Sp, out, tokens, start, H, KVH);
-    if (use_esimd && block == 128 && team == 2)
-        return flash_team<D, 128, 2, 4>(q, e, Qb, Tp, Kp, Vp, Sp, out, tokens, start, H, KVH);
+    // GRIMOIRE_FLASH_TEAM (2026-11-15, src/flash_team.hpp; default on, 0 = the 8-row kernel below): teams of 4
+    // threads share 32 query rows, 64-key blocks, so each loaded K / V tile feeds 4x the rows (the 8-row kernel is
+    // load-bound, ~36 TFLOP/s).  bench_flash_team, Qwen3.8 geometry: 61K chunk 153 -> 82 ms (68 TFLOP/s), first
+    // 3840-token chunk 4.3 -> 2.2 ms; vs this kernel at 64-key blocks max |diff| 2e-7..8e-7 of max |out| (same math;
+    // vs its default 128-key blocks 1e-4..8e-4, the block max differs).  128-key teams spilled 1,280 bytes, slower.
+    static const bool team = [] { const char* v = std::getenv("GRIMOIRE_FLASH_TEAM"); return !(v && *v == '0'); }();
+    if (use_esimd && team && block >= 64)
+        return flash_team<D, 64, 4, 2>(q, e, Qb, Tp, Kp, Vp, Sp, out, tokens, start, H, KVH);
     if (use_esimd && block == 128 && tpw == 16)
         return flash_esimd<D, 128, 16>(q, e, Qb, Tp, Kp, Vp, Sp, out, tokens, start, H, KVH);
     if (use_esimd && block == 128 && tpw == 32)

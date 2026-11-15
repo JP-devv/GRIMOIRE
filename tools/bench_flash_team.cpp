@@ -80,11 +80,17 @@ int main() {
         const double ms = timeit([&] { flash_team<D, BKX, NT, TEAMS>(q, e, Qb, Tp, Kp, Vp, Sp, out, T, start, H, KVH); }); \
         check("team BK" #BKX " NT" #NT " x" #TEAMS, ms); } while (0)
         TEAM(128, 4, 2);
-        TEAM(128, 4, 1);
         TEAM(128, 4, 4);
-        TEAM(128, 2, 4);
-        TEAM(128, 2, 2);
         TEAM(64, 4, 2);
+        TEAM(64, 4, 4);
+        // the 64-key block changes the softmax block max (so the bf16 P rounding): compare with production at 64
+        {
+            q.memset(out, 0, n * 4).wait();
+            const double t64 = timeit([&] { flash_bisect<D, 64, 8, 0>(q, e, Qb, Tp, Kp, Vp, Sp, out, T, start, H, KVH); });
+            check("production BK64", t64);
+            q.memcpy(ref.data(), out, n * 4).wait();
+            TEAM(64, 4, 2);
+        }
     }
     return 0;
 }
