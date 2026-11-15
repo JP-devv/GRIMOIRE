@@ -517,6 +517,7 @@ sycl::event launch_bf16_smallm(sycl::queue& q, const QuantWeight& w, const sycl_
 // The same for INT4 weights (GPTQ / AutoRound / GRIMOIRE's own, groups of 64
 // or 128): the w4a16 DPAS engine for batched decode and speculative verify.
 bool int4_smallm_ok(const QuantWeight& w, int M, const void* X, const void* Y);
+bool int4_smallm_wide_ok(const QuantWeight& w, int M, const void* X, const void* Y);   // <= 64 rows, verify only
 sycl::event launch_int4_smallm(sycl::queue& q, const QuantWeight& w, const sycl_bf16* X,
     float* Y, int M, const std::vector<sycl::event>& deps = {});
 // FP8 E4M3 (per-row scale) at 1..8 rows: the same DPAS small-M design (gemv_decode.cpp).
@@ -1005,9 +1006,11 @@ sycl::event launch_deltanet_step(sycl::queue& q, const DeltaNetParams& p,
 // Batched decode: row r of one launch is one token of the conversation in
 // sequence slot slot[r].  Passed BY VALUE as a kernel argument: no upload,
 // no host sync.  Batches above kMaxRowSlots keep the per-row loops.
-// 32 since 2026-11-11 (was 16), 64 since 2026-11-15: a verify of several conversations has up to kSpecBatch
-// rows; past this the rope / conv / DeltaNet row launches fall back to one launch per row.
-constexpr int kMaxRowSlots = 64;
+// 32 since 2026-11-11 (was 16): a verify of several conversations has up to 32 rows (kSpecBatch 64 since 11-15:
+// the q/k rope + KV append run 33..64-row verify blocks in 32-row launches); past this the conv / DeltaNet row
+// launches fall back to one launch per row.  Kept at 32 (11-15): at 64 the by-value RowSlots / DnGroups made one
+// user's copying ~1.2% slower (build w vs u, repeatable).
+constexpr int kMaxRowSlots = 32;
 struct RowSlots { int32_t slot[kMaxRowSlots]; int32_t pos[kMaxRowSlots]; };
 // launch_deltanet_step for `rows` rows in one launch.  p.q/k/v/a/beta/out
 // point at row 0 (row strides: n_k_heads*k_dim, n_heads*v_dim, n_heads);

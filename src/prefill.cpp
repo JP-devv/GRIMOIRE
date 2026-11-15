@@ -1209,7 +1209,7 @@ sycl::event launch_causal_conv1d_split_groups(sycl::queue& q, const float* x,
         float h0=ring[0],h1=ring[1],h2=ring[2];
         const int r0=gg.row0[gi],nr=gg.nrows[gi];
         if(save_base){
-          float*sv=save_base+int64_t(r0)*save_stride+int64_t(c)*3;
+          float*sv=save_base+int64_t(gi)*save_stride+int64_t(c)*3;   // per GROUP (11-15; was its first row)
           sv[0]=h0;sv[1]=h1;sv[2]=h2;
         }
         for(int t=r0;t<r0+nr;++t){

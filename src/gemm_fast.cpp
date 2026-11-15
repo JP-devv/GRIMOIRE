@@ -4318,15 +4318,24 @@ sycl::event launch_bf16_smallm(sycl::queue& q, const QuantWeight& w, const sycl_
 }
 
 // INT4 groups of 64 or 128 with contiguous [N][K/GS] scale and zero rows.
-bool int4_smallm_ok(const QuantWeight& w, int M, const void* X, const void* Y) {
-    // 17..32 rows (2026-11-11): several conversations' verify blocks in one pass (kSpecBatch 32),
-    // int4_smallm_fdq_impl<4, GS> -- the weights are read once for all 32 rows.
-    // 33..64 rows (2026-11-15, copy verify): oneDNN, or 32-row pieces of the own kernel (launch_int4_smallm_wide).
-    if (w.fmt != Fmt::INT4 || !w.payload || !w.scales || !w.zeros || M < 1 || M > 64) return false;
+namespace {
+bool int4_smallm_shape_ok(const QuantWeight& w, int M, const void* X, const void* Y, int max_m) {
+    if (w.fmt != Fmt::INT4 || !w.payload || !w.scales || !w.zeros || M < 1 || M > max_m) return false;
     const int gs = 1 << w.int4_gshift();
     return (gs == 64 || gs == 128) && int64_t(w.row_scales) * gs == w.K && w.K % 512 == 0 &&
            w.N % 16 == 0 && w.row_bytes >= int64_t(w.K / 2) && w.row_bytes % 16 == 0 &&
            aligned64(w.payload) && aligned64(X) && aligned64(Y);
+}
+} // namespace
+bool int4_smallm_ok(const QuantWeight& w, int M, const void* X, const void* Y) {
+    // 17..32 rows (2026-11-11): several conversations' verify blocks in one pass (kSpecBatch 32),
+    // int4_smallm_fdq_impl<4, GS> -- the weights are read once for all 32 rows.
+    return int4_smallm_shape_ok(w, M, X, Y, 32);
+}
+// 33..64 rows (2026-11-15): copy verify blocks only (callers check it is a verify) -- oneDNN, or 32-row pieces of
+// the own kernel (launch_int4_smallm_wide).  Prompts of 33..64 tokens keep their prompt GEMMs.
+bool int4_smallm_wide_ok(const QuantWeight& w, int M, const void* X, const void* Y) {
+    return int4_smallm_shape_ok(w, M, X, Y, 64);
 }
 
 // M > 8 (and every M with GRIMOIRE_I4_SMALLM_256=1): this library's 256

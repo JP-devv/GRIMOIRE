@@ -26,6 +26,9 @@ namespace b70 {
 // One group = the verify rows of one conversation: rows row0 .. row0+nrows-1, one KV
 // slot, consecutive positions (row r has length d_lens[r]; the last row is the longest).
 constexpr int kMaxVerifyGroups = 16;
+// Attention partials are sized for kVerifyPartRows rows x MAX_SPLITS (grimoire.cpp s.part); verify_dpas_splits
+// keeps rows x splits within that (a 33..64-row copy verify takes at most MAX_SPLITS / 2 splits).  11-15.
+constexpr int kVerifyPartRows = 32;
 struct VerifyGroups {
     int32_t n = 0;
     int32_t row0[kMaxVerifyGroups];

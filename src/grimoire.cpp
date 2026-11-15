@@ -9746,9 +9746,10 @@ bool Grimoire::build(const std::string& dir, const UploadOptions& requested_opt,
     // width from the live sequence length (see decode_splits in attention.cpp),
     // so the workspace must cover the widest split it can choose. The batched
     // verify path still uses GRAPH_SPLITS and simply occupies a prefix.
-    s.part    = sycl::malloc_device<float>(size_t(kSpecBatch) * cfg.n_heads * MAX_SPLITS * cfg.max_head_dim(), q);
-    s.pm      = sycl::malloc_device<float>(size_t(kSpecBatch) * cfg.n_heads * MAX_SPLITS, q);
-    s.pl      = sycl::malloc_device<float>(size_t(kSpecBatch) * cfg.n_heads * MAX_SPLITS, q);
+    // kVerifyPartRows (32) x MAX_SPLITS (11-15): a verify of more rows takes fewer splits (verify_dpas_splits)
+    s.part    = sycl::malloc_device<float>(size_t(kVerifyPartRows) * cfg.n_heads * MAX_SPLITS * cfg.max_head_dim(), q);
+    s.pm      = sycl::malloc_device<float>(size_t(kVerifyPartRows) * cfg.n_heads * MAX_SPLITS, q);
+    s.pl      = sycl::malloc_device<float>(size_t(kVerifyPartRows) * cfg.n_heads * MAX_SPLITS, q);
 
     // ---- Qwen4-Exp scratch -------------------------------------------
     // Everything here is sized for ONE row; the batched prefill allocates
@@ -10852,8 +10853,11 @@ bool Grimoire::decode_spec_batch(const std::vector<int32_t>& tokens,
     // 32 rows 60 ms): copy-code 365 / 467, copy-prose 363 / 479, edit-rename 347 / 454, docstrings 336 / 420
     // tok/s (MTP alone ~162); and GRIMOIRE_COPY_ROWS (32) verify rows over all copying rows, else it keeps its
     // MTP drafts.  GRIMOIRE_COPY_AGREE=0 verifies every proposal without asking the head.
+    // Default 63 since 2026-11-15 (was 31, kSpecBatch 64): MEASURED one B70, Swift INT4, 1 user, 1024 tokens, texts
+    // identical to build g: copy-code 561 -> 770, copy-prose 568 -> 781, edit-rename 527 -> 651, docstring 465 -> 568
+    // tok/s (a 44-row verify 57.8 ms, oneDNN INT4).
     static const int copy_depth=[] { const char* e=std::getenv("GRIMOIRE_COPY_DEPTH");
-        return std::clamp(e&&*e?std::atoi(e):31,1,kSpecBatch-1); }();
+        return std::clamp(e&&*e?std::atoi(e):kSpecBatch-1,1,kSpecBatch-1); }();
     static const char* const copy_rows_env=std::getenv("GRIMOIRE_COPY_ROWS");
     // GRIMOIRE_COPY_ROWS default 64 where the verify GEMMs are wide (2026-11-15; was 32): 4 users copy 15 deep, not 7.
     const int copy_rows=std::clamp(copy_rows_env&&*copy_rows_env?std::atoi(copy_rows_env):wide_verify?64:16,2,kSpecBatch);
@@ -11080,7 +11084,7 @@ bool Grimoire::decode_spec_batch(const std::vector<int32_t>& tokens,
                     const int c=int(id[1])/hist, j=int(id[1])%hist;
                     const int first=gg.row0[gi], cnt=gg.nrows[gi];
                     float* dst=rbase+size_t(gg.slot[gi])*rslot;
-                    const float* base=steps+size_t(first)*celems;
+                    const float* base=steps+size_t(gi)*celems;          // saved per conversation (11-15)
                     const float* inputs=inputs0+size_t(first)*channels;
                     if(cnt>=hist) dst[int64_t(c)*hist+j]=inputs[int64_t(cnt-hist+j)*channels+c];
                     else if(j<hist-cnt) dst[int64_t(c)*hist+j]=base[int64_t(c)*hist+j+cnt];
@@ -11119,7 +11123,7 @@ bool Grimoire::decode_spec_batch(const std::vector<int32_t>& tokens,
                     const int channels=2*cfg.lin_k_heads*cfg.lin_k_dim+cfg.lin_v_heads*cfg.lin_v_dim;
                     const int hist=cfg.conv_kernel-1;
                     float* dst=layer.conv_ring;
-                    const float* base=batch_conv_steps+size_t(first)*spec_conv_elems+coff;
+                    const float* base=batch_conv_steps+size_t(row)*spec_conv_elems+coff;   // per conversation (11-15)
                     const float* inputs=spec_conv_inputs+xoff+size_t(first)*channels;
                     const int cnt=accepted;
                     q.parallel_for(sycl::range<1>(size_t(channels)*hist),[=](sycl::id<1> id){
@@ -11224,9 +11228,12 @@ void Grimoire::init_draft_slots() {
             }
         }
         if(spec_conv_elems) {
-            conv_steps=sycl::malloc_device<float>(size_t(kSpecBatch)*spec_conv_elems,q);
+            // the fused verify keeps ONE pre-verify ring per conversation (11-15: was one per row, 64 x 5.9 MB
+            // on Qwen3.8-27B -- the prefill chunk budget paid for it); the old per-row path keeps kSpecBatch
+            const size_t crows=dn_verify_fused?size_t(std::clamp(n_seq_slots,1,kSpecBatch)):size_t(kSpecBatch);
+            conv_steps=sycl::malloc_device<float>(crows*spec_conv_elems,q);
             if(!conv_steps) throw std::bad_alloc();
-            extra+=size_t(kSpecBatch)*spec_conv_elems*sizeof(float);
+            extra+=crows*spec_conv_elems*sizeof(float);
         }
         q.wait_and_throw();
     } catch(...) {
@@ -19449,7 +19456,7 @@ bool Grimoire::prefill(const std::vector<int32_t>& tokens,
     // writes only its own position's K/V, so they run over all rows in one launch for a verify
     // block too (11-05).  The per-row loop launched 2 kernels per row: Qwen3.8-27B GPTQ + MTP,
     // 4 users (16 verify rows), "attn rope + kv append" was 2.14 ms of a 48 ms verify pass.
-    const bool rows_rope_ok = seqb && !seqb->spans && rows_batch && M <= kMaxRowSlots;
+    const bool rows_rope_ok = seqb && !seqb->spans && rows_batch;   // > kMaxRowSlots rows: 32-row launches
     // Batched admission (seqb->spans): the runs of rows that are one prompt
     // each.  Conv, DeltaNet and attention run per run with the prompt kernels;
     // everything row-wise (projections, MoE, norms) runs once over all rows.
@@ -19469,7 +19476,8 @@ bool Grimoire::prefill(const std::vector<int32_t>& tokens,
         for (const auto& d : L) unsupported = unsupported || d.k2_sparse || d.ple || d.tiered;
         if (unsupported) return false;
     }
-    if (rows_rope_ok) for (int r = 0; r < M; ++r) { rslots.slot[r] = seqb->slot[r]; rslots.pos[r] = seqb->pos[r]; }
+    if (rows_rope_ok && M <= kMaxRowSlots)
+        for (int r = 0; r < M; ++r) { rslots.slot[r] = seqb->slot[r]; rslots.pos[r] = seqb->pos[r]; }
     // Each row's attention length (pos + 1), uploaded once per step from a
     // pinned staging buffer (in-order queue; the previous step's copy is
     // waited on before the staging buffer is rewritten).
@@ -20017,8 +20025,9 @@ bool Grimoire::prefill(const std::vector<int32_t>& tokens,
         // only other INT4 engines here are the SIMT GEMVs, whose FMAs grow with
         // M: Qwen3.8-27B-W4A16 served 19.9 / 18.3 / 19.5 / 19.5 tok/s at 1 / 2 /
         // 4 / 8 users through them (2026-10-04).
-        const bool dpas_i4 = smallm_dpas && M>=2 && M<=kSpecBatch && !exact_verify && !smallm_gemv &&
-                             !w.has_i4() && int4_smallm_ok(w.w,M,nullptr,y);
+        const bool dpas_i4 = smallm_dpas && M>=2 && !exact_verify && !smallm_gemv && !w.has_i4() &&
+                             (M<=32 ? int4_smallm_ok(w.w,M,nullptr,y)
+                                    : seqb && seqb->verify && M<=kSpecBatch && int4_smallm_wide_ok(w.w,M,nullptr,y));
         // FP8 E4M3 (2026-10-06): before this it took launch_gemv_batch below,
         // the SIMT GEMV at ~50 GB/s -- Qwen3.8-27B FP8 + MTP on two B70s 4.1
         // tok/s against 9.4 without speculation.  INT8 too since 2026-10-29
@@ -20926,12 +20935,13 @@ bool Grimoire::prefill(const std::vector<int32_t>& tokens,
                         launch_causal_conv1d_split_groups(q,t0,d.la_conv,d.conv_base,int64_t(d.conv_slot),cg,ch,
                             t1,t2,t3,qs,vs,batch_conv_steps+spec_coff[li],int64_t(spec_conv_elems));
                     else
-                    for(int r=0;r<M;){
+                    for(int r=0,gi=0;r<M;++gi){
                         int n=1;
                         while(r+n<M && seqb->slot[r+n]==seqb->slot[r] &&
                               seqb->pos[r+n]==seqb->pos[r+n-1]+1) ++n;
                         float* ring=d.conv_base+size_t(seqb->slot[r])*d.conv_slot;
-                        q.memcpy(batch_conv_steps+size_t(r)*spec_conv_elems+spec_coff[li],ring,
+                        // per conversation (group gi), as launch_causal_conv1d_split_groups saves it (11-15)
+                        q.memcpy(batch_conv_steps+size_t(gi)*spec_conv_elems+spec_coff[li],ring,
                                  d.conv_slot*sizeof(float));
                         ConvParams cp{t0+int64_t(r)*ch,d.la_conv,ring,nullptr,ch,cfg.conv_kernel};
                         launch_causal_conv1d_split_prefill(q,cp,n,
@@ -21297,8 +21307,14 @@ bool Grimoire::prefill(const std::vector<int32_t>& tokens,
                                 cfg.n_heads,d.kv_heads,d.head_dim,seqb->pos[r],d.rope_theta,
                                 d.partial_rope,cfg.rms_eps);
                     }
-                    launch_qk_norm_rope_rows(q,qv,t3,d.q_norm,d.k_norm,M,cfg.n_heads,
-                        d.kv_heads,d.head_dim,rslots,d.rope_theta,d.partial_rope,cfg.rms_eps);
+                    // up to kMaxRowSlots rows per launch (a 64-row copy verify = two)
+                    for(int c0=0;c0<M;c0+=kMaxRowSlots){
+                        const int cn=std::min(kMaxRowSlots,M-c0);
+                        RowSlots rc{};
+                        for(int r=0;r<cn;++r){ rc.slot[r]=seqb->slot[c0+r]; rc.pos[r]=seqb->pos[c0+r]; }
+                        launch_qk_norm_rope_rows(q,qv+int64_t(c0)*QH,t3+int64_t(c0)*KH,d.q_norm,d.k_norm,cn,cfg.n_heads,
+                            d.kv_heads,d.head_dim,rc,d.rope_theta,d.partial_rope,cfg.rms_eps);
+                    }
                     if(rope_verify){
                         std::vector<float> a(size_t(M)*(QH+KH)), b(a.size());
                         q.memcpy(a.data(),qv,size_t(M)*QH*4); q.memcpy(a.data()+size_t(M)*QH,t3,size_t(M)*KH*4);
@@ -21309,8 +21325,13 @@ bool Grimoire::prefill(const std::vector<int32_t>& tokens,
                         std::fprintf(stderr,"    rows verify rope layer %d M=%d: %zu of %zu differ\n",li,M,ndiff,a.size());
                         sycl::free(vq,q); sycl::free(vk,q);
                     }
-                    launch_kv_append_rows(q,t3,t4,d.k_base,d.v_base,int64_t(d.kv_slot),rslots,M,
-                        d.kv_heads,d.head_dim,max_seq);
+                    for(int c0=0;c0<M;c0+=kMaxRowSlots){
+                        const int cn=std::min(kMaxRowSlots,M-c0);
+                        RowSlots rc{};
+                        for(int r=0;r<cn;++r){ rc.slot[r]=seqb->slot[c0+r]; rc.pos[r]=seqb->pos[c0+r]; }
+                        launch_kv_append_rows(q,t3+int64_t(c0)*KH,t4+int64_t(c0)*KH,d.k_base,d.v_base,int64_t(d.kv_slot),
+                            rc,cn,d.kv_heads,d.head_dim,max_seq);
+                    }
                 }else
                 for(int r=0;r<M;++r){
                     const int P=seqb->pos[r];
@@ -22337,7 +22358,8 @@ bool Grimoire::prefill(const std::vector<int32_t>& tokens,
                     batch_logits, lm_head.w.N, lm_head.w.K, M, {});
             }
         } else if ((lm_head.w.fmt == Fmt::MXFP4 ||
-                    (lm_head.w.fmt == Fmt::INT4 && M <= kSpecBatch && int4_smallm_ok(lm_head.w, M, nullptr, nullptr)) ||
+                    (lm_head.w.fmt == Fmt::INT4 && (M <= 32 ? int4_smallm_ok(lm_head.w, M, nullptr, nullptr)
+                        : seqb && seqb->verify && M <= kSpecBatch && int4_smallm_wide_ok(lm_head.w, M, nullptr, nullptr))) ||
                     ((lm_head.w.fmt == Fmt::FP8_E4M3 || lm_head.w.fmt == Fmt::INT8) &&
                      fp8_smallm_ok(lm_head.w, M, nullptr, nullptr)) ||
                     lm_dnnl ||
@@ -22350,7 +22372,8 @@ bool Grimoire::prefill(const std::vector<int32_t>& tokens,
             mm(lm_head, bn, batch_logits);
         }
         const bool lm_batched = lm_head.w.fmt == Fmt::MXFP4 ||
-            (lm_head.w.fmt == Fmt::INT4 && M <= kSpecBatch && int4_smallm_ok(lm_head.w, M, nullptr, nullptr)) ||
+            (lm_head.w.fmt == Fmt::INT4 && (M <= 32 ? int4_smallm_ok(lm_head.w, M, nullptr, nullptr)
+                        : seqb && seqb->verify && M <= kSpecBatch && int4_smallm_wide_ok(lm_head.w, M, nullptr, nullptr))) ||
             ((lm_head.w.fmt == Fmt::FP8_E4M3 || lm_head.w.fmt == Fmt::INT8) &&
              fp8_smallm_ok(lm_head.w, M, nullptr, nullptr)) || lm_dnnl ||
             // GGUF native heads (2026-10-29): the Qwen3.8-27B Q6_K head row by row was 5 x 1.8 ms

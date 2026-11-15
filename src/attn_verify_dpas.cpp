@@ -103,6 +103,12 @@ int verify_dpas_splits(const AttnParams& p, const VerifyGroups& g, int len_max) 
         if (n < by_max) n = by_max;
     }
     if (n > MAX_SPLITS) n = MAX_SPLITS;
+    {   // rows x splits within the partials buffer (kVerifyPartRows x MAX_SPLITS)
+        int rows = 1;
+        for (int i = 0; i < g.n; ++i) rows = g.row0[i] + g.nrows[i] > rows ? g.row0[i] + g.nrows[i] : rows;
+        const int cap = kVerifyPartRows * MAX_SPLITS / rows;
+        if (n > cap) n = cap;
+    }
     // Long contexts, one-row groups (MTP draft rows; tiles == 1, each thread its own work-group): a 16-key step reads
     // 16 bytes of each of 256 K cache lines (K is [dim][seq]); the rest of each line is used by the next three steps
     // only if it is still in L1.  Past ~8 threads per Xe core it is not, and K is read ~4x.  MEASURED 2026-11-14,
