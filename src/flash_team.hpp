@@ -18,10 +18,13 @@
 #include "kernels.hpp"
 #include <sycl/ext/intel/esimd.hpp>
 #include <limits>
+#include <stdexcept>
 namespace b70 {
 // RTX (2026-11-15): rows per team, default 8 * NT.  RTX < 8 * NT gives each thread fewer output dims (DP = D / NT)
 // and more keys of S per Q load (KS = BK / NT): e.g. <D, 256, 8, 2, 32> = 32 rows, 8 threads, 32 keys each.
-template <int D, int BK, int NT, int TEAMS, int RTX = 8 * NT>
+// GQA (2026-11-16): one work-group = the TEAMS = H / KVH query heads of ONE KV head over the same RT rows, so the
+// teams read each K / V tile together (one L2 -> L1 transfer for TEAMS heads) instead of in separate work-groups.
+template <int D, int BK, int NT, int TEAMS, int RTX = 8 * NT, bool GQA = false>
 sycl::event flash_team(sycl::queue& q, sycl::event dep, const sycl_bf16* Qb, int Tp,
                        const sycl_bf16* Kp, const sycl_bf16* Vp, int Sp, float* out,
                        int tokens, int start, int H, int KVH) {
@@ -33,17 +36,21 @@ sycl::event flash_team(sycl::queue& q, sycl::event dep, const sycl_bf16* Qb, int
     constexpr int MAXB = NT * RT * 4;                 // per-row block max (later l) of every thread
     constexpr int PB = BK * RT * 2;                   // P [kc][rb][8][16] bf16
     constexpr int TEAM_SLM = MAXB + PB;
-    const int qtiles = (tokens + WROWS - 1) / WROWS;
+    const int qtiles = GQA ? (tokens + RT - 1) / RT : (tokens + WROWS - 1) / WROWS;
+    const size_t nwg = GQA ? size_t(qtiles) * KVH : size_t(qtiles) * H;
+    if (GQA && H / KVH != TEAMS) throw std::runtime_error("flash_team GQA: TEAMS must equal H / KVH");
     return q.submit([&](sycl::handler& h) {
         h.depends_on(dep);
-        h.parallel_for(sycl::nd_range<1>(size_t(qtiles) * H * WGT, WGT), [=](sycl::nd_item<1> it) SYCL_ESIMD_KERNEL {
+        h.parallel_for(sycl::nd_range<1>(nwg * WGT, WGT), [=](sycl::nd_item<1> it) SYCL_ESIMD_KERNEL {
             es::slm_init<TEAM_SLM * TEAMS>();
             constexpr float NINF = -std::numeric_limits<float>::infinity();
             const int g = int(it.get_group(0)), lt = int(it.get_local_id(0));
             const int team = lt / NT, t = lt % NT;
-            const int hq = g % H, qt = qtiles - 1 - g / H, kvh = hq / (H / KVH);
-            const int wr0 = qt * WROWS, r0 = wr0 + team * RT;
-            const int wlast = tokens - 1 < wr0 + WROWS - 1 ? tokens - 1 : wr0 + WROWS - 1;
+            const int hq = GQA ? (g % KVH) * TEAMS + team : g % H;
+            const int qt = GQA ? qtiles - 1 - g / KVH : qtiles - 1 - g / H, kvh = hq / (H / KVH);
+            const int wr0 = GQA ? qt * RT : qt * WROWS, r0 = GQA ? wr0 : wr0 + team * RT;
+            const int wspan = GQA ? RT : WROWS;
+            const int wlast = tokens - 1 < wr0 + wspan - 1 ? tokens - 1 : wr0 + wspan - 1;
             const int kmax = start + wlast + 1;       // same for the whole work-group: barriers inside the loop
             const uint32_t smax = uint32_t(team * TEAM_SLM), sp = smax + MAXB;
             const sycl_bf16* qh = Qb + size_t(hq) * Tp * D;
