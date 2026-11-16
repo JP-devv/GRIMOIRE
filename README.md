@@ -119,7 +119,65 @@ about the cost of one).  The BF16 GGUF gives **token-identical** output to the s
 UD-IQ4_XS, UD-IQ2_XXS, Q4_0 and Q8_0 files load and generate correctly (Q8_0 as `--proj int8`: 99.2%
 top-1).  Qwen3.8-Flash-Next GGUF: not supported yet.
 
-### On main since 2026-11-15 (no release image yet)
+### Release v1.10.7, 2026-11-16
+
+Built for the Arc Pro B70 and the Arc Pro B60 / Arc B580; measured on this machine's two Arc Pro B70s (gpu0 on PCIe
+Gen4 x8, gpu1 on Gen4 x4).
+
+**Prompt cache, on by default.** When the same long prompt comes again, or an agent sends its next turn (the
+conversation so far plus a new message), GRIMOIRE continues from what it already read instead of reading everything
+again. `GRIMOIRE_PREFIX_CACHE=0` turns it off. Each conversation slot keeps the state at the end of its last answer and
+at a point 64 tokens before the end of its last long prompt (taken by `grimoire-server` for prompts of 1,088 tokens or
+more; the one-shot CLI does not take it).
+
+Swift-1.5 Qwen3.8-27B GPTQ-Int4 + MTP (K=6), two B70s, tensor parallel, `--ctx 136000`, `GRIMOIRE_SEQ_SLOTS=8` (7 fit),
+the [b70-cookbook](https://github.com/munikor/b70-cookbook) `probe-battery.py` unchanged. vLLM = the cookbook's
+published numbers (intel/llm-scaler-vllm 0.31.0-b1, the same checkpoint, two B70s, tensor parallel 2, MTP 6, FP8 KV,
+131,072 context, measured on its author's machine, not this one). The script's "131K" prompt is 104.9K tokens, its
+"32K" prompt 26.2K.
+
+| Two B70s | GRIMOIRE, cache off | **GRIMOIRE v1.10.7** | vLLM (cookbook) |
+|---|---:|---:|---:|
+| Same 105K-token prompt again: time to first token | 54.4 s | **0.39 s** | 2.4 s |
+| Same 26K-token prompt again: time to first token | 10.0 s | **0.18 s** | -- |
+| 105K-token prompt, first time | 54.6 s | 45.5 s* | 87 s |
+| Decode after the repeated prompt, 1.7K / 6.6K / 26K / 105K | 132 / 125 / 137 / 93 | 127 / 126 / 115 / 92 | 123 / 118 / 132 / 78 |
+| Decode, short prompt, 256 / 1024 / 2048 / 4096 tokens out | 111.5 / 104.7 / 99.4 / 97.6 | 110.4 / 104.1 / 99.2 / 97.5 | 110.5 / 101.9 / 95.8 / 96.6 |
+| 8 users x 512 tokens, total tok/s | 268 | 276 | 321 |
+| Greedy correctness probe | 9/10 | 9/10 | 9/10 (same miss) |
+
+\* The script's prompts share their opening text, so the 105K prompt continues from the 26K prompt's saved state.
+
+A 30,070-token document plus a question, then the same request again, then the next turn (document + answer + a new
+question); greedy, 160-token answers, time to first token:
+
+| | First time | Same request again | Next turn |
+|---|---:|---:|---:|
+| One B70, Swift INT4, 4 slots | 19.5 s | **0.22 s** | **0.17 s** |
+| Two B70s, Swift INT4, tensor parallel, 4 slots | 11.3 s | **0.23 s** | **0.16 s** |
+| Two B70s, Qwen3.8-27B-Uncensored (FP8 as `--proj int8`), 1 slot, 262,144 context | 10.2 s | **0.20 s** | **0.15 s** |
+
+The repeated request answers word for word as the first. A first answer to a long prompt can differ in late words from
+the same request with `GRIMOIRE_PREFIX_CACHE=0` (the server reads such a prompt in two pieces), as a different prompt
+chunk size can. llama-benchy 0.4.0 on the Uncensored INT8 two-card setup above: pp4096 3,445-3,449 (v1.10.6: 3,401),
+tg32 / tg256 after 4,096 tokens 80.0 / 78.1, coherence passed.
+
+**Also in v1.10.7:**
+
+- Copy drafting, the key-major K cache and prompt-attention teams ([below](#copy-drafting-in-v1107-on-main-since-2026-11-15)).
+- Long context: a team kernel for verify passes at 32K tokens and more, and copy verifies in 8-row pieces. One B70,
+  61K-token prompt: 1 user copy 403 -> 500 tok/s, 4 users copy 397 -> 724.
+- After a cache hit the MTP head keeps its context (without this, decode after a hit was up to 20% slower).
+- Fixed: `GRIMOIRE_MTP_EXACT_VERIFY=1` with the key-major K cache (failed on main since 2026-11-15).
+- Qwen3.8-Flash-Next: the prompt cache does not apply to it (its QSA and PLE state are not saved); it runs as before.
+
+Validation, the image's own binaries: the model suite (`tools/regress_all_g0.sh`, gpu0) for every Qwen3.8 and
+Flash-Next case gives identical text with the cache on and off (23 / 23); against the suite's 2026-11-06 run 18 are
+identical and 5 reworded (the plain 160-token decode gives the same text in the released v1.10.6 image). Served: the
+three tables above, copy drafting on one B70 (1 user 558-756 tok/s, 4 users 740-816), Qwen3.8-Flash-Next on two B70s.
+Results and scripts: [`tools/bench/prefix1116/`](tools/bench/prefix1116/).
+
+### Copy drafting (in v1.10.7, on main since 2026-11-15)
 
 **Copy drafting** (prompt lookup) next to MTP: when the reply repeats text already in the conversation (code being
 edited, a document being rewritten), GRIMOIRE proposes up to 63 tokens from the earlier copy and checks them in the
@@ -278,12 +336,13 @@ answers are not token-identical to the default, so treat it as a throughput opti
 ### 1. Get the image
 
 ```
-curl -LO https://github.com/doopeworld/GRIMOIRE/releases/download/v1.10.6/grimoire-b70-v1.10.6.tar.gz
-docker load < grimoire-b70-v1.10.6.tar.gz              # -> grimoire-b70:v1.10.6
-docker tag grimoire-b70:v1.10.6 grimoire-b70:latest    # the commands below use :latest
+curl -LO https://github.com/doopeworld/GRIMOIRE/releases/download/v1.10.7/grimoire-b70-v1.10.7.tar.gz
+docker load < grimoire-b70-v1.10.7.tar.gz              # -> grimoire-b70:v1.10.7
+docker tag grimoire-b70:v1.10.7 grimoire-b70:latest    # the commands below use :latest
 ```
 
-v1.10.6 ([above](#release-v1106-2026-11-13)) adds the multi-user speculative decoding work to everything v1.10.4
+v1.10.7 ([above](#release-v1107-2026-11-16)) turns the prompt cache on and adds copy drafting and the long-context
+work. v1.10.6 ([above](#release-v1106-2026-11-13)) adds the multi-user speculative decoding work to everything v1.10.4
 has and ships oneDNN 3.13.4 with oneAPI 2026.2 and GPU driver 26.35. v1.10.4 ([above](#served-image-validation-2026-11-05-v1104)) keeps v1.10.3's three opt-in speed modes
 ([v1.10.3 table](#served-image-validation-2026-11-02-v1103)); native GGUF expert grouping is now on by default. Like v1.10.2 it includes native GGUF decode
 and prompt speed-ups and MTP from the GGUF file's own head, runs on the Arc Pro B70 and the Arc Pro

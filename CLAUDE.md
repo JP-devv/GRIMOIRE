@@ -2,7 +2,12 @@
 
 ## >>> CURRENT PRIORITY (read this before anything else) <<<
 
-**2026-11-15: main = v1.10.6 source (i4a8-prompt-1112) + copy drafting (copy-draft-1114, 55a9eea), merged at Ian's
+**2026-11-16: v1.10.7 RELEASED (image = 6dcbacc, branch longctx-1115, merged to main): prompt cache ON by default
+(prompt-head snapshots in grimoire-server), long-context verify kernels, exact-verify fix.  Results and scripts:
+[tools/bench/prefix1116/RESULTS-2026-11-16.md](tools/bench/prefix1116/RESULTS-2026-11-16.md).  Ian 11-16: only Qwen3.8
+and Qwen3.8-Flash-Next matter (Ornith / Muse / Agnes / Qwen3.6 / Qwen3.5 / K2 folders are gone from the Tower).**
+
+**2026-11-15 (historical): main = v1.10.6 source (i4a8-prompt-1112) + copy drafting (copy-draft-1114, 55a9eea), merged at Ian's
 request. Results, open items and the run scripts: [tools/bench/copy1115/RESULTS-2026-11-14-15.md](tools/bench/copy1115/RESULTS-2026-11-14-15.md).
 Next: a release image (G31 + G21) with the full regression; INT8 prompt math; two-card 61K only when Ian names it.**
 
