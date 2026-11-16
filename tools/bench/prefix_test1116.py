@@ -11,6 +11,7 @@ import argparse, json, pathlib, time, urllib.request
 P = argparse.ArgumentParser()
 P.add_argument('ep'); P.add_argument('model'); P.add_argument('out')
 P.add_argument('--chars', type=int, default=120000)
+P.add_argument('--warm', action='store_true')
 O = P.parse_args()
 book = pathlib.Path('/mnt/storage/isos/grimoire-runs/bench-1003/book/1661-0.txt').read_text(errors='replace')
 j = max(0, book.find('I. A SCANDAL IN BOHEMIA'))
@@ -42,6 +43,12 @@ def chat(messages):
 q1 = [{'role': 'user', 'content': 'Here is a document.\n\n' + doc +
        '\n\nEnd of document.  In three sentences, who is Irene Adler and what does Holmes think of her?'}]
 res = {}
+# W: a different long document first, so A is not the first long request after the start (on 11-16 the same request
+# twice gave different late tokens even with the cache and drafting off: A is not repeatable as the first one).
+if O.warm:
+    other = book[j + O.chars:j + 2 * O.chars] or book[:O.chars]
+    res['W'] = chat([{'role': 'user', 'content': 'Here is a document.\n\n' + other +
+                      '\n\nEnd of document.  Summarise it in two sentences.'}])
 res['A'] = chat(q1)
 res['B'] = chat(q1)
 q2 = q1 + [{'role': 'assistant', 'content': res['A']['text']},

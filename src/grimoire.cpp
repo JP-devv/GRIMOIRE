@@ -10468,7 +10468,10 @@ int Grimoire::prefix_head_split(size_t prompt_len, int reused) const {
         return v && *v ? std::max(1, std::atoi(v)) : 64; }();
     static const int min_new = [] { const char* v = std::getenv("GRIMOIRE_PREFIX_HEAD_MIN");
         return v && *v ? std::max(0, std::atoi(v)) : 1024; }();
-    const long h = long(prompt_len) - back;
+    // On a 64-token boundary: the DeltaNet prompt pass works in 64-token chunks counted from the start of each call,
+    // so a split elsewhere would change how the rest of the prompt is chunked (and its rounding) against a request
+    // read without the cache.
+    const long h = (long(prompt_len) - back) / 64 * 64;
     return h - long(reused) >= long(std::max(1, min_new)) ? int(h) : 0;
 }
 
@@ -10507,8 +10510,12 @@ bool Grimoire::save_prefix_head(const std::vector<int32_t>& tokens) {
             ok = 1;
         }
     }
-    // Under TP the ranks must agree, or their next admissions would reuse different lengths.
-    if (tp_coordinated() && !tp_agree(ok)) throw std::runtime_error("TP prefix head agreement failed");
+    // Under TP the ranks must agree, or their next admissions would reuse different lengths.  NOT tp_coordinated():
+    // the server's start-up warm-up runs generate_tokens on rank 0 before its scheduler exists (serving_control
+    // false) while rank 1 already follows (following_control true), so one side agreed and the other did not --
+    // a two-card deadlock at start (2026-11-16, lc-1116d).  Every rank reaches this point after the same prefill
+    // (it has all-reduces), so agreeing whenever ranked is symmetric.
+    if (tp_ranked() && !tp_agree(ok)) throw std::runtime_error("TP prefix head agreement failed");
     if (ok == 1) {
         PrefixCache& c = prefix_slots[size_t(seq_slot)];
         c.head_tokens = tokens;
