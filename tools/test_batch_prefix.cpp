@@ -38,8 +38,7 @@ using Replies = std::vector<std::vector<std::vector<int32_t>>>;
 
 static Replies run(const std::string& dir, bool cache, bool concurrent) {
     ::setenv("GRIMOIRE_PREFIX_CACHE", cache ? "1" : "0", 1);
-    // prefix_cache_enabled tests presence, so off must really be absent.
-    if (!cache) ::unsetenv("GRIMOIRE_PREFIX_CACHE");
+    // "0" is off (the cache is on by default since 2026-11-16).
     std::string error;
     Grimoire* e=grimoire_new();
     if (!grimoire_load(*e,dir,Fmt::BF16,256,error))

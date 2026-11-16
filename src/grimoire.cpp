@@ -3327,9 +3327,12 @@ struct Grimoire {
     // the order matters.
     void clear_seq_slot(int j);
     void clear_drafter_cache();
+    // ON by default since 2026-11-16 (Ian): the prompt-head snapshots made a repeated long prompt and an agent's next
+    // turn resume instead of re-reading everything (two B70s, 105K-token prompt again: 54.4 s -> 0.39 s to the first
+    // token).  GRIMOIRE_PREFIX_CACHE=0 turns it off.
     static bool prefix_cache_enabled() {
         const char* e = std::getenv("GRIMOIRE_PREFIX_CACHE");
-        return e && *e && std::atoi(e) != 0;
+        return !(e && *e && std::atoi(e) == 0);
     }
     // Read EVERY time, not captured in a static.  The count is consumed
     // once per engine (prefix_slots is sized on first use and never
@@ -10276,7 +10279,7 @@ bool Grimoire::prefix_cache_usable() const {
 }
 
 std::string Grimoire::prefix_cache_unusable_reason() const {
-    if (!prefix_cache_enabled()) return "GRIMOIRE_PREFIX_CACHE is not set";
+    if (!prefix_cache_enabled()) return "GRIMOIRE_PREFIX_CACHE=0";
     if (cfg.is_muse) return "not usable with Muse";
     // Qwen4-Exp (external audit, 2026-09-21).  prefill_qwen4_exp()'s own
     // comment already explains why it never calls save_prefix()/
@@ -10463,6 +10466,10 @@ int Grimoire::prefix_reuse(const std::vector<int32_t>& tokens,
 }
 
 int Grimoire::prefix_head_split(size_t prompt_len, int reused) const {
+    // GRIMOIRE_PREFIX_HEAD: 1 = take prompt heads.  grimoire-server sets it (unless given); the CLI reads one prompt
+    // and exits, so a head could never be reused there and its split would only move late tokens.
+    const char* hv = std::getenv("GRIMOIRE_PREFIX_HEAD");
+    if (!(hv && *hv && std::atoi(hv) != 0)) return 0;
     if (!prefix_cache_usable()) return 0;
     static const int back = [] { const char* v = std::getenv("GRIMOIRE_PREFIX_HEAD_BACK");
         return v && *v ? std::max(1, std::atoi(v)) : 64; }();

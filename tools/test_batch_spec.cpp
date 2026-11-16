@@ -83,7 +83,7 @@ int main() {
     ::setenv("GRIMOIRE_SEQ_SLOTS","4",1);
     ::setenv("GRIMOIRE_BATCHED_PREFILL_NOXMX","1",1);
     ::setenv("GRIMOIRE_DFLASH_M","4",1);
-    ::unsetenv("GRIMOIRE_PREFIX_CACHE");
+    ::setenv("GRIMOIRE_PREFIX_CACHE", "0", 1);   // on by default since 2026-11-16
     char tmp[]="/tmp/grimoire-batch-spec-XXXXXX";
     if(!::mkdtemp(tmp)) return 2;
     Replies prompts(3);

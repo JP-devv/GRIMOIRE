@@ -84,7 +84,7 @@ int main() {
     // would resume too and there would be nothing to compare against.
     auto engine = [&](bool warm) -> Grimoire* {
         if (warm) ::setenv("GRIMOIRE_PREFIX_CACHE", "1", 1);
-        else      ::unsetenv("GRIMOIRE_PREFIX_CACHE");
+        else      ::setenv("GRIMOIRE_PREFIX_CACHE", "0", 1);
         Grimoire* e = grimoire_new();
         std::string err;
         if (!e || !grimoire_load(*e, dir.string(), Fmt::BF16, 256, err)) {
@@ -216,7 +216,7 @@ int main() {
 
             // And the answers must match the same conversations run
             // WITHOUT any cache at all.
-            ::unsetenv("GRIMOIRE_PREFIX_CACHE");
+            ::setenv("GRIMOIRE_PREFIX_CACHE", "0", 1);
             ::unsetenv("GRIMOIRE_PREFIX_SLOTS");
             Grimoire* c = grimoire_new();
             if (!c || !grimoire_load(*c, dir.string(), Fmt::BF16, 256, err)) {
@@ -324,7 +324,7 @@ int main() {
         long resumes = 0;
         for (int arm = 0; arm < 2; ++arm) {
             if (arm) ::setenv("GRIMOIRE_PREFIX_CACHE", "1", 1);
-            else     ::unsetenv("GRIMOIRE_PREFIX_CACHE");
+            else     ::setenv("GRIMOIRE_PREFIX_CACHE", "0", 1);
             Grimoire* e = grimoire_new();
             std::string err;
             if (!e || !grimoire_load(*e, mdir.string(), Fmt::BF16, 256, err)) {

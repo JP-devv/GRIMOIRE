@@ -221,6 +221,10 @@ int main(int argc, char** argv) {
     }
     const bool harmony_model = tk.special_id("<|begin_of_text|>") >= 0;
 
+    // The prompt-head snapshots (Grimoire::save_prefix_head) are for a SERVER: a repeated prompt or an agent's next turn
+    // resumes from them.  They split the prompt read in two, which can move late tokens of a first answer like any
+    // chunk-size change, so the one-shot CLI keeps them off and its answers stay as they were.  An explicit value wins.
+    setenv("GRIMOIRE_PREFIX_HEAD", "1", 0);
     std::fprintf(stderr, "loading %s ...\n", model_dir.c_str());
     b70::Grimoire* e = b70::grimoire_new();
     if (!b70::grimoire_load(*e, model_dir, proj_fmt, max_seq, err)) {
