@@ -387,11 +387,15 @@ sycl::event verify_attn_dpas_impl(sycl::queue& q, const AttnParams& p, const Ver
 constexpr int kTeamThreads = 8;
 constexpr int kTeamMaxRB = 6;                 // 48 rows: 8 tokens x 6 query heads per KV head
 
+// NRBM (2026-11-16): the launch's largest row-block count (host-known), so the softmax / mask loops run over the rows
+// that exist (they ran over all 48 rows for a 24-row launch).
+template <int NRBM>
 sycl::event verify_attn_team_impl(sycl::queue& q, const AttnParams& p, const VerifyGroups& g,
                                   int64_t kv_stride, const int32_t* d_lens, int splits_max,
                                   const std::vector<sycl::event>& deps) {
     constexpr int HD = 256, RB = 8, NK = 16, DT = HD / 16, TN = kTeamThreads, BK = NK * TN;
-    constexpr int DP = HD / TN, DPT = DP / 16, NRBM = kTeamMaxRB, RMAX = NRBM * RB;
+    constexpr int DP = HD / TN, DPT = DP / 16, RMAX = NRBM * RB;
+    static_assert(NRBM >= 1 && NRBM <= kTeamMaxRB, "team rows");
     constexpr uint32_t Q_OFF = 0, Q_BYTES = NRBM * DT * RB * 16 * 2;          // [rb][dt][8][16] fp16
     constexpr int RMXP = 64;                                                 // SLM row vectors padded to 64
     constexpr uint32_t MX_OFF = Q_BYTES, MX_BYTES = TN * RMXP * 4;           // [t][row] fp32
@@ -641,8 +645,16 @@ sycl::event launch_verify_attn_dpas(sycl::queue& q, const AttnParams& p, const V
         const int G = p.num_heads / p.num_kv_heads;
         int lo = 1 << 30, hi = 0;
         for (int i = 0; i < g.n; ++i) { lo = g.nrows[i] < lo ? g.nrows[i] : lo; hi = g.nrows[i] > hi ? g.nrows[i] : hi; }
-        if (g.n > 0 && lo >= (g_verify_team == 1 ? 2 : 4) && hi * G <= kTeamMaxRB * 8)
-            return verify_attn_team_impl(q, p, g, kv_stride, d_lens, splits_max, deps);
+        if (g.n > 0 && lo >= (g_verify_team == 1 ? 2 : 4) && hi * G <= kTeamMaxRB * 8) {
+            switch ((hi * G + 7) / 8) {
+                case 1: return verify_attn_team_impl<1>(q, p, g, kv_stride, d_lens, splits_max, deps);
+                case 2: return verify_attn_team_impl<2>(q, p, g, kv_stride, d_lens, splits_max, deps);
+                case 3: return verify_attn_team_impl<3>(q, p, g, kv_stride, d_lens, splits_max, deps);
+                case 4: return verify_attn_team_impl<4>(q, p, g, kv_stride, d_lens, splits_max, deps);
+                case 5: return verify_attn_team_impl<5>(q, p, g, kv_stride, d_lens, splits_max, deps);
+                default: return verify_attn_team_impl<6>(q, p, g, kv_stride, d_lens, splits_max, deps);
+            }
+        }
     }
     return g_verify_kmajor ? verify_attn_dpas_impl<true>(q, p, g, kv_stride, d_lens, splits_max, deps)
                            : verify_attn_dpas_impl<false>(q, p, g, kv_stride, d_lens, splits_max, deps);
