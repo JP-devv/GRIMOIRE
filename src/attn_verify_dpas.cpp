@@ -419,9 +419,11 @@ sycl::event verify_attn_team_impl(sycl::queue& q, const AttnParams& p, const Ver
             constexpr float NINF = -std::numeric_limits<float>::infinity();
             int id = int(it.get_group(0));
             const int t = int(it.get_local_id(0));
-            const int part = id % smax; id /= smax;
-            const int kvh = id % KVH;
-            const int grp = id / KVH;
+            // group fastest (2026-11-16): the <= 8-row pieces of one long verify (adjacent groups, same slot) then
+            // run side by side over the same keys, so their K / V comes from L2 once for all of them
+            const int grp = id % vg.n; id /= vg.n;
+            const int part = id % smax;
+            const int kvh = id / smax;
             const int row0 = vg.row0[grp], nrows = vg.nrows[grp];
             const int nr = nrows * G;
             const int nrb = (nr + RB - 1) / RB;
@@ -645,15 +647,40 @@ sycl::event launch_verify_attn_dpas(sycl::queue& q, const AttnParams& p, const V
         const int G = p.num_heads / p.num_kv_heads;
         int lo = 1 << 30, hi = 0;
         for (int i = 0; i < g.n; ++i) { lo = g.nrows[i] < lo ? g.nrows[i] : lo; hi = g.nrows[i] > hi ? g.nrows[i] : hi; }
-        if (g.n > 0 && lo >= (g_verify_team == 1 ? 2 : 4) && hi * G <= kTeamMaxRB * 8) {
-            switch ((hi * G + 7) / 8) {
-                case 1: return verify_attn_team_impl<1>(q, p, g, kv_stride, d_lens, splits_max, deps);
-                case 2: return verify_attn_team_impl<2>(q, p, g, kv_stride, d_lens, splits_max, deps);
-                case 3: return verify_attn_team_impl<3>(q, p, g, kv_stride, d_lens, splits_max, deps);
-                case 4: return verify_attn_team_impl<4>(q, p, g, kv_stride, d_lens, splits_max, deps);
-                case 5: return verify_attn_team_impl<5>(q, p, g, kv_stride, d_lens, splits_max, deps);
-                default: return verify_attn_team_impl<6>(q, p, g, kv_stride, d_lens, splits_max, deps);
+        auto run = [&](const VerifyGroups& vg, int rows_max, const std::vector<sycl::event>& dd) {
+            switch ((rows_max * G + 7) / 8) {
+                case 1: return verify_attn_team_impl<1>(q, p, vg, kv_stride, d_lens, splits_max, dd);
+                case 2: return verify_attn_team_impl<2>(q, p, vg, kv_stride, d_lens, splits_max, dd);
+                case 3: return verify_attn_team_impl<3>(q, p, vg, kv_stride, d_lens, splits_max, dd);
+                case 4: return verify_attn_team_impl<4>(q, p, vg, kv_stride, d_lens, splits_max, dd);
+                case 5: return verify_attn_team_impl<5>(q, p, vg, kv_stride, d_lens, splits_max, dd);
+                default: return verify_attn_team_impl<6>(q, p, vg, kv_stride, d_lens, splits_max, dd);
             }
+        };
+        const int piece = kTeamMaxRB * 8 / G;           // rows per team work-group (8 at G = 6)
+        if (g.n > 0 && lo >= (g_verify_team == 1 ? 2 : 4) && hi <= piece) return run(g, hi, deps);
+        // COPY VERIFIES (2026-11-16): a conversation with more rows (copy drafts: up to 64) is cut into pieces of
+        // `piece` consecutive rows -- each its own team group over the same slot; adjacent, so they share K / V
+        // in L2.  The per-tile kernel streamed the cache once per 8-row tile: 48x for 64 rows, ungrouped.
+        static const int copy_team = env_int("GRIMOIRE_VERIFY_TEAM_COPY", 1);
+        if (g.n > 0 && hi > piece && copy_team && (g_verify_team == 1 || len_hint >= team_min)) {
+            VerifyGroups vb{};
+            int rmax = 1;
+            sycl::event ev;
+            std::vector<sycl::event> dd = deps;
+            bool any = false;
+            for (int i = 0; i < g.n; ++i)
+                for (int r = 0; r < g.nrows[i]; r += piece) {
+                    if (vb.n == kMaxVerifyGroups) {
+                        ev = run(vb, rmax, dd); dd = {ev}; any = true; vb = VerifyGroups{}; rmax = 1;
+                    }
+                    const int nr = g.nrows[i] - r < piece ? g.nrows[i] - r : piece;
+                    vb.row0[vb.n] = g.row0[i] + r; vb.nrows[vb.n] = nr; vb.slot[vb.n] = g.slot[i];
+                    rmax = nr > rmax ? nr : rmax;
+                    ++vb.n;
+                }
+            if (vb.n > 0) { ev = run(vb, rmax, dd); any = true; }
+            if (any) return ev;
         }
     }
     return g_verify_kmajor ? verify_attn_dpas_impl<true>(q, p, g, kv_stride, d_lens, splits_max, deps)

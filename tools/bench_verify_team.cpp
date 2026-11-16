@@ -28,7 +28,7 @@ int main(int argc, char** argv) {
     if (Ls.empty()) Ls = {4096, 8192, 32768, 61440};
     int CAP = 16;
     for (int L : Ls) CAP = std::max(CAP, (L + 127) / 128 * 128);
-    const int SLOTS = 8, RMAX = 32;
+    const int SLOTS = 8, RMAX = 256;
     sycl::queue q{sycl::gpu_selector_v, {sycl::property::queue::in_order{}}};
     std::printf("device: %s\n", q.get_device().get_info<sycl::info::device::name>().c_str());
     const int64_t slot_bytes = int64_t(KVH) * HD * CAP;
@@ -50,7 +50,7 @@ int main(int argc, char** argv) {
     { std::mt19937 rng(3); std::normal_distribution<float> nd; for (auto& x : hq) x = nd(rng); }
     float* dq = sycl::malloc_device<float>(hq.size(), q);
     float* dout = sycl::malloc_device<float>(hq.size(), q);
-    const size_t pcount = size_t(RMAX) * H * MAX_SPLITS;
+    const size_t pcount = size_t(kVerifyPartRows) * MAX_SPLITS * H;   // rows x splits <= 32 x MAX_SPLITS
     float* dpart = sycl::malloc_device<float>(pcount * HD, q);
     float* dpm = sycl::malloc_device<float>(pcount, q);
     float* dpl = sycl::malloc_device<float>(pcount, q);
@@ -61,7 +61,8 @@ int main(int argc, char** argv) {
     base.seq_len = 1; base.seq_cap = CAP; base.head_dim = HD; base.num_heads = H; base.num_kv_heads = KVH;
     base.softmax_scale = 1.0f / 16.0f; base.partials = dpart; base.part_m = dpm; base.part_l = dpl; base.splits = 8;
     struct Case { int groups, rows; };
-    const Case cases[] = {{1, 7}, {1, 2}, {1, 8}, {2, 7}, {4, 4}, {4, 7}, {8, 2}, {8, 4}};
+    const Case cases[] = {{1, 7}, {1, 2}, {1, 8}, {2, 7}, {4, 4}, {4, 7}, {8, 2}, {8, 4},
+                          {1, 16}, {1, 32}, {1, 64}, {2, 64}, {4, 16}, {4, 64}};   // copy verifies: 8-row pieces
     std::printf("%7s %5s | %9s %9s %7s | %10s | %6s | GB/s tile / team\n", "keys", "case", "tile us", "team us",
                 "speedup", "max rel d", "splits");
     for (int L : Ls)
