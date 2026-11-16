@@ -11262,6 +11262,16 @@ bool Grimoire::decode_spec_batch(const std::vector<int32_t>& tokens,
 }
 
 void Grimoire::clear_drafter_cache() {
+    // A RESTORE keeps the drafter's history (2026-11-16).  prefill() now writes the MTP head's K/V for every prompt row
+    // (the batched warm at its end), and with per-slot drafter caches (draft_slots) the bound slot's rows below the
+    // restored length are this conversation's own -- a restore binds the same slot.  Zeroing them made every cache hit
+    // draft from no context: two B70s, cookbook warmed decode 132 -> 114 tok/s at 2K, 137 -> 110 at 32K, while the
+    // first request (full prefill, warm cache) kept its speed.  Rows at and past the cursor are overwritten before
+    // they are read.  A shared drafter cache (no draft_slots) may hold another conversation, so that case still clears.
+    // Output is unaffected either way (every draft is verified); GRIMOIRE_PREFIX_CLEAR_DRAFTER=1 = the old zeroing.
+    static const bool force = [] { const char* e = std::getenv("GRIMOIRE_PREFIX_CLEAR_DRAFTER");
+        return e && *e == '1'; }();
+    if (!force && !draft_slots.empty()) return;
     if (!mtp.ok || !mtp.L.k_cache || !mtp.L.v_cache) return;
     const size_t kv_bytes = size_t(mtp.L.kv_heads) * mtp.L.head_dim * max_seq;
     q.memset(mtp.L.k_cache, 0, kv_bytes);
