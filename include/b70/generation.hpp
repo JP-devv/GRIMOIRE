@@ -188,7 +188,7 @@ int generate_tokens(Engine& e, const std::vector<int32_t>& prompt,
     // 0.630 s (9,503 tok/s; one B70: 0.703 s, 8,516), 1536 0.648, 1200
     // 0.706, 3000 0.749; a short first chunk (GRIMOIRE_PP_CHUNK_FIRST)
     // is slower.  Default split 24,16: chunk 2048 0.678 s, no chunks 0.737.
-    auto prefill_tail = [&]() -> bool {
+    auto prefill_part = [&](const std::vector<int32_t>& tail) -> bool {
         static const int pp_chunk = [] {
             const char* v = std::getenv("GRIMOIRE_PP_CHUNK");
             return v && *v ? std::max(0, std::atoi(v)) : 2048; }();
@@ -252,6 +252,18 @@ int generate_tokens(Engine& e, const std::vector<int32_t>& prompt,
             off += len;
         }
         return true;
+    };
+    // PROMPT HEAD (2026-11-16): stop a few tokens before the end of a long prompt and snapshot the recurrent state
+    // there (Grimoire::save_prefix_head), so the same prompt again -- or an agent's next turn, whose history starts
+    // with this prompt -- resumes from it instead of re-reading everything.  GRIMOIRE_PREFIX_CACHE=1 only.
+    auto prefill_tail = [&]() -> bool {
+        const int base = resumed ? reuse : 0;
+        const int h = e.prefix_head_split(prompt.size(), base);
+        if(h <= base) return prefill_part(tail);
+        if(!prefill_part(std::vector<int32_t>(prompt.begin() + base, prompt.begin() + h))) return false;
+        e.sync();
+        e.save_prefix_head(std::vector<int32_t>(prompt.begin(), prompt.begin() + h));
+        return prefill_part(std::vector<int32_t>(prompt.begin() + h, prompt.end()));
     };
     if(!prefill_tail()) {
         // A rejected batch may already have submitted work. Drain before a

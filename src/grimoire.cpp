@@ -3291,6 +3291,14 @@ struct Grimoire {
         std::vector<PrefixLayerCache> layers;
         float *hidden = nullptr, *logits = nullptr;
         uint64_t used = 0;                 // LRU stamp
+        // PROMPT HEAD (2026-11-16): the recurrent state at a point just before the END OF THE PROMPT, saved while the
+        // prompt is read.  The snapshot above is taken after the reply, so a repeated prompt (shorter than prompt +
+        // reply) never matched it, and an agent's next turn rarely did either (the chat template drops the previous
+        // turn's thinking, so the history is not the reply as generated).  Both start with the prompt's head.
+        // The KV rows below head_tokens.size() stay in this slot until a different conversation takes it.
+        bool head_valid = false;
+        std::vector<int32_t> head_tokens;
+        std::vector<PrefixLayerCache> head_layers;
     };
     // N conversations, not one.
     //
@@ -3307,6 +3315,7 @@ struct Grimoire {
     std::vector<PrefixCache> prefix_slots;
     uint64_t prefix_clock = 0;
     mutable int prefix_hit = -1;          // slot prefix_reuse() matched
+    mutable bool prefix_hit_head = false; // ... and through its prompt-head snapshot
     // How many conversations the KV cache has room for, and which one is
     // live.  Fixed at build() because the cache is allocated that deep:
     // reading the environment later would describe a cache that does not
@@ -3380,6 +3389,12 @@ struct Grimoire {
     void save_prefix_now(const std::vector<int32_t>& tokens) {
         (void)save_prefix(tokens);
     }
+    // The prompt head (see PrefixCache): recurrent state after `tokens` (the prompt's first tokens.size() tokens) in
+    // the current slot.  Under TP every rank must end up with the same answer, so the outcome is agreed.
+    bool save_prefix_head(const std::vector<int32_t>& tokens);
+    // Where a prompt's head snapshot goes (0 = none): GRIMOIRE_PREFIX_HEAD_BACK (64) tokens before its end, when at
+    // least GRIMOIRE_PREFIX_HEAD_MIN (1024) new tokens are read before it.
+    int prefix_head_split(size_t prompt_len, int reused) const;
 
     bf16_t*  embed = nullptr;
     int8_t*  embed_i8 = nullptr;
@@ -10190,8 +10205,10 @@ void Grimoire::clear_seq_slot(int j) {
     // still holds the previous request's states, and they describe a
     // different sequence.
     spec_hidden_valid = false;
-    if (!prefix_slots.empty() && seq_slot < int(prefix_slots.size()))
+    if (!prefix_slots.empty() && seq_slot < int(prefix_slots.size())) {
         prefix_slots[size_t(seq_slot)].valid = false;
+        prefix_slots[size_t(seq_slot)].head_valid = false;   // a new conversation overwrites its KV rows
+    }
     const int Hv = cfg.lin_v_heads, Dv = cfg.lin_v_dim, Dk = cfg.lin_k_dim;
     const int qkv_ch = 2 * cfg.lin_k_heads * cfg.lin_k_dim + Hv * Dv;
     for (auto& d : L) {
@@ -10431,9 +10448,74 @@ int Grimoire::prefix_reuse(const std::vector<int32_t>& tokens,
         // Longest wins.  Two conversations can share an opening -- the
         // same system prompt and tool list is the NORMAL case for agents
         // -- so the first match is not the best one.
-        if (int(n) > best) { best = int(n); prefix_hit = int(sl); }
+        if (int(n) > best) { best = int(n); prefix_hit = int(sl); prefix_hit_head = false; }
+    }
+    // Prompt heads (2026-11-16): a repeated prompt or an agent's next turn
+    for (size_t sl = 0; sl < prefix_slots.size(); ++sl) {
+        const PrefixCache& c = prefix_slots[sl];
+        if (!c.head_valid || (busy && (*busy)[sl])) continue;
+        const size_t n = c.head_tokens.size();
+        if (n == 0 || n >= tokens.size() || int(n) <= best) continue;
+        if (!std::equal(c.head_tokens.begin(), c.head_tokens.end(), tokens.begin())) continue;
+        best = int(n); prefix_hit = int(sl); prefix_hit_head = true;
     }
     return best;
+}
+
+int Grimoire::prefix_head_split(size_t prompt_len, int reused) const {
+    if (!prefix_cache_usable()) return 0;
+    static const int back = [] { const char* v = std::getenv("GRIMOIRE_PREFIX_HEAD_BACK");
+        return v && *v ? std::max(1, std::atoi(v)) : 64; }();
+    static const int min_new = [] { const char* v = std::getenv("GRIMOIRE_PREFIX_HEAD_MIN");
+        return v && *v ? std::max(0, std::atoi(v)) : 1024; }();
+    const long h = long(prompt_len) - back;
+    return h - long(reused) >= long(std::max(1, min_new)) ? int(h) : 0;
+}
+
+bool Grimoire::save_prefix_head(const std::vector<int32_t>& tokens) {
+    if (!prefix_cache_usable() || tokens.empty()) return false;
+    const int Hv = cfg.lin_v_heads, Dv = cfg.lin_v_dim, Dk = cfg.lin_k_dim;
+    const size_t dn_bytes = size_t(Hv) * Dv * Dk * sizeof(float);
+    const size_t conv_bytes = size_t(2 * cfg.lin_k_heads * cfg.lin_k_dim +
+        Hv * Dv) * (cfg.conv_kernel - 1) * sizeof(float);
+    if (prefix_slots.empty()) prefix_slots.resize(size_t(n_seq_slots));
+    int ok = 0;
+    if (seq_slot >= 0 && size_t(seq_slot) < prefix_slots.size()) {
+        PrefixCache& c = prefix_slots[size_t(seq_slot)];
+        c.head_valid = false;
+        bool alloc = true;
+        if (c.head_layers.empty()) {
+            c.head_layers.resize(L.size());
+            for (size_t i = 0; i < L.size() && alloc; ++i) {
+                auto& h = c.head_layers[i];
+                if (L[i].dn_state && !(h.dn = sycl::malloc_device<float>(dn_bytes / sizeof(float), q))) alloc = false;
+                if (alloc && L[i].conv_ring && !(h.conv = sycl::malloc_device<float>(conv_bytes / sizeof(float), q))) alloc = false;
+            }
+            if (!alloc) {
+                for (auto& h : c.head_layers) for (float* p : {h.dn, h.conv}) if (p) sycl::free(p, q);
+                c.head_layers.clear();
+                std::fprintf(stderr, "  prefix head allocation failed\n");
+            }
+        }
+        if (alloc) {
+            for (size_t i = 0; i < L.size(); ++i) {
+                const auto& d = L[i]; auto& h = c.head_layers[i];
+                if (d.dn_state) { q.memcpy(h.dn, d.dn_state, dn_bytes); g_prefix_bytes_copied += long(dn_bytes); }
+                if (d.conv_ring) { q.memcpy(h.conv, d.conv_ring, conv_bytes); g_prefix_bytes_copied += long(conv_bytes); }
+            }
+            q.wait_and_throw();
+            ok = 1;
+        }
+    }
+    // Under TP the ranks must agree, or their next admissions would reuse different lengths.
+    if (tp_coordinated() && !tp_agree(ok)) throw std::runtime_error("TP prefix head agreement failed");
+    if (ok == 1) {
+        PrefixCache& c = prefix_slots[size_t(seq_slot)];
+        c.head_tokens = tokens;
+        c.head_valid = true;
+        c.used = ++prefix_clock;
+    }
+    return ok == 1;
 }
 
 // Move the live KV view onto slot j.  This is the whole of "switch
@@ -11300,7 +11382,7 @@ int Grimoire::prefix_slot_for_write() {
     if (prefix_hit >= 0 && size_t(prefix_hit) < prefix_slots.size())
         return prefix_hit;
     for (size_t i = 0; i < prefix_slots.size(); ++i)
-        if (!prefix_slots[i].valid) return int(i);
+        if (!prefix_slots[i].valid && !prefix_slots[i].head_valid) return int(i);   // holds nothing reusable
     size_t lru = 0;
     for (size_t i = 1; i < prefix_slots.size(); ++i)
         if (prefix_slots[i].used < prefix_slots[lru].used) lru = i;
@@ -11351,6 +11433,32 @@ bool Grimoire::restore_prefix(const std::vector<int32_t>& tokens) {
 bool Grimoire::restore_prefix_upto(int n) {
     if (n <= 0 || !prefix_cache_usable()) return false;
     if (prefix_hit < 0 || size_t(prefix_hit) >= prefix_slots.size()) return false;
+    if (prefix_hit_head) {
+        // The prompt head: rows below n are this slot's own; what follows them (the previous reply) is overwritten
+        // from here on, so the slot's prompt+reply snapshot no longer describes it.
+        PrefixCache& c = prefix_slots[size_t(prefix_hit)];
+        if (!c.head_valid || size_t(n) != c.head_tokens.size() || c.head_layers.size() != L.size()) return false;
+        c.used = ++prefix_clock;
+        const int Hv = cfg.lin_v_heads, Dv = cfg.lin_v_dim, Dk = cfg.lin_k_dim;
+        const size_t dn_bytes = size_t(Hv) * Dv * Dk * sizeof(float);
+        const size_t conv_bytes = size_t(2 * cfg.lin_k_heads * cfg.lin_k_dim +
+            Hv * Dv) * (cfg.conv_kernel - 1) * sizeof(float);
+        bind_seq_slot(prefix_hit);
+        clear_drafter_cache();
+        for (size_t i = 0; i < L.size(); ++i) {
+            auto& d = L[i]; const auto& h = c.head_layers[i];
+            if (d.dn_state) { q.memcpy(d.dn_state, h.dn, dn_bytes); g_prefix_bytes_copied += long(dn_bytes); }
+            if (d.conv_ring) { q.memcpy(d.conv_ring, h.conv, conv_bytes); g_prefix_bytes_copied += long(conv_bytes); }
+        }
+        c.valid = false;
+        pos = n;
+        set_cursor(pos);
+        q.wait_and_throw();
+        ++g_prefix_tokens_reused_calls;
+        g_prefix_tokens_reused += n;
+        std::printf("  prefix cache HIT (prompt head): %d tokens\n", n);
+        return true;
+    }
     PrefixCache& prefix_cache = prefix_slots[size_t(prefix_hit)];
     if (!prefix_cache.valid || size_t(n) != prefix_cache.tokens.size()) return false;
     prefix_cache.used = ++prefix_clock;
@@ -11451,7 +11559,8 @@ int Grimoire::admit_pick_slot(const std::vector<int32_t>& prompt,
         for (int i=0; i<n_seq_slots; ++i) {
             if (busy[size_t(i)]) continue;
             if (slot < 0) slot = i;
-            if (size_t(i) >= prefix_slots.size() || !prefix_slots[size_t(i)].valid) {
+            if (size_t(i) >= prefix_slots.size() ||
+                (!prefix_slots[size_t(i)].valid && !prefix_slots[size_t(i)].head_valid)) {
                 slot = i; break;
             }
             if (prefix_slots[size_t(i)].used < prefix_slots[size_t(slot)].used)
@@ -11558,7 +11667,7 @@ int Grimoire::admit_sequence(const std::vector<int32_t>& prompt,
         static const int pp_chunk = [] {
             const char* v = std::getenv("GRIMOIRE_PP_CHUNK");
             return v && *v ? std::max(0, std::atoi(v)) : 2048; }();
-        auto prefill_tail = [&]() -> bool {
+        auto prefill_part = [&](const std::vector<int32_t>& tail) -> bool {
             // one card: whole prompts unless the scratch would not fit
             if (!pp_enabled()) {
                 const int budget = prefill_token_budget();
@@ -11587,6 +11696,15 @@ int Grimoire::admit_sequence(const std::vector<int32_t>& prompt,
                 if (!prefill(chunk, nullptr, nullptr, false)) return false;
             }
             return true;
+        };
+        // the prompt head (Grimoire::save_prefix_head), as generate_tokens() does for a lone request
+        auto prefill_tail = [&]() -> bool {
+            const int h = prefix_head_split(prompt.size(), reused);
+            if (h <= reused) return prefill_part(tail);
+            if (!prefill_part(std::vector<int32_t>(prompt.begin() + reused, prompt.begin() + h))) return false;
+            sync();
+            save_prefix_head(std::vector<int32_t>(prompt.begin(), prompt.begin() + h));
+            return prefill_part(std::vector<int32_t>(prompt.begin() + h, prompt.end()));
         };
         if (!prefill_tail()) {
             // A failed prefill may already have advanced recurrent state.
