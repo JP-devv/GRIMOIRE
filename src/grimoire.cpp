@@ -14681,7 +14681,7 @@ const float* Grimoire::forward(int token) {
             // the cache streams once. Opt-in until measured.
             static const bool batched_decode_attn =
                 std::getenv("GRIMOIRE_DECODE_BATCHED_ATTN") != nullptr;
-            if (batched_decode_attn) {
+            if (batched_decode_attn && !kv_kmajor_flag()) {   // dim-major only (kv_kmajor_refuse)
                 static const int bdelta = [] {
                     const char* e = std::getenv("GRIMOIRE_DECODE_BATCHED_DELTA");
                     return e ? std::atoi(e) : 0;
@@ -21665,8 +21665,11 @@ bool Grimoire::prefill(const std::vector<int32_t>& tokens,
                     const int splits=verify_dpas_splits(solo_ap,vg,pos+M);
                     launch_verify_attn_dpas(q,solo_ap,vg,int64_t(d.kv_slot),dtok,splits,{},pos+M);
                     launch_verify_merge(q,solo_ap,M,splits);
-                }else if(next_tokens && M<=kSpecBatch &&
+                }else if(next_tokens && M<=kSpecBatch && !kv_kmajor_flag() &&
                    !std::getenv("GRIMOIRE_LEGACY_VERIFY_ATTN")){
+                    // (not with the key-major K cache: launch_flash_decode_batched reads dim-major only; such a
+                    // verify takes the row-by-row decode below, which reads both.  2026-11-16: with
+                    // GRIMOIRE_MTP_EXACT_VERIFY=1 every Qwen3.8 MTP verify landed here and threw.)
                     // Split-K must track context depth here for the same
                     // reason it does in single-token decode: at 4778 tokens
                     // GRAPH_SPLITS(8) left verify at 60 ms/round -- 82% of
@@ -21690,7 +21693,7 @@ bool Grimoire::prefill(const std::vector<int32_t>& tokens,
                         M,pos+1,cfg.n_heads,d.kv_heads,d.head_dim,max_seq,
                         cfg.attn_softmax_scale(d.head_dim),s.part,s.pm,s.pl,
                         vsplits,{});
-                }else if(exact_verify){
+                }else if(exact_verify || (next_tokens && M<=kSpecBatch && kv_kmajor_flag())){
                         const int start=pos;
                         q.submit([&](sycl::handler& h){
                             h.parallel_for(sycl::range<1>(size_t(M)),[=](sycl::id<1> id){
