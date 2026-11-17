@@ -3769,7 +3769,8 @@ struct Grimoire {
     bool  tl_done = false;
     int   tl_tok = 0;          // dump a STEADY token, not the warm-up one
     std::vector<std::pair<sycl::event, std::string>> tl;
-    static constexpr int kTlToken = 3;
+    // the token whose timeline is dumped: GRIMOIRE_TIMELINE_TOKEN (default 3; e.g. 600 = a token after a long prompt)
+    const int kTlToken = [] { const char* e = std::getenv("GRIMOIRE_TIMELINE_TOKEN"); return e && *e ? std::atoi(e) : 3; }();
     void mark(const char* tag) {
         if (!timeline || tl_done || tl_tok != kTlToken) return;
         tl.emplace_back(q.submit([&](sycl::handler& h) {
@@ -14194,11 +14195,14 @@ const float* Grimoire::forward_qwen4_exp(int token) {
                         v[0] = vv2; sq[0] = sv; qp[0] = pv;
                     });
                 }
+                tld(i, ".ix-prep");
                 launch_qsa_index_logits(q, iq, d.ix_kcmp, q4_lg, 1, IH, IHD,
                                         visible > 0 ? visible : 1, q4_vis, none);
+                tld(i, ".ix-logits");
                 launch_qsa_topk_blocks(q, q4_lg, q4_blk, 1,
                                        visible > 0 ? visible : 1, BTK,
                                        q4_vis, none);
+                tld(i, ".ix-topk");
                 static const bool qsa_gather = std::getenv("GRIMOIRE_QSA_GATHER") != nullptr;
                 const int qwords = (q4_blocks_cap + 31) / 32;
                 if (!qsa_gather && !q4_qbits)
@@ -14208,6 +14212,7 @@ const float* Grimoire::forward_qwen4_exp(int token) {
                     // decode masked to it (the gather kernel launched one
                     // sub-group per head: 145 ms/token at 6K context)
                     launch_qsa_block_bits(q, q4_blk, 1, BTK, q4_qbits, qwords, none);
+                    tld(i, ".ix-bits");
                     AttnParams ap{};
                     ap.q = qvec; ap.k_cache = d.k_cache; ap.v_cache = d.v_cache;
                     ap.out = s.attn_out;
@@ -14220,6 +14225,7 @@ const float* Grimoire::forward_qwen4_exp(int token) {
                     ap.d_seq_len = s.d_seq_len;
                     ap.qbits = q4_qbits; ap.qwords = qwords; ap.qrat = RAT;
                     launch_flash_decode(q, ap, none);
+                    tld(i, ".flash");
                     launch_flash_merge(q, ap, none);
                 } else {
                 launch_qsa_expand_blocks(q, q4_blk, q4_idx, 1, BTK, RAT,
