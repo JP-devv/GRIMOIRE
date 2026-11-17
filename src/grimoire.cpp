@@ -17657,12 +17657,15 @@ bool Grimoire::ple_fetch_rows(const LayerDev& d, int p0, int M) {
 
 static size_t mem_available_bytes();
 
-// GRIMOIRE_PLE_RAM: copy the flat PLE file into memory in the background
+// GRIMOIRE_PLE_RAM=1: copy the flat PLE file into memory in the background
 // when it fits with 8 GB to spare (see PleRam).  Until it is complete the
-// rows keep coming from the file.
+// rows keep coming from the file.  OFF by default since 2026-11-17: the page cache serves the rows as fast, and the
+// 51 GB copy slowed everything it ran beside -- MEASURED two B70s, Ian's Flash-Next profile (int8, TP, 170 experts a
+// layer in VRAM), v1.10.8, llama-benchy pp / tg256: with the copy 1K 430 / 28.5, 4K 629 / 23.7 tok/s (PLE 10 ms a
+// token); without it 813 / 51.8, 1,315 / 44.0 (PLE 1.7 ms).
 void Grimoire::ple_ram_start(size_t bytes) {
     const char* e = std::getenv("GRIMOIRE_PLE_RAM");
-    if (e && *e == '0') return;
+    if (!(e && *e == '1')) return;
     const size_t avail = mem_available_bytes();
     if (avail < bytes + (size_t(8) << 30)) {   // the tiered experts' headroom
         std::fprintf(stderr, "  PLE table stays on disk: %.1f GB would leave less than 8 GB of the %.1f GB "
