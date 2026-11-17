@@ -6999,6 +6999,18 @@ bool Grimoire::build(const std::string& dir, const UploadOptions& requested_opt,
             tps.hv=cfg.lin_v_heads;  tps.hvn=tps.hv/W;  tps.hv0=r*tps.hvn;
             tps.fi=cfg.dense_inter;  tps.fn=tps.fi/W;   tps.f0=r*tps.fn;
             tps.si=cfg.shared_inter; tps.sn=tps.si/W;   tps.s0=r*tps.sn;
+            // 4-bit projections keep one scale per 128 inputs (INT4) / 32 (MXFP4), so the shared expert's down_proj
+            // can only be cut on whole groups: Flash-Next's 640 = 320 + 320 is not (2026-11-17: "upload failed" on
+            // two cards at 4 bits).  Whole 128-wide groups, the first ranks one more: 640 -> 384 + 256.  Every
+            // reader takes the width from the weight (sh_gu.output_rows() / 2).  8-bit keeps the even split.
+            const int sgrp=opt.lm_head_fmt==Fmt::INT4?128:opt.lm_head_fmt==Fmt::MXFP4?32:1;
+            if(sgrp>1&&tps.sn%sgrp){
+                const int groups=(tps.si+sgrp-1)/sgrp, per=(groups+W-1)/W;
+                const int g0=std::min(r*per,groups), gn=std::min(per,groups-g0);
+                tps.s0=g0*sgrp; tps.sn=std::min(gn*sgrp,tps.si-tps.s0);
+                std::printf("  TP shared expert: [%d,%d) of %d (whole %d-wide scale groups)\n",
+                            tps.s0,tps.s0+tps.sn,tps.si,sgrp);
+            }
             cfg.n_heads=tps.qhn; cfg.n_kv_heads=tps.kvn;
             cfg.lin_k_heads=tps.hkn; cfg.lin_v_heads=tps.hvn;
             cfg.dense_inter=tps.fn;
@@ -8177,7 +8189,9 @@ bool Grimoire::build(const std::string& dir, const UploadOptions& requested_opt,
             d.sh_dn_i4 = d.sh_down.i4; d.sh_dn_ws = d.sh_down.i4s;
         }
 
-        if (!ok) { err = "upload failed; see the tensor named above"; return false; }
+        // (2026-11-17) keep the slicer's own reason: Flash-Next 4-bit on two cards failed with only this line
+        if (!ok) { err = err.empty() ? "upload failed; see the tensor named above"
+                                     : "upload failed at layer " + std::to_string(i) + ": " + err; return false; }
         std::printf("\r  layers        %d/%d  %.2f GiB   ",
                     i + 1, cfg.n_layers, double(bytes) / 1073741824.0);
         std::fflush(stdout);
