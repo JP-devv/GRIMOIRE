@@ -11585,10 +11585,23 @@ bool Grimoire::admit_batch(const std::vector<const std::vector<int32_t>*>& promp
     // An MTP head is fine: prefill() warms each span's head cache (2026-10-05;
     // admitting MTP prompts one at a time held 8-user prefill at one prompt's
     // speed).  A DFlash drafter still admits one prompt at a time.
-    if (pp_enabled() || tp_ranked() || dflash2.ok || prefix_cache_usable() ||
+    if (pp_enabled() || tp_ranked() || dflash2.ok ||
         cfg.is_muse || cfg.is_gemma4 || cfg.is_qwen4_exp ||
         !batch_unsupported_reason().empty())
         return false;
+    // The prefix cache (on by default since v1.10.7) used to switch batched admission off altogether: a burst of
+    // new users was admitted one prompt at a time (one B70, 8 users of ~60-token prompts: TTFT 8 x ~290 ms against
+    // one prefill).  Now only a burst in which some prompt can resume a cached prefix goes one at a time (each takes
+    // its own snapshot); fresh prompts are admitted together (no prompt head for them: the burst's prompts are short,
+    // admit_batch_tokens).  GRIMOIRE_ADMIT_BATCH_CACHED=0 = the v1.10.7 rule.
+    static const bool batch_cached = [] { const char* v = std::getenv("GRIMOIRE_ADMIT_BATCH_CACHED");
+        return !(v && *v == '0'); }();
+    const bool cached = prefix_cache_usable();
+    if (cached && !batch_cached) return false;
+    if (cached)
+        for (const auto* pr : prompts)
+            if (prefix_reuse(*pr, &busy) > 0) return false;
+    // prompt k -> the k-th idle slot: the scheduler sets each request's sampling options on exactly those slots
     std::vector<int> pick;
     for (int i = 0; i < n_seq_slots && pick.size() < prompts.size(); ++i)
         if (!busy[size_t(i)]) pick.push_back(i);
