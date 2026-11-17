@@ -10609,7 +10609,13 @@ std::string Grimoire::batch_unsupported_reason() const {
     if ((pp_enabled() || tp_ranked()) && (pp_spec || pp_dflash || mtp.ok || dflash2.ok) &&
         !tp_spec_batch())
         return "distributed speculative batching is not implemented for this drafter / layout";
-    if (n_seq_slots < 2)
+    // One slot with an MTP head (2026-11-17): the scheduler's step path all the same, at width 1 -- its speculative
+    // step is the one with copy drafting.  The one-at-a-time path never had it: two B70s, Qwen3.8-27B-Uncensored
+    // INT8 + MTP (Ian's DUAL profile, GRIMOIRE_SEQ_SLOTS=1), copy / edit 150-152 tok/s against 460-604 with two
+    // slots, new text the same.  GRIMOIRE_ONE_SLOT_STEPS=0 = the one-at-a-time path as before.
+    static const bool one_slot_steps = [] { const char* v = std::getenv("GRIMOIRE_ONE_SLOT_STEPS");
+        return !(v && *v == '0'); }();
+    if (n_seq_slots < 2 && !(one_slot_steps && mtp.ok && !dflash2.ok))
         return "only one sequence slot -- set GRIMOIRE_SEQ_SLOTS";
     // A file-backed per-layer-embedding table (GRIMOIRE_PLE_FILE) keeps ONE
     // token history on the host, so prefill() refuses SeqBatch rows on it.
