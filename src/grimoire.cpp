@@ -23059,6 +23059,10 @@ int grimoire_perplexity(const std::string& dir, Fmt proj_fmt,
             for (int pos = 0; pos < ctx; ++pos) {
                 if (!e.forward(chunk_ids[size_t(pos)]))
                     throw std::runtime_error("--ppl decode cannot score " + dir + " at position " + std::to_string(pos));
+                // (2026-11-17) the unscored first half never waited: at --ppl-ctx 32768 ~16K tokens of kernels piled
+                // up in one command list until the Level Zero driver aborted (cmdcontainer.cpp:349) and the engine
+                // was reset.  Drain every 32 tokens.
+                if ((pos & 31) == 31) e.q.wait();
                 if (pos < ctx / 2 || pos == ctx - 1) continue;
                 e.q.memcpy(logits.data(), e.s.logits, logits.size() * sizeof(float)).wait();
                 double largest = -std::numeric_limits<double>::infinity();
