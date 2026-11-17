@@ -4228,13 +4228,6 @@ struct Grimoire {
     }
     // PLE from the file: rows for positions [p0, p0+M) into ple_stage.
     bool ple_fetch_rows(const LayerDev& d, int p0, int M);
-    // Megatron TP: does the PLE layer broadcast rank 0's rows through an all-reduce?  Only for a table held in
-    // rank 0's RAM; a file-backed one (ple_ssd) is read by every rank (2026-11-17).  GRIMOIRE_PLE_EVERY_RANK=0 =
-    // the broadcast for both.
-    bool ple_bcast(const LayerDev& d) const {
-        static const bool every = [] { const char* e = std::getenv("GRIMOIRE_PLE_EVERY_RANK"); return !(e && *e == '0'); }();
-        return tp_mega && !(every && d.ple_ssd);
-    }
     TieredMoeView tm_view(const LayerDev& d) const {
         return TieredMoeView{tm_lay, d.tm_eptr, cfg.n_experts, cfg.top_k};
     }
@@ -13994,13 +13987,10 @@ const float* Grimoire::forward_qwen4_exp(int token) {
             const int NH = (cfg.ngram_size - 1) * cfg.heads_per_ngram;
             const int HD = cfg.ple_embed_dim / NH;
             const int state_len = (cfg.ple_conv_kernel - 1) * cfg.ngram_size;
-            // Megatron TP: only rank 0 reads a table held in its RAM (one 51 GB copy, not
-            // two); the gathered rows reach rank 1 through the all-reduce below, to which
-            // it adds zeros -- the same values on both ranks.  A FILE-backed table
-            // (ple_ssd, 2026-11-17): every rank reads its rows itself (the page cache is
-            // shared) and nothing is all-reduced -- MEASURED two B70s, Ian's Flash-Next
-            // profile, v1.10.8: PLE 10.3 ms a token against 1.9 on one card.
-            if (ple_bcast(d) && tp_rank != 0) {
+            // Megatron TP: only rank 0 reads the table (one 51 GB copy in RAM, not
+            // two); the gathered rows reach rank 1 through the all-reduce below,
+            // to which it adds zeros -- the same values on both ranks.
+            if (tp_mega && tp_rank != 0) {
                 q.memset(q4_emb, 0, size_t(NH) * HD * sizeof(float));
             } else
             if (d.ple_ssd) {
@@ -14017,7 +14007,7 @@ const float* Grimoire::forward_qwen4_exp(int token) {
             launch_ple_embed_gather(q, d.ple_table, d.ple_fp8, d.ple_scale,
                                     q4_ids, q4_emb, 1, NH, HD, d.ple_rows, none);
             }
-            if (ple_bcast(d) && !tp_block_reduce(q4_emb, size_t(NH) * HD)) {
+            if (tp_mega && !tp_block_reduce(q4_emb, size_t(NH) * HD)) {
                 std::fprintf(stderr, "TP: PLE row broadcast failed\n");
                 return nullptr;
             }
@@ -17605,9 +17595,7 @@ bool Grimoire::ple_fetch_rows(const LayerDev& d, int p0, int M) {
         q.memcpy(ple_iota, io.data(), n * sizeof(int64_t)).wait();
     }
     if (q4_tok_h.size() < size_t(p0 + M)) return false;
-    // the background RAM copy (ple_ram_start) on one rank only: two ranks starting together would each see the
-    // memory free and copy the 51 GB file twice
-    if (ple_fd >= 0 && !ple_ram_tried && !(tp_mega && tp_rank != 0)) {
+    if (ple_fd >= 0 && !ple_ram_tried) {
         ple_ram_tried = true;
         struct stat st{};
         if (::fstat(ple_fd, &st) == 0) ple_ram_start(size_t(st.st_size));
@@ -18994,11 +18982,10 @@ bool Grimoire::prefill_qwen4_exp(const std::vector<int32_t>& tokens,
         if (d.ple) {
             if (comb_in)
                 launch_hc_combine(q, HY, PIJ, PE, HY, MR, HC, H, none);
-            // Megatron TP: only rank 0 reads a RAM-held table; rank 1 adds zeros to
+            // Megatron TP: only rank 0 reads the table; rank 1 adds zeros to
             // the all-reduce below (as the decode step).  The projections
             // round their input to bf16 anyway, so a bf16 payload is exact.
-            // A file-backed table: every rank reads its own rows (ple_bcast).
-            if (ple_bcast(d) && tp_rank != 0) {
+            if (tp_mega && tp_rank != 0) {
                 q.memset(pemb, 0, size_t(MR) * NH * PHD * sizeof(float));
             } else
             if (d.ple_ssd) {
@@ -19016,7 +19003,7 @@ bool Grimoire::prefill_qwen4_exp(const std::vector<int32_t>& tokens,
             launch_ple_embed_gather(q, d.ple_table, d.ple_fp8, d.ple_scale,
                                     pids, pemb, MR, NH, PHD, d.ple_rows, none);
             }
-            if (ple_bcast(d) && !tp_block_reduce(pemb, size_t(MR) * NH * PHD)) { ok = false; break; }
+            if (tp_mega && !tp_block_reduce(pemb, size_t(MR) * NH * PHD)) { ok = false; break; }
             mm(d.ple_key,   pemb, pkey);
             mm(d.ple_value, pemb, pval);
             if (!ok) break;

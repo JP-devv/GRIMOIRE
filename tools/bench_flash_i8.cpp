@@ -12,7 +12,6 @@
 //        -O3 -std=c++20 -I include -I src tools/bench_flash_i8.cpp -o bin/bench_flash_i8
 #include "flash_team.hpp"
 #include "flash_team_i8.hpp"
-#include "b70/formats.hpp"
 #include <chrono>
 #include <cmath>
 #include <cstdio>
@@ -47,19 +46,14 @@ int main() {
             const int Tp = (T + 63) / 64 * 64;
             std::mt19937 rng(5 + outliers);
             std::normal_distribution<float> nd(0.f, 1.0f);
-            // exact (bf16) K / V, and the same values through the FP8 E4M3 cache as the engine stores them today
             std::vector<sycl_bf16> k2(size_t(KVH) * Sp * D), v2(size_t(KVH) * Sp * D), q2(size_t(H) * Tp * D);
-            std::vector<sycl_bf16> k8(k2.size()), v8(v2.size());
-            auto f8 = [](float x) { return sycl_bf16(e4m3_to_f32(f32_to_e4m3(x))); };
             for (size_t i = 0; i < k2.size(); ++i) {
                 const size_t s = (i / 2) % Sp;                              // K [KVH][D/2][Sp][2]
                 const int d = int(((i / 2) / Sp) % (D / 2)) * 2 + int(i & 1);
                 const float boost = outliers && (d % 32 == 7) ? 12.f : 1.f;
-                const float kx = s < size_t(kend) ? nd(rng) * boost : 0.0f;
-                k2[i] = sycl_bf16(kx); k8[i] = f8(kx);
+                k2[i] = s < size_t(kend) ? sycl_bf16(nd(rng) * boost) : sycl_bf16(0.0f);
                 const size_t sv = ((i / 2) / D % (Sp / 2)) * 2 + (i & 1);   // V [KVH][Sp/2][D][2]
-                const float vx = sv < size_t(kend) ? nd(rng) : 0.0f;
-                v2[i] = sycl_bf16(vx); v8[i] = f8(vx);
+                v2[i] = sv < size_t(kend) ? sycl_bf16(nd(rng)) : sycl_bf16(0.0f);
             }
             for (size_t i = 0; i < q2.size(); ++i)
                 q2[i] = (i / D) % Tp < size_t(T) ? sycl_bf16(nd(rng) * 0.15f) : sycl_bf16(0.0f);
@@ -79,22 +73,8 @@ int main() {
             sycl::event e;
             q.memset(out, 0, n * 4).wait();
             const double tb = timeit([&] { flash_team<D, BK, 4, 2>(q, e, Qb, Tp, Kp, Vp, Sp, out, T, start, H, KVH); });
-            q.memcpy(ref.data(), out, n * 4).wait();                 // reference: exact K / V
+            q.memcpy(ref.data(), out, n * 4).wait();
             double mref = 0; for (float x : ref) mref = std::fmax(mref, std::fabs(x));
-            auto err = [&](const std::vector<float>& g, double& mx, double& rms) {
-                double md = 0, se = 0, sr = 0;
-                for (size_t i = 0; i < n; ++i) { const double d = double(g[i]) - ref[i];
-                    md = std::fmax(md, std::fabs(d)); se += d * d; sr += double(ref[i]) * ref[i]; }
-                mx = md / (mref > 0 ? mref : 1); rms = sr > 0 ? std::sqrt(se / sr) : 0.0;
-            };
-            // TODAY: the FP8 cache (K and V through E4M3), bf16 kernel
-            q.memcpy(Kp, k8.data(), k8.size() * 2); q.memcpy(Vp, v8.data(), v8.size() * 2); q.wait();
-            q.memset(out, 0, n * 4).wait();
-            flash_team<D, BK, 4, 2>(q, e, Qb, Tp, Kp, Vp, Sp, out, T, start, H, KVH); q.wait();
-            std::vector<float> today(n); q.memcpy(today.data(), out, n * 4).wait();
-            double tmx, trms; err(today, tmx, trms);
-            // int8 S: K int8 per key from the EXACT keys (as a cache write would), V through FP8 as today
-            q.memcpy(Kp, k2.data(), k2.size() * 2).wait();
             const double tp = timeit([&] {
                 flash_i8_pack_q(q, Qb, Qi8, qs, H, Tp, D);
                 flash_i8_pack_k(q, Kp, Ki8, ks, KVH, Sp, D);
@@ -104,11 +84,15 @@ int main() {
                 flash_team_i8<D, BK, 4, 2>(q, e, Qi8, qs, Tp, Ki8, ks, Vp, Sp, out, T, start, H, KVH);
             });
             q.memcpy(got.data(), out, n * 4).wait();
-            double imx, irms; err(got, imx, irms);
-            std::printf("T=%5d start=%6d  bf16 team %8.2f ms | int8-S %8.2f ms x%.2f (+ packs %.2f ms) | error vs exact K/V, "
-                        "max / rms: TODAY (FP8 cache) %.2e / %.2e   INT8 keys %.2e / %.2e\n",
-                        T, start, tb, ti, tb / ti, tp, tmx, trms, imx, irms);
-            q.memcpy(Vp, v2.data(), v2.size() * 2).wait();           // exact V again for the next shape's reference
+            double md = 0, se = 0, sr = 0;
+            for (size_t i = 0; i < n; ++i) {
+                const double d = double(got[i]) - ref[i];
+                md = std::fmax(md, std::fabs(d)); se += d * d; sr += double(ref[i]) * ref[i];
+            }
+            std::printf("T=%5d start=%6d  bf16 team %8.2f ms %6.1f TFLOP/s | int8-S %8.2f ms %6.1f TFLOP/s x%.2f "
+                        "(+ packs %.2f ms) | max|diff|/max|ref| %.2e  rms rel %.2e\n",
+                        T, start, tb, flop / tb / 1e9, ti, flop / ti / 1e9, tb / ti, tp,
+                        md / (mref > 0 ? mref : 1), sr > 0 ? std::sqrt(se / sr) : 0.0);
         }
     }
     return 0;
