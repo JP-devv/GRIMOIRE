@@ -59,6 +59,24 @@ SYCL_ESIMD_FUNCTION inline es::simd<uint32_t, N> e4m3_h16(es::simd<uint8_t, N> b
     return ((u & 0x7F) << 7) | ((u & 0x80) << 8);
 }
 
+// INT8 KEYS (kv_k8_flag): the bytes the FP8 path widens with (b & 0x7F) << 7 | (b & 0x80) << 8 into u16 lanes
+// 2j / 2j + 1 = row bytes 4j + 2hp / 4j + 2hp + 1 -- the same lanes, converted as signed int8 to fp16 (exact).
+SYCL_ESIMD_FUNCTION inline es::simd<uint32_t, 16> k8_h16(const es::simd<uint8_t, 64>& row, int hp) {
+    es::simd<uint8_t, 64> r = row;
+    es::simd<int8_t, 64> rs = r.template bit_cast_view<int8_t>();
+    es::simd<int8_t, 32> i8;
+    i8.template select<16, 2>(0) = rs.template select<16, 4>(2 * hp);
+    i8.template select<16, 2>(1) = rs.template select<16, 4>(2 * hp + 1);
+    es::simd<fp16, 32> hf = i8;
+    return hf.template bit_cast_view<uint32_t>().read();
+}
+// The scales of one KV head: float[seq_cap] after the slot's int8 keys (kernels.hpp), relative to the possibly
+// shifted k_cache (AttnParams::k8_shift).
+inline const float* k8_scales(const AttnParams& pp, int64_t cbase, int kvh, int KVH, int HD) {
+    const uint8_t* k0 = pp.k_cache + cbase - int64_t(pp.k8_shift) * HD;
+    return reinterpret_cast<const float*>(k0 + int64_t(KVH) * HD * pp.seq_cap) + int64_t(kvh) * pp.seq_cap + pp.k8_shift;
+}
+
 // Every split re-reads nothing, so the split count only trades parallelism against merge
 // work.  MEASURED 2026-10-08 (tools/bench_verify_attn.cpp, one B70): the best counts put
 // ~768 threads on the card -- 7 rows (6 threads per KV head): 32 splits at 2K (59.5 us)
@@ -74,8 +92,9 @@ int env_int(const char* name, int fallback) {
 }
 } // namespace
 
-namespace { bool g_verify_kmajor = false; int g_verify_team = -1; }
+namespace { bool g_verify_kmajor = false, g_verify_k8 = false; int g_verify_team = -1; }
 void set_verify_kv_kmajor(bool on) { g_verify_kmajor = on; }
+void set_verify_kv_k8(bool on) { g_verify_k8 = on; }
 bool verify_kv_kmajor() { return g_verify_kmajor; }
 void set_verify_team(int mode) { g_verify_team = mode; }
 bool verify_team_on() {
@@ -136,7 +155,7 @@ int verify_dpas_splits(const AttnParams& p, const VerifyGroups& g, int len_max) 
 }
 
 namespace {
-template <bool KM>
+template <bool KM, bool K8 = false>
 sycl::event verify_attn_dpas_impl(sycl::queue& q, const AttnParams& p, const VerifyGroups& g,
                                   int64_t kv_stride, const int32_t* d_lens, int splits_max,
                                   const std::vector<sycl::event>& deps) {
@@ -232,6 +251,8 @@ sycl::event verify_attn_dpas_impl(sycl::queue& q, const AttnParams& p, const Ver
                 pp.k_cache + cbase + int64_t(kvh) * HD * pp.seq_cap);
             const uint32_t* vh32 = reinterpret_cast<const uint32_t*>(
                 pp.v_cache + cbase + int64_t(kvh) * pp.seq_cap * HD);
+            const float* kscl = nullptr;
+            if constexpr (K8) kscl = k8_scales(pp, cbase, kvh, KVH, HD);
             const unsigned KW = unsigned(pp.seq_cap) - 1;    // K: [256 rows][seq_cap bytes]
             const unsigned VH = unsigned(pp.seq_cap) - 1;    // V: [seq_cap rows][256 bytes]
 
@@ -261,12 +282,16 @@ sycl::event verify_attn_dpas_impl(sycl::queue& q, const AttnParams& p, const Ver
                                 es::simd<uint8_t, 64> row = t.template bit_cast_view<uint8_t>();
                                 #pragma unroll
                                 for (int hp = 0; hp < 2; ++hp) {
+                                    if constexpr (K8) {
+                                        b.template select<16, 1>(16 * (2 * c + hp)) = k8_h16(row, hp);
+                                    } else {
                                     es::simd<uint16_t, 32> b16 = 0;
                                     auto bv = b16.template bit_cast_view<uint8_t>();
                                     bv.template select<16, 4>(0) = row.template select<16, 4>(2 * hp);
                                     bv.template select<16, 4>(2) = row.template select<16, 4>(2 * hp + 1);
                                     es::simd<uint16_t, 32> h16 = ((b16 & 0x7F) << 7) | ((b16 & 0x80) << 8);
                                     b.template select<16, 1>(16 * (2 * c + hp)) = h16.template bit_cast_view<uint32_t>();
+                                    }
                                 }
                             }
                             const int dt = 2 * dc + hh;
@@ -297,6 +322,12 @@ sycl::event verify_attn_dpas_impl(sycl::queue& q, const AttnParams& p, const Ver
                             s, b.template bit_cast_view<fp16>().read(),
                             es::simd<fp16, RB * 16>(qa.template select<RB * 16, 1>(dt * RB * 16)));
                     }
+                }
+                if constexpr (K8) {   // per-key scales; the 2^-8 Q carries for FP8 keys folded in
+                    const es::simd<float, NK> ksv = es::block_load<float, NK>(kscl + s0) * (1.0f / 256.0f);
+                    #pragma unroll
+                    for (int i = 0; i < RB; ++i)
+                        s.template select<NK, 1>(NK * i) = es::simd<float, NK>(s.template select<NK, 1>(NK * i)) * ksv;
                 }
                 // mask: each row its own length (causal within the verify block)
                 #pragma unroll
@@ -389,7 +420,7 @@ constexpr int kTeamMaxRB = 6;                 // 48 rows: 8 tokens x 6 query hea
 
 // NRBM (2026-11-16): the launch's largest row-block count (host-known), so the softmax / mask loops run over the rows
 // that exist (they ran over all 48 rows for a 24-row launch).
-template <int NRBM>
+template <int NRBM, bool K8 = false>
 sycl::event verify_attn_team_impl(sycl::queue& q, const AttnParams& p, const VerifyGroups& g,
                                   int64_t kv_stride, const int32_t* d_lens, int splits_max,
                                   const std::vector<sycl::event>& deps) {
@@ -467,6 +498,8 @@ sycl::event verify_attn_team_impl(sycl::queue& q, const AttnParams& p, const Ver
             const int64_t cbase = int64_t(vg.slot[grp]) * kv_stride;
             const uint32_t* kh32 = reinterpret_cast<const uint32_t*>(pp.k_cache + cbase + int64_t(kvh) * HD * pp.seq_cap);
             const uint32_t* vh32 = reinterpret_cast<const uint32_t*>(pp.v_cache + cbase + int64_t(kvh) * pp.seq_cap * HD);
+            const float* kscl = nullptr;
+            if constexpr (K8) kscl = k8_scales(pp, cbase, kvh, KVH, HD);
             const unsigned CAPM = unsigned(pp.seq_cap) - 1;
             es::simd<float, NRBM * RB * DP> o = 0.0f;  // [rb][dpt][8][16]
             es::simd<float, RMAX> m = NINF, l = 0.0f;  // l: this thread's key slices only
@@ -500,12 +533,16 @@ sycl::event verify_attn_team_impl(sycl::queue& q, const AttnParams& p, const Ver
                                 es::simd<uint8_t, 64> row = tt.template bit_cast_view<uint8_t>();
                                 #pragma unroll
                                 for (int hp = 0; hp < 2; ++hp) {
+                                    if constexpr (K8) {
+                                        b.template select<16, 1>(16 * (2 * c + hp)) = k8_h16(row, hp);
+                                    } else {
                                     es::simd<uint16_t, 32> b16 = 0;
                                     auto bv = b16.template bit_cast_view<uint8_t>();
                                     bv.template select<16, 4>(0) = row.template select<16, 4>(2 * hp);
                                     bv.template select<16, 4>(2) = row.template select<16, 4>(2 * hp + 1);
                                     es::simd<uint16_t, 32> h16 = ((b16 & 0x7F) << 7) | ((b16 & 0x80) << 8);
                                     b.template select<16, 1>(16 * (2 * c + hp)) = h16.template bit_cast_view<uint32_t>();
+                                    }
                                 }
                             }
                             const int dt = 2 * dc + hh;
@@ -520,6 +557,12 @@ sycl::event verify_attn_team_impl(sycl::queue& q, const AttnParams& p, const Ver
                                         b.template bit_cast_view<fp16>().read(), a);
                             }
                         }
+                    }
+                    if constexpr (K8) {   // per-key scales (this thread's 16 keys); FP8's 2^-8 folded in
+                        const es::simd<float, NK> ksv = es::block_load<float, NK>(kscl + ks) * (1.0f / 256.0f);
+                        #pragma unroll
+                        for (int j = 0; j < RMAX; ++j)
+                            sc.template select<NK, 1>(NK * j) = es::simd<float, NK>(sc.template select<NK, 1>(NK * j)) * ksv;
                     }
                     // mask: each row its own length
                     #pragma unroll
@@ -648,6 +691,14 @@ sycl::event launch_verify_attn_dpas(sycl::queue& q, const AttnParams& p, const V
         int lo = 1 << 30, hi = 0;
         for (int i = 0; i < g.n; ++i) { lo = g.nrows[i] < lo ? g.nrows[i] : lo; hi = g.nrows[i] > hi ? g.nrows[i] : hi; }
         auto run = [&](const VerifyGroups& vg, int rows_max, const std::vector<sycl::event>& dd) {
+            if (g_verify_k8) switch ((rows_max * G + 7) / 8) {
+                case 1: return verify_attn_team_impl<1, true>(q, p, vg, kv_stride, d_lens, splits_max, dd);
+                case 2: return verify_attn_team_impl<2, true>(q, p, vg, kv_stride, d_lens, splits_max, dd);
+                case 3: return verify_attn_team_impl<3, true>(q, p, vg, kv_stride, d_lens, splits_max, dd);
+                case 4: return verify_attn_team_impl<4, true>(q, p, vg, kv_stride, d_lens, splits_max, dd);
+                case 5: return verify_attn_team_impl<5, true>(q, p, vg, kv_stride, d_lens, splits_max, dd);
+                default: return verify_attn_team_impl<6, true>(q, p, vg, kv_stride, d_lens, splits_max, dd);
+            }
             switch ((rows_max * G + 7) / 8) {
                 case 1: return verify_attn_team_impl<1>(q, p, vg, kv_stride, d_lens, splits_max, dd);
                 case 2: return verify_attn_team_impl<2>(q, p, vg, kv_stride, d_lens, splits_max, dd);
@@ -683,6 +734,7 @@ sycl::event launch_verify_attn_dpas(sycl::queue& q, const AttnParams& p, const V
             if (any) return ev;
         }
     }
+    if (g_verify_kmajor && g_verify_k8) return verify_attn_dpas_impl<true, true>(q, p, g, kv_stride, d_lens, splits_max, deps);
     return g_verify_kmajor ? verify_attn_dpas_impl<true>(q, p, g, kv_stride, d_lens, splits_max, deps)
                            : verify_attn_dpas_impl<false>(q, p, g, kv_stride, d_lens, splits_max, deps);
 }

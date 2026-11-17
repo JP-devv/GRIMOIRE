@@ -33,6 +33,7 @@
 //  ~200 t/s and several thousand.
 // =====================================================================
 #include "kernels.hpp"
+#include "kv_k8.hpp"
 #include "gemv_step.hpp"
 #include "b70/prefill_qk_math.hpp"
 #include <algorithm>
@@ -1426,6 +1427,9 @@ sycl::event launch_kv_append_batched(
     uint8_t* v_cache, int tokens, int start_pos, int n_kv_heads,
     int head_dim, int seq_cap, const std::vector<sycl::event>& deps) {
     const bool km = kv_kmajor_flag();
+    if (km && kv_k8_flag())
+        return kv_append_k8(q, k, v, k_cache, v_cache, 0, [=](int r) { return start_pos + r; },
+                            [](int) { return 0; }, tokens, n_kv_heads, head_dim, seq_cap, deps);
     return q.submit([&](sycl::handler& h) {
         h.depends_on(deps);
         h.parallel_for(sycl::range<1>(size_t(tokens) * n_kv_heads * head_dim),
@@ -1499,6 +1503,11 @@ sycl::event launch_kv_append_rows(sycl::queue& q, const float* k, const float* v
     uint8_t* k_base, uint8_t* v_base, int64_t kv_stride, const RowSlots& rs, int rows,
     int n_kv_heads, int head_dim, int seq_cap, const std::vector<sycl::event>& deps) {
     const bool km = kv_kmajor_flag();
+    if (km && kv_k8_flag()) {
+        const RowSlots slots = rs;
+        return kv_append_k8(q, k, v, k_base, v_base, kv_stride, [=](int r) { return slots.pos[r]; },
+                            [=](int r) { return slots.slot[r]; }, rows, n_kv_heads, head_dim, seq_cap, deps);
+    }
     return q.submit([&](sycl::handler& h) {
         h.depends_on(deps);
         const RowSlots slots = rs;
@@ -2386,6 +2395,9 @@ sycl::event launch_kv_append_bf16_batched(sycl::queue&q,const sycl_bf16*k,
     const sycl_bf16*v,uint8_t*k_cache,uint8_t*v_cache,int tokens,int start_pos,
     int n_kv_heads,int head_dim,int seq_cap,const std::vector<sycl::event>&deps){
  const bool km=kv_kmajor_flag();
+ if(km&&kv_k8_flag())
+  return kv_append_k8(q,k,v,k_cache,v_cache,0,[=](int r){return start_pos+r;},[](int){return 0;},tokens,
+                      n_kv_heads,head_dim,seq_cap,deps);
  return q.submit([&](sycl::handler&h){h.depends_on(deps);
   h.parallel_for(sycl::range<1>(size_t(tokens)*n_kv_heads*head_dim),[=](sycl::id<1>id){
    int64_t z=id[0];int d=int(z%head_dim);int64_t th=z/head_dim;

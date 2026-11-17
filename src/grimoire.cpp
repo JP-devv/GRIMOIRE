@@ -7829,7 +7829,9 @@ bool Grimoire::build(const std::string& dir, const UploadOptions& requested_opt,
             //
             // Allocated after the last weight ("KV caches, fitted to the
             // card" below), when it is known how many slots fit.
-            d.kv_slot = kv_elems;
+            // + the int8 keys' scale area when GRIMOIRE_KV_K8=1 (kernels.hpp kv_cache_k_bytes); V uses the same
+            // slot stride and leaves those bytes unused
+            d.kv_slot = kv_cache_k_bytes(d.kv_heads, d.head_dim, max_seq, kv_k8_requested());
             d.k_base = d.v_base = d.k_cache = d.v_cache = nullptr;
             if(cfg.is_muse){
                 // Match Fusion's XPU FlashAttention KV-cache group.
@@ -8440,7 +8442,7 @@ bool Grimoire::build(const std::string& dir, const UploadOptions& requested_opt,
                 mtp_ffn_bytes = m.sh_gu.w.bytes() + m.sh_down.w.bytes();
             }
             m.k_cache   = sycl::malloc_device<uint8_t>(
-                              size_t(m.kv_heads) * m.head_dim * max_seq, q);
+                              kv_cache_k_bytes(m.kv_heads, m.head_dim, max_seq, kv_k8_requested()), q);
             m.v_cache   = sycl::malloc_device<uint8_t>(
                               size_t(m.kv_heads) * m.head_dim * max_seq, q);
             const size_t mb = mtp.fc.w.bytes() + m.q_proj.w.bytes() + m.k_proj.w.bytes()
@@ -9988,6 +9990,14 @@ bool Grimoire::build(const std::string& dir, const UploadOptions& requested_opt,
         set_verify_kv_kmajor(km);
         std::printf("  K cache layout: %s\n", km ? "key-major [kv head][position][dim] (like V)"
                                                  : "dim-major [kv head][dim][position]");
+        // INT8 KEYS (GRIMOIRE_KV_K8=1, kernels.hpp): key-major only -- every K reader of that layout handles them
+        const bool k8 = km && kv_k8_requested();
+        kv_k8_flag() = k8;
+        set_flash_kv_k8(k8);
+        set_verify_kv_k8(k8);
+        if (kv_k8_requested())
+            std::printf("  K cache values: %s\n", k8 ? "INT8 keys, one fp32 scale per key and KV head (GRIMOIRE_KV_K8); V FP8"
+                                                    : "FP8 (GRIMOIRE_KV_K8 needs the key-major K cache)");
     }
     std::printf("  zeroing recurrent state ... ");
     std::fflush(stdout);
@@ -10265,7 +10275,7 @@ void Grimoire::clear_seq_slot(int j) {
     // context. No batched path exists for that layer today.
     if (mtp.ok && mtp.L.k_cache && mtp.L.v_cache) {
         const size_t kv_bytes = size_t(mtp.L.kv_heads) * mtp.L.head_dim * max_seq;
-        q.memset(mtp.L.k_cache, 0, kv_bytes);
+        q.memset(mtp.L.k_cache, 0, kv_cache_k_bytes(mtp.L.kv_heads, mtp.L.head_dim, max_seq, kv_k8_requested()));
         q.memset(mtp.L.v_cache, 0, kv_bytes);
     }
     if(s.d_pos && s.d_seq_len)set_cursor(0);
@@ -11330,7 +11340,7 @@ void Grimoire::clear_drafter_cache() {
     if (!force && !draft_slots.empty()) return;
     if (!mtp.ok || !mtp.L.k_cache || !mtp.L.v_cache) return;
     const size_t kv_bytes = size_t(mtp.L.kv_heads) * mtp.L.head_dim * max_seq;
-    q.memset(mtp.L.k_cache, 0, kv_bytes);
+    q.memset(mtp.L.k_cache, 0, kv_cache_k_bytes(mtp.L.kv_heads, mtp.L.head_dim, max_seq, kv_k8_requested()));
     q.memset(mtp.L.v_cache, 0, kv_bytes);
 }
 
@@ -11348,7 +11358,8 @@ void Grimoire::init_draft_slots() {
     float* conv_steps=nullptr;
     size_t extra=0;
     try {
-        const size_t mkbytes=size_t(mtp.L.kv_heads)*mtp.L.head_dim*max_seq;
+        // K and V of each slot's MTP head the same size: K's int8 scale area (GRIMOIRE_KV_K8) included
+        const size_t mkbytes=kv_cache_k_bytes(mtp.L.kv_heads,mtp.L.head_dim,max_seq,kv_k8_requested());
         const size_t dkbytes=size_t(dflash2.kv_heads)*dflash2.head_dim*max_seq;
         const size_t halfbytes=size_t(dflash2.num_blocks)*dflash2.block_size*
                                dflash2.kv_heads*dflash2.head_dim*sizeof(sycl::half);
@@ -15295,6 +15306,7 @@ int Grimoire::mtp_draft(int next_token, int position, bool from_mtp_hidden) {
     const int w0 = mtp_window_start(position);
     // window start: K is dim-major (+w0 bytes per row) or key-major (+w0 rows of head_dim, like V)
     ap.q = qvec; ap.k_cache = d.k_cache + (kv_kmajor_flag() ? size_t(w0) * d.head_dim : size_t(w0));
+    ap.k8_shift = w0;
     ap.v_cache = d.v_cache + size_t(w0) * d.head_dim;
     ap.out = s.attn_out;
     ap.seq_len = position + 1 - w0; ap.seq_cap = max_seq;
@@ -15579,6 +15591,7 @@ bool Grimoire::mtp_draft_rows(int n, const int32_t* tok_in, const int* slot, con
         AttnParams ap{};
         const int w0 = mtp_window_start(p);
         ap.q = qvec; ap.k_cache = kc + (kv_kmajor_flag() ? size_t(w0) * HD : size_t(w0)); ap.v_cache = vc + size_t(w0) * HD;
+        ap.k8_shift = w0;
         ap.out = row(mtpr.att, r, AD);
         ap.seq_len = p + 1 - w0; ap.seq_cap = max_seq;
         if (w0) { int32_t* ds = s.d_seq_len; const int len = p + 1 - w0; q.single_task([=] { *ds = len; }); }

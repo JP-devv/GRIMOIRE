@@ -945,6 +945,7 @@ sycl::event flash_esimd(sycl::queue& q, sycl::event dep, const sycl_bf16* Qb, in
 
 bool& flash_kv_kmajor_storage() { static bool on = false; return on; }
 bool flash_kv_kmajor() { return flash_kv_kmajor_storage(); }
+bool& flash_kv_k8_storage() { static bool on = false; return on; }   // int8 keys (kernels.hpp kv_k8_flag)
 
 int flash_key_block() {
     static const int block = [] {
@@ -983,6 +984,9 @@ sycl::event flash_fast_impl(sycl::queue& q, const float* qv, const uint8_t* kc,
     // 2-byte stores Sp apart: ~80 GB/s, 0.5 s of a 61K prompt; V 0.3 s).  Same LUT, same bf16 bits.
     // GRIMOIRE_FLASH_PACK2=0 = the element-wise packs.
     static const bool pack2 = [] { const char* v = std::getenv("GRIMOIRE_FLASH_PACK2"); return !(v && *v == '0'); }();
+    const bool k8 = flash_kv_kmajor() && flash_kv_k8_storage();
+    // int8 keys: k = int8 * the key's scale (float[KVH][seq_cap] after the keys), rounded to bf16 once
+    const float* kscl = k8 ? reinterpret_cast<const float*>(kc + size_t(KVH) * seq_cap * D) : nullptr;
     if (flash_kv_kmajor() && pack2 && Sp % 32 == 0) {
         // K: a 32-key x D tile through local memory -> [D/2][Sp] u32 rows of 32 keys (128 bytes per row piece)
         constexpr int TK = 32, DPR = D / 2;
@@ -998,6 +1002,11 @@ sycl::event flash_fast_impl(sycl::queue& q, const float* qv, const uint8_t* kc,
                     uint32_t v = 0;
                     if (s < kend) {
                         const uint16_t two = *reinterpret_cast<const uint16_t*>(kc + (size_t(hh) * seq_cap + s) * D + 2 * dp);
+                        if (k8) {
+                            const float ks = kscl[size_t(hh) * seq_cap + s];
+                            v = uint32_t(sycl::bit_cast<uint16_t>(bf16_rne(float(int8_t(two & 0xFFu)) * ks))) |
+                                (uint32_t(sycl::bit_cast<uint16_t>(bf16_rne(float(int8_t(two >> 8)) * ks))) << 16);
+                        } else
                         v = uint32_t(lu[two & 0xFFu]) | (uint32_t(lu[two >> 8]) << 16);
                     }
                     sh[size_t(dp) * (TK + 1) + key] = v;
@@ -1018,7 +1027,9 @@ sycl::event flash_fast_impl(sycl::queue& q, const float* qv, const uint8_t* kc,
             h.parallel_for(sycl::range<3>(size_t(KVH), size_t(Sp), size_t(D)), [=](sycl::id<3> id) {
                 const int hh = int(id[0]), s = int(id[1]), d = int(id[2]);
                 Kp[((size_t(hh) * (D / 2) + d / 2) * Sp + s) * 2 + (d & 1)] =
-                    s < kend ? lut[kc[(size_t(hh) * seq_cap + s) * D + d]] : sycl_bf16(0.0f);
+                    s >= kend ? sycl_bf16(0.0f)
+                    : k8 ? bf16_rne(float(int8_t(kc[(size_t(hh) * seq_cap + s) * D + d])) * kscl[size_t(hh) * seq_cap + s])
+                    : lut[kc[(size_t(hh) * seq_cap + s) * D + d]];
             });
         });
     } else
@@ -4727,5 +4738,6 @@ sycl::event launch_moe_mxfp4_smallm(sycl::queue& q, const QuantWeight& w, int Ne
 
 // key-major K cache (kernels.hpp): this library's copy of the flag, set by Grimoire::build
 void set_flash_kv_kmajor(bool on) { flash_kv_kmajor_storage() = on; }
+void set_flash_kv_k8(bool on) { flash_kv_k8_storage() = on; }
 
 } // namespace b70

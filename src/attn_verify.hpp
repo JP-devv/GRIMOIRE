@@ -52,6 +52,7 @@ sycl::event launch_verify_attn_dpas(sycl::queue& q, const AttnParams& p, const V
 // verify kernel reads it with transposed 2-D block loads.  Set once at load (Grimoire::build, kv_kmajor_flag()) --
 // this library keeps its own copy of the flag.
 void set_verify_kv_kmajor(bool on);
+void set_verify_kv_k8(bool on);       // int8 keys (kernels.hpp kv_k8_flag), key-major only
 bool verify_kv_kmajor();
 // TEAM verify attention (2026-11-15, key-major cache only): one work-group of 8 threads per (conversation, KV head,
 // split) holds ALL of that KV head's verify rows (<= 48 = 8 tokens x 6 heads); thread t computes S for its own 16 of

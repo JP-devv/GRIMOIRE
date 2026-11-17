@@ -275,6 +275,19 @@ sycl::event onednn_gemm(sycl::queue& q, const QuantWeight& w, const sycl_bf16* x
 bool& kv_kmajor_flag();
 void kv_kmajor_refuse(const char* who);    // throws if kv_kmajor_flag() is set
 void set_flash_kv_kmajor(bool on);
+// INT8 KEYS (2026-11-17, GRIMOIRE_KV_K8=1, opt-in; key-major cache only).  K is stored as int8 with one fp32 scale
+// per (kv head, position) = max |k| / 127 over the head's dims (V stays FP8 E4M3).  The scales sit right after the
+// int8 keys in the same allocation: float[kv_heads][seq_cap] at k_cache + kv_heads * head_dim * seq_cap bytes, so
+// every K allocation is kv_cache_k_bytes() long and a slot / snapshot that moves K moves its scales with it.
+// MEASURED 11-17 (tools/bench_flash_i8.cpp, one B70, attention output vs exact bf16 K / V, rms): FP8 cache 4.5-5.4%
+// (plain keys) / 7-17% (outlier channels), int8 keys 3.0-3.1% / 6-10%.  Set once in Grimoire::build with
+// kv_kmajor_flag(); the libraries keep their own copies (set_flash_kv_k8, set_verify_kv_k8).
+bool& kv_k8_flag();
+void set_flash_kv_k8(bool on);
+bool kv_k8_requested();                    // GRIMOIRE_KV_K8=1: allocate the scale area (decided before the KV)
+inline size_t kv_cache_k_bytes(int kv_heads, int head_dim, int seq_cap, bool k8) {
+    return size_t(kv_heads) * head_dim * seq_cap + (k8 ? size_t(kv_heads) * seq_cap * sizeof(float) : 0);
+}
 // Matrix-unit causal prefill attention (src/gemm_fast.cpp);
 // launch_flash_prefill() takes it whenever the geometry fits.
 bool flash_fast_supported(int head_dim, int num_heads, int num_kv_heads);
@@ -343,6 +356,10 @@ struct AttnParams {
     // full history where a window was meant is completely silent -- it is
     // identical until the context passes the window, then quietly wrong.
     int window_left = 0;
+
+    // INT8 KEYS (kv_k8_flag): positions k_cache was advanced by (the MTP draft window, mtp_window_start), so a
+    // reader finds the per-key scales (laid out after the int8 keys of the UNSHIFTED cache) -- 0 everywhere else.
+    int k8_shift = 0;
 
     // Length gates for a recorded decode graph (0 = off): the kernel returns
     // at once unless the device-side length satisfies them, so two kernels

@@ -30,6 +30,7 @@
 #include <sycl/ext/intel/esimd.hpp>
 #include <limits>
 #include "kernels.hpp"
+#include "kv_k8.hpp"
 #include "b70/int8_embedding.hpp"
 #include "gemv_step.hpp"
 #include <climits>
@@ -1522,6 +1523,11 @@ sycl::event launch_rope_dev(sycl::queue& q, float* x, int n_heads, int head_dim,
 }
 
 bool& kv_kmajor_flag() { static bool on = false; return on; }
+bool& kv_k8_flag() { static bool on = false; return on; }
+bool kv_k8_requested() {
+    static const bool on = [] { const char* e = std::getenv("GRIMOIRE_KV_K8"); return e && *e == '1'; }();
+    return on;
+}
 void kv_kmajor_refuse(const char* who) {
     if (kv_kmajor_flag())
         throw std::runtime_error(std::string(who) + ": not written for the key-major K cache (GRIMOIRE_KV_KMAJOR=0)");
@@ -1533,6 +1539,9 @@ sycl::event launch_kv_append_dev(sycl::queue& q, const float* k, const float* v,
                                  int head_dim, int seq_cap,
                                  const std::vector<sycl::event>& deps = {}) {
     const bool km = kv_kmajor_flag();
+    if (km && kv_k8_flag())
+        return kv_append_k8(q, k, v, k_cache, v_cache, 0, [=](int) { return d_pos[0]; }, [](int) { return 0; },
+                            1, n_kv_heads, head_dim, seq_cap, deps);
     return q.submit([&](sycl::handler& h) {
         h.depends_on(deps);
         h.parallel_for(sycl::range<1>(size_t(n_kv_heads) * head_dim),
