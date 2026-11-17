@@ -253,6 +253,12 @@ sycl::event launch_gemm_fast_dequant(sycl::queue& q, const QuantWeight& w, sycl_
 sycl::event launch_gemm_fast_predq(sycl::queue& q, const QuantWeight& w, const sycl_bf16* wdq,
                                    const sycl_bf16* x, float* y, int M,
                                    const std::vector<sycl::event>& deps = {});
+// The gate|up GEMM of a pre-dequantized weight with SwiGLU fused: h = silu(g) * u as bf16 [M][N/2].  Only when W
+// went the rotated int8 way (INT4 / INT8 prompts as int8 x int8) and oneDNN takes the post-ops; false = nothing
+// launched (run launch_gemm_fast_predq and a SwiGLU pass).
+bool launch_gemm_fast_predq_swiglu(sycl::queue& q, const QuantWeight& w, const sycl_bf16* wdq,
+                                   const sycl_bf16* x, sycl_bf16* h, int M,
+                                   const std::vector<sycl::event>& deps = {});
 // Intel oneDNN matmul, y = x W^T (or += with accumulate) for FP8 row-scaled and BF16 weights
 // at any row count (src/onednn_gemm.cpp, in libgrimoire_gemm.so).  onednn_gemm_ok is false
 // when the library was built without third_party/onednn or under GRIMOIRE_ONEDNN=0.

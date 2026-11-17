@@ -3442,12 +3442,38 @@ inline void i4a8_load(const uint8_t* pay, int64_t row_bytes, const bf16_t* scl, 
     }
 }
 
+// INT8 weights through the same rotation (2026-11-17, opt-in GRIMOIRE_I8A8=1): GRIMOIRE's symmetric per-row
+// int8 (one f32 scale a row: --proj int8, the FP8 checkpoints Ian runs on two cards).  Before, their prompt
+// GEMMs took oneDNN's s8-weights x bf16 path (bf16 DPAS rate) and the SwiGLU gate|up a bf16 dequantize pass.
+bool i8a8_on() {
+    static const bool v = [] { const char* e = std::getenv("GRIMOIRE_I8A8"); return e && *e == '1'; }();
+    return v;
+}
+bool int8_rot_ok(const QuantWeight& w) {
+    return w.fmt == Fmt::INT8 && w.payload && w.scales && w.row_scales == 1 && w.row_bytes == int64_t(w.K) &&
+           w.K % 128 == 0 && w.N % 16 == 0;
+}
+
+// The 8 int8 values lane `lane` holds of block kb of row n, times the row's scale.
+inline void i8a8_load(const uint8_t* pay, int64_t row_bytes, const float* scl, int n, int kb, int lane,
+                      float (&v)[8]) {
+    const sycl::uint2 b = *reinterpret_cast<const sycl::uint2*>(pay + int64_t(n) * row_bytes + kb * 128 + lane * 8);
+    const float sc = scl[n];
+    #pragma unroll
+    for (int t = 0; t < 8; ++t) {
+        const uint32_t word = t < 4 ? b.x() : b.y();
+        v[t] = float(int8_t(uint8_t((word >> (8 * (t & 3))) & 0xFFu))) * sc;
+    }
+}
+
 // ws[n] = max over the row of |W_n H| / (127 * 128); 0 for an all-zero row.
 sycl::event i4a8_scales(sycl::queue& q, const QuantWeight& w, float* ws) {
     const int N = w.N, KB = w.K / 128, gsh = w.int4_gshift(), rs = w.row_scales;
     const int64_t rb = w.row_bytes;
     const uint8_t* pay = w.payload;
     const bf16_t* scl = static_cast<const bf16_t*>(w.scales);
+    const float* sclf = static_cast<const float*>(w.scales);
+    const bool i8 = w.fmt == Fmt::INT8;
     const uint8_t* zer = w.zeros;
     sycl::event e = q.memset(ws, 0, size_t(N) * sizeof(float));
     e = q.submit([&](sycl::handler& h) {
@@ -3459,7 +3485,8 @@ sycl::event i4a8_scales(sycl::queue& q, const QuantWeight& w, float* ws) {
             const int64_t g = int64_t(it.get_global_id(0)) / 16;
             const int n = int(g / KB), kb = int(g % KB);
             float v[8];
-            i4a8_load(pay, rb, scl, zer, rs, gsh, n, kb, lane, v);
+            if (i8) i8a8_load(pay, rb, sclf, n, kb, lane, v);
+            else i4a8_load(pay, rb, scl, zer, rs, gsh, n, kb, lane, v);
             hadamard128_sg(sg, lane, v);
             float m = 0.f;
             #pragma unroll
@@ -3485,6 +3512,8 @@ sycl::event i4a8_weight(sycl::queue& q, const QuantWeight& w, const float* ws, i
     const int64_t rb = w.row_bytes;
     const uint8_t* pay = w.payload;
     const bf16_t* scl = static_cast<const bf16_t*>(w.scales);
+    const float* sclf = static_cast<const float*>(w.scales);
+    const bool i8 = w.fmt == Fmt::INT8;
     const uint8_t* zer = w.zeros;
     return q.submit([&](sycl::handler& h) {
         h.depends_on(deps);
@@ -3495,7 +3524,8 @@ sycl::event i4a8_weight(sycl::queue& q, const QuantWeight& w, const float* ws, i
             const int64_t g = int64_t(it.get_global_id(0)) / 16;
             const int n = int(g / KB), kb = int(g % KB);
             float v[8];
-            i4a8_load(pay, rb, scl, zer, rs, gsh, n, kb, lane, v);
+            if (i8) i8a8_load(pay, rb, sclf, n, kb, lane, v);
+            else i4a8_load(pay, rb, scl, zer, rs, gsh, n, kb, lane, v);
             hadamard128_sg(sg, lane, v);
             const float s = ws[n];
             const float inv = s > 0.f ? 1.f / (s * 128.f) : 0.f;
@@ -3534,8 +3564,29 @@ QuantWeight i4a8_view(const QuantWeight& w, const int8_t* w8, const float* ws) {
     return v;
 }
 
+std::atomic<bool>& swiglu_post_dead() { static std::atomic<bool> d{false}; return d; }
+bool swiglu_post_on() {
+    static const bool env = [] { const char* s = std::getenv("GRIMOIRE_I4A8_SWIGLU"); return !(s && *s == '0'); }();
+    return env && !swiglu_post_dead().load();
+}
+void swiglu_post_kill(const char* why) {
+    if (!swiglu_post_dead().exchange(true))
+        std::fprintf(stderr, "  i4a8 SwiGLU post-ops OFF for this process (%s)\n", why);
+}
+
+// The rotated int8 copy of W for a weight that serves several row blocks (TP prefill's chunked FFN,
+// launch_gemm_fast_dequant / _predq): format and switches only -- no M, no i4a8_dead() -- so the dequantize
+// call and every GEMM after it take the same side.
+bool rot_predq_ok(const QuantWeight& w) {
+    const bool src_ok = w.fmt == Fmt::INT8 ? i8a8_on() && int8_rot_ok(w) : i4a8_on() && int4_stream_ok(w);
+    return src_ok && onednn_gemm_ok(i4a8_view(w, reinterpret_cast<const int8_t*>(w.payload),
+                                              static_cast<const float*>(w.scales)), 1);
+}
+
 bool i4a8_ok(const QuantWeight& w, int M) {
-    if (!i4a8_on() || i4a8_dead().load() || M < i4a8_min_m() || !int4_stream_ok(w)) return false;
+    if (i4a8_dead().load() || M < i4a8_min_m()) return false;
+    const bool src_ok = w.fmt == Fmt::INT8 ? i8a8_on() && int8_rot_ok(w) : i4a8_on() && int4_stream_ok(w);
+    if (!src_ok) return false;
     return onednn_gemm_ok(i4a8_view(w, reinterpret_cast<const int8_t*>(w.payload),
                                     static_cast<const float*>(w.scales)), M);
 }
@@ -3597,15 +3648,11 @@ sycl::event i4a8_run(sycl::queue& q, const QuantWeight& w, const sycl_bf16* x, v
     } else {
         // the SwiGLU as oneDNN post-ops (2026-11-17); GRIMOIRE_I4A8_SWIGLU=0, or no fast oneDNN kernel for the
         // shape (said once), = the f32 rows + swiglu_rows below
-        static const bool post_env = [] { const char* s = std::getenv("GRIMOIRE_I4A8_SWIGLU");
-            return !(s && *s == '0'); }();
-        static std::atomic<bool> post_dead{false};
-        if (post_env && !post_dead.load()) {
+        if (swiglu_post_on()) {
             try {
                 return onednn_gemm_a8rot_swiglu(q, v, x, static_cast<sycl_bf16*>(out), M, {e});
             } catch (const std::exception& ex) {
-                post_dead.store(true);
-                std::fprintf(stderr, "  i4a8 SwiGLU post-ops OFF for this process (%s)\n", ex.what());
+                swiglu_post_kill(ex.what());
             }
         }
         const int FI = N / 2;
@@ -3782,6 +3829,10 @@ size_t gemm_fast_predq_elems(const QuantWeight& w) {
 sycl::event launch_gemm_fast_dequant(sycl::queue& q, const QuantWeight& w, sycl_bf16* wdq,
                                      const std::vector<sycl::event>& deps) {
 #ifdef GRIMOIRE_WITH_ONEDNN
+    // INT4 (GRIMOIRE_I4A8, default) / INT8 (GRIMOIRE_I8A8=1) prompts as int8 x int8 (2026-11-17): the rotated
+    // int8 copy of W into the caller's buffer (1 byte a weight; the buffer holds 2), once per layer
+    if (rot_predq_ok(w))
+        return i4a8_weight(q, w, i4a8_scales_for(q, w), reinterpret_cast<int8_t*>(wdq), deps);
     // oneDNN reads W as stored (launch_gemm_fast_predq below), so nothing to decode.
     if (onednn_gemm_ok(w, 1)) return q.ext_oneapi_submit_barrier(deps);
 #endif
@@ -3797,10 +3848,34 @@ sycl::event launch_gemm_fast_predq(sycl::queue& q, const QuantWeight& w, const s
                                    const sycl_bf16* x, float* y, int M,
                                    const std::vector<sycl::event>& deps) {
 #ifdef GRIMOIRE_WITH_ONEDNN
+    if (rot_predq_ok(w))
+        return onednn_gemm_a8rot(q, i4a8_view(w, reinterpret_cast<const int8_t*>(wdq), i4a8_scales_for(q, w)),
+                                 x, y, M, false, deps);
     if (onednn_gemm_ok(w, M)) return onednn_gemm(q, w, x, y, M, false, deps);
 #endif
     const int Np = (w.N + NC2 - 1) / NC2 * NC2;
     return gemm_bf16_vnni<0>(q, x, wdq, y, M, w.N, w.K, deps, Np);
+}
+
+// The gate|up GEMM of a pre-dequantized weight with the SwiGLU fused (h = silu(g) * u, bf16 [M][N/2]), when W
+// went the rotated int8 way and oneDNN takes the post-ops.  false = nothing launched: the caller runs
+// launch_gemm_fast_predq and its own SwiGLU pass.
+bool launch_gemm_fast_predq_swiglu(sycl::queue& q, const QuantWeight& w, const sycl_bf16* wdq,
+                                   const sycl_bf16* x, sycl_bf16* h, int M,
+                                   const std::vector<sycl::event>& deps) {
+#ifdef GRIMOIRE_WITH_ONEDNN
+    if (!rot_predq_ok(w) || !swiglu_post_on() || w.N % 2 != 0) return false;
+    try {
+        onednn_gemm_a8rot_swiglu(q, i4a8_view(w, reinterpret_cast<const int8_t*>(wdq), i4a8_scales_for(q, w)),
+                                 x, h, M, deps);
+        return true;
+    } catch (const std::exception& ex) {
+        swiglu_post_kill(ex.what());
+    }
+#else
+    (void)q; (void)w; (void)wdq; (void)x; (void)h; (void)M; (void)deps;
+#endif
+    return false;
 }
 
 #ifndef GRIMOIRE_WITH_ONEDNN

@@ -20892,11 +20892,14 @@ bool Grimoire::prefill(const std::vector<int32_t>& tokens,
                 mk("wait: attention all-reduce of the rows");
                 launch_rmsnorm_residual_batched(q,bh+o,r0+o,nullptr,d.post_norm,
                     fuse?nullptr:bn+o,mc,H,cfg.rms_eps,bn_bf+o); mk("post norm");
+                // int8 x int8 weights (INT4 / INT8 prompts, 2026-11-17): SwiGLU as the GEMM's post-ops
+                if(!launch_gemm_fast_predq_swiglu(q,d.sh_gu.w,tp_wq_gu,bn_bf+o,xb+size_t(a)*FIs,mc)){
                 launch_gemm_fast_predq(q,d.sh_gu.w,tp_wq_gu,bn_bf+o,t0+size_t(a)*NG,mc); mk("FFN gate_up");
                 if(fuse)launch_swiglu_bf16_out(q,t0+size_t(a)*NG,xb+size_t(a)*FIs,mc,FIc);
                 else{
                     launch_swiglu_batched(q,t0+size_t(a)*NG,t1+size_t(a)*FIs,mc,FIc);
                     launch_f32_to_bf16(q,t1+size_t(a)*FIs,xb+size_t(a)*FIs,size_t(mc)*FIs);
+                }
                 }
                 mk("FFN swiglu");
                 launch_gemm_fast_predq(q,d.sh_down.w,tp_wq_dn,xb+size_t(a)*FIs,r0+o,mc); mk("FFN down");
@@ -21800,9 +21803,11 @@ bool Grimoire::prefill(const std::vector<int32_t>& tokens,
                 const size_t o=size_t(a);
                 launch_rmsnorm_residual_batched(q,bh+o*Hs,r0+o*Hs,nullptr,d.post_norm,
                     (norm_bf_only||dense_pure)?nullptr:bn+o*Hs,mc,H,cfg.rms_eps,bn_bf+o*Hs);
-                launch_gemm_fast_predq(q,d.sh_gu.w,tp_wq_gu,bn_bf+o*Hs,t0+o*NG,mc);
-                launch_swiglu_batched(q,t0+o*NG,t1+o*FIs,mc,FIc);
-                launch_f32_to_bf16(q,t1+o*FIs,xb+o*FIs,size_t(mc)*FIs);
+                if(!launch_gemm_fast_predq_swiglu(q,d.sh_gu.w,tp_wq_gu,bn_bf+o*Hs,xb+o*FIs,mc)){
+                    launch_gemm_fast_predq(q,d.sh_gu.w,tp_wq_gu,bn_bf+o*Hs,t0+o*NG,mc);
+                    launch_swiglu_batched(q,t0+o*NG,t1+o*FIs,mc,FIc);
+                    launch_f32_to_bf16(q,t1+o*FIs,xb+o*FIs,size_t(mc)*FIs);
+                }
                 launch_gemm_fast_predq(q,d.sh_down.w,tp_wq_dn,xb+o*FIs,r0+o*Hs,mc);
                 tp_stream_push(r0+o*Hs,size_t(mc)*Hs,1,o);
                 a+=mc;
