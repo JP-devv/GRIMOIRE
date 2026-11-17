@@ -3415,10 +3415,13 @@ bool i4a8_on() {
     static const bool v = [] { const char* e = std::getenv("GRIMOIRE_I4A8"); return !(e && *e == '0'); }();
     return v;
 }
+// Default 1024 rows (was 128 while opt-in): every call converts each weight to rotated int8 first (one B70, Swift
+// INT4: ~75 ms for the whole model), and the int8 GEMM saves ~0.12 ms a row against bf16 (4K prompt: 2,056 ->
+// 1,647 ms) -- a loss below ~640 rows (11-12: ~480 rows admitted together, TTFT 555 against 486 ms).
 int i4a8_min_m() {
     static const int v = [] {
         const char* e = std::getenv("GRIMOIRE_I4A8_MIN_M");
-        const int m = e ? std::atoi(e) : 128;
+        const int m = e && *e ? std::atoi(e) : 1024;
         return m >= 32 ? m : 32;
     }();
     return v;
