@@ -3586,8 +3586,20 @@ bool rot_predq_ok(const QuantWeight& w) {
                                               static_cast<const float*>(w.scales)), 1);
 }
 
+// INT8 weights per call (gemm_fast_run): their other path (oneDNN s8 weights x bf16) converts nothing, so a call
+// pays the rotated copy (1 byte read + 1 written a weight) out of the int8 GEMM's gain.  MEASURED 2026-11-17, two
+// B70s, Qwen3.8-27B-Uncensored INT8, GRIMOIRE_I8A8=1 with the TP prompt's mixers converted per 1,024-row chunk:
+// pp2048 / 4096 / 16384 3,585 / 3,240 / 3,447 against 3,671 / 3,611 / 3,266 off.  So per call only from
+// GRIMOIRE_I8A8_MIN_M rows (8192); the TP FFN's once-a-layer copy (rot_predq_ok) is not affected.
+int i8a8_min_m() {
+    static const int v = [] { const char* e = std::getenv("GRIMOIRE_I8A8_MIN_M");
+        return e && *e ? std::max(32, std::atoi(e)) : 8192; }();
+    return v;
+}
+
 bool i4a8_ok(const QuantWeight& w, int M) {
     if (i4a8_dead().load() || M < i4a8_min_m()) return false;
+    if (w.fmt == Fmt::INT8 && M < i8a8_min_m()) return false;
     const bool src_ok = w.fmt == Fmt::INT8 ? i8a8_on() && int8_rot_ok(w) : i4a8_on() && int4_stream_ok(w);
     if (!src_ok) return false;
     return onednn_gemm_ok(i4a8_view(w, reinterpret_cast<const int8_t*>(w.payload),
