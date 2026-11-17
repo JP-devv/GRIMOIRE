@@ -173,9 +173,11 @@ int generate_tokens(Engine& e, const std::vector<int32_t>& prompt,
         resumed = e.restore_prefix_upto(reuse);
     }
     if(!resumed) e.reset();
-    // The tail is what is left to process.  It is never empty: prefix_reuse
-    // keeps a token back precisely so prefill still produces this request's
-    // logits rather than leaving the previous request's in place.
+    // The tail is what is left to process.  prefix_reuse keeps a token back so
+    // prefill still produces this request's logits rather than leaving the
+    // previous request's in place -- except for a prompt head saved at the
+    // prompt's END (2026-11-17), whose restore puts that row's logits back:
+    // then the tail is empty and nothing is read.
     const std::vector<int32_t> tail = resumed
         ? std::vector<int32_t>(prompt.begin()+reuse, prompt.end()) : prompt;
     // Pipeline parallel: feed a long prompt in chunks so the ranks overlap --
@@ -258,6 +260,15 @@ int generate_tokens(Engine& e, const std::vector<int32_t>& prompt,
     // with this prompt -- resumes from it instead of re-reading everything.  GRIMOIRE_PREFIX_CACHE=1 only.
     auto prefill_tail = [&]() -> bool {
         const int base = resumed ? reuse : 0;
+        // the whole prompt came from a head saved at its end: the restore put that row's logits back
+        if(tail.empty()) return true;
+        // 2026-11-17: the head after the WHOLE prompt, with its output -- one prefill, no 64-row second call
+        if(e.prefix_head_at_end(prompt.size(), base)) {
+            if(!prefill_part(tail)) return false;
+            e.sync();
+            e.save_prefix_head(prompt, true);
+            return true;
+        }
         const int h = e.prefix_head_split(prompt.size(), base);
         if(h <= base) return prefill_part(tail);
         if(!prefill_part(std::vector<int32_t>(prompt.begin() + base, prompt.begin() + h))) return false;

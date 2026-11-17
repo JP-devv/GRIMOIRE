@@ -3299,6 +3299,10 @@ struct Grimoire {
         bool head_valid = false;
         std::vector<int32_t> head_tokens;
         std::vector<PrefixLayerCache> head_layers;
+        // 2026-11-17: a head taken at the END of the prompt (no split, prefix_head_at_end) also keeps that row's
+        // hidden state and logits, so the same prompt again needs no row at all: restore, then the first token.
+        bool head_output = false;
+        float *head_hidden = nullptr, *head_logits = nullptr;
     };
     // N conversations, not one.
     //
@@ -3369,12 +3373,16 @@ struct Grimoire {
     // How many leading tokens the snapshot covers (0 == no reuse), and
     // the restore that leaves the cursor there so the rest can be
     // prefilled on top.
+    // allow_full: a prompt head with its output (head_output) may match the WHOLE prompt -- then nothing is left to
+    // read and the restore puts that row's logits back.  Only for callers that take the first token right after the
+    // restore (not the interleaved admission, whose chunks let other slots' steps overwrite s.logits).
     int  prefix_reuse(const std::vector<int32_t>& tokens,
-                      const std::vector<bool>* busy = nullptr) const;
+                      const std::vector<bool>* busy = nullptr, bool allow_full = true) const;
     bool restore_prefix_upto(int n);
     bool save_prefix(const std::vector<int32_t>& tokens, bool output_valid = true);
     int admit_sequence(const std::vector<int32_t>& prompt, const std::vector<bool>& busy);
-    int admit_pick_slot(const std::vector<int32_t>& prompt, const std::vector<bool>& busy, int& reused);
+    int admit_pick_slot(const std::vector<int32_t>& prompt, const std::vector<bool>& busy, int& reused,
+                        bool allow_full = true);
     bool interleave_ok() const;
     int admit_begin(const std::vector<int32_t>& prompt, const std::vector<bool>& busy, int& done);
     void admit_chunk(int slot, int done, const std::vector<int32_t>& chunk);
@@ -3394,10 +3402,16 @@ struct Grimoire {
     }
     // The prompt head (see PrefixCache): recurrent state after `tokens` (the prompt's first tokens.size() tokens) in
     // the current slot.  Under TP every rank must end up with the same answer, so the outcome is agreed.
-    bool save_prefix_head(const std::vector<int32_t>& tokens);
+    // with_output: the head is the whole prompt; keep the last row's hidden state and logits too.
+    bool save_prefix_head(const std::vector<int32_t>& tokens, bool with_output = false);
     // Where a prompt's head snapshot goes (0 = none): GRIMOIRE_PREFIX_HEAD_BACK (64) tokens before its end, when at
-    // least GRIMOIRE_PREFIX_HEAD_MIN (1024) new tokens are read before it.
+    // least GRIMOIRE_PREFIX_HEAD_MIN (1024) new tokens are read before it.  The split path: a DFlash drafter, or
+    // GRIMOIRE_PREFIX_HEAD_END=0.
     int prefix_head_split(size_t prompt_len, int reused) const;
+    // The head at the prompt's END (2026-11-17, default): the prompt is read in one piece and the head saved after it
+    // with its output (save_prefix_head(prompt, true)) -- no second prefill call (a 4K prompt was 4,032 + 65 rows,
+    // the 65-row call ~70-100 ms).  Same switches as prefix_head_split; not with a DFlash drafter.
+    bool prefix_head_at_end(size_t prompt_len, int reused) const;
 
     bf16_t*  embed = nullptr;
     int8_t*  embed_i8 = nullptr;
@@ -10433,7 +10447,7 @@ bool Grimoire::save_prefix(const std::vector<int32_t>& tokens, bool output_valid
 // rewound to an arbitrary point.  The only position it can resume from
 // is the one it was snapshotted at.
 int Grimoire::prefix_reuse(const std::vector<int32_t>& tokens,
-                          const std::vector<bool>* busy) const {
+                          const std::vector<bool>* busy, bool allow_full) const {
     prefix_hit = -1;
     if (!prefix_cache_usable()) return 0;
     int best = 0;
@@ -10458,7 +10472,9 @@ int Grimoire::prefix_reuse(const std::vector<int32_t>& tokens,
         const PrefixCache& c = prefix_slots[sl];
         if (!c.head_valid || (busy && (*busy)[sl])) continue;
         const size_t n = c.head_tokens.size();
-        if (n == 0 || n >= tokens.size() || int(n) <= best) continue;
+        // the whole prompt only from a head that kept its row's logits (restore_prefix_upto puts them back)
+        const bool whole_ok = allow_full && c.head_output && c.head_hidden && c.head_logits && n == tokens.size();
+        if (n == 0 || (n >= tokens.size() && !whole_ok) || int(n) <= best) continue;
         if (!std::equal(c.head_tokens.begin(), c.head_tokens.end(), tokens.begin())) continue;
         best = int(n); prefix_hit = int(sl); prefix_hit_head = true;
     }
@@ -10478,11 +10494,25 @@ int Grimoire::prefix_head_split(size_t prompt_len, int reused) const {
     // On a 64-token boundary: the DeltaNet prompt pass works in 64-token chunks counted from the start of each call,
     // so a split elsewhere would change how the rest of the prompt is chunked (and its rounding) against a request
     // read without the cache.
+    if (prefix_head_at_end(prompt_len, reused)) return 0;     // the head goes after the whole prompt instead
     const long h = (long(prompt_len) - back) / 64 * 64;
     return h - long(reused) >= long(std::max(1, min_new)) ? int(h) : 0;
 }
 
-bool Grimoire::save_prefix_head(const std::vector<int32_t>& tokens) {
+bool Grimoire::prefix_head_at_end(size_t prompt_len, int reused) const {
+    const char* hv = std::getenv("GRIMOIRE_PREFIX_HEAD");
+    if (!(hv && *hv && std::atoi(hv) != 0)) return false;
+    static const bool end_on = [] { const char* v = std::getenv("GRIMOIRE_PREFIX_HEAD_END");
+        return !(v && *v == '0'); }();
+    // a DFlash drafter prepares its context from the rows prefill read (dflash_draft after the prompt): an exact
+    // repeat would read none, so it keeps the split head
+    if (!end_on || dflash2.ok || !prefix_cache_usable()) return false;
+    static const int min_new = [] { const char* v = std::getenv("GRIMOIRE_PREFIX_HEAD_MIN");
+        return v && *v ? std::max(0, std::atoi(v)) : 1024; }();
+    return long(prompt_len) - long(reused) >= long(std::max(1, min_new));
+}
+
+bool Grimoire::save_prefix_head(const std::vector<int32_t>& tokens, bool with_output) {
     if (!prefix_cache_usable() || tokens.empty()) return false;
     const int Hv = cfg.lin_v_heads, Dv = cfg.lin_v_dim, Dk = cfg.lin_k_dim;
     const size_t dn_bytes = size_t(Hv) * Dv * Dk * sizeof(float);
@@ -10505,6 +10535,19 @@ bool Grimoire::save_prefix_head(const std::vector<int32_t>& tokens) {
                 for (auto& h : c.head_layers) for (float* p : {h.dn, h.conv}) if (p) sycl::free(p, q);
                 c.head_layers.clear();
                 std::fprintf(stderr, "  prefix head allocation failed\n");
+            }
+        }
+        c.head_output = false;
+        if (alloc && with_output) {
+            // the last row's hidden state (the MTP head's input at the first decode step) and logits (the first
+            // token), so an exact repeat reads no row at all
+            if (!c.head_hidden) c.head_hidden = sycl::malloc_device<float>(size_t(cfg.hidden), q);
+            if (!c.head_logits) c.head_logits = sycl::malloc_device<float>(size_t(cfg.vocab), q);
+            if (c.head_hidden && c.head_logits) {
+                q.memcpy(c.head_hidden, s.h, size_t(cfg.hidden) * sizeof(float));
+                q.memcpy(c.head_logits, s.logits, size_t(cfg.vocab) * sizeof(float));
+                g_prefix_bytes_copied += long((size_t(cfg.hidden) + size_t(cfg.vocab)) * sizeof(float));
+                c.head_output = true;
             }
         }
         if (alloc) {
@@ -11474,13 +11517,20 @@ bool Grimoire::restore_prefix_upto(int n) {
             if (d.dn_state) { q.memcpy(d.dn_state, h.dn, dn_bytes); g_prefix_bytes_copied += long(dn_bytes); }
             if (d.conv_ring) { q.memcpy(d.conv_ring, h.conv, conv_bytes); g_prefix_bytes_copied += long(conv_bytes); }
         }
+        // a head at the prompt's end: its row's hidden state and logits too (an exact repeat reads nothing after
+        // this; a longer prompt's prefill overwrites them)
+        if (c.head_output && c.head_hidden && c.head_logits) {
+            q.memcpy(s.h, c.head_hidden, size_t(cfg.hidden) * sizeof(float));
+            q.memcpy(s.logits, c.head_logits, size_t(cfg.vocab) * sizeof(float));
+            g_prefix_bytes_copied += long((size_t(cfg.hidden) + size_t(cfg.vocab)) * sizeof(float));
+        }
         c.valid = false;
         pos = n;
         set_cursor(pos);
         q.wait_and_throw();
         ++g_prefix_tokens_reused_calls;
         g_prefix_tokens_reused += n;
-        std::printf("  prefix cache HIT (prompt head): %d tokens\n", n);
+        std::printf("  prefix cache HIT (prompt head%s): %d tokens\n", c.head_output ? " at its end" : "", n);
         return true;
     }
     PrefixCache& prefix_cache = prefix_slots[size_t(prefix_hit)];
@@ -11573,11 +11623,11 @@ bool Grimoire::admit_batch(const std::vector<const std::vector<int32_t>*>& promp
 // prefix of it (reused = its length), else an idle slot without a valid
 // snapshot, else the least recently used idle one.
 int Grimoire::admit_pick_slot(const std::vector<int32_t>& prompt,
-                              const std::vector<bool>& busy, int& reused) {
+                              const std::vector<bool>& busy, int& reused, bool allow_full) {
     if (busy.size() != size_t(n_seq_slots))
         throw std::invalid_argument("sequence ownership size mismatch");
     sync();
-    reused = prefix_reuse(prompt, &busy);
+    reused = prefix_reuse(prompt, &busy, allow_full);
     int slot = reused ? prefix_hit : -1;
     if (slot < 0) {
         for (int i=0; i<n_seq_slots; ++i) {
@@ -11610,7 +11660,8 @@ bool Grimoire::interleave_ok() const {
 int Grimoire::admit_begin(const std::vector<int32_t>& prompt,
                           const std::vector<bool>& busy, int& done) {
     int reused = 0;
-    const int slot = admit_pick_slot(prompt, busy, reused);
+    // not the whole prompt: the decode steps between this and the first token would overwrite restored logits
+    const int slot = admit_pick_slot(prompt, busy, reused, false);
     try {
         if (reused) {
             prefix_hit = slot;
@@ -11723,6 +11774,13 @@ int Grimoire::admit_sequence(const std::vector<int32_t>& prompt,
         };
         // the prompt head (Grimoire::save_prefix_head), as generate_tokens() does for a lone request
         auto prefill_tail = [&]() -> bool {
+            if (tail.empty()) return true;          // the whole prompt from a head at its end: logits restored
+            if (prefix_head_at_end(prompt.size(), reused)) {
+                if (!prefill_part(tail)) return false;
+                sync();
+                save_prefix_head(prompt, true);
+                return true;
+            }
             const int h = prefix_head_split(prompt.size(), reused);
             if (h <= reused) return prefill_part(tail);
             if (!prefill_part(std::vector<int32_t>(prompt.begin() + reused, prompt.begin() + h))) return false;
