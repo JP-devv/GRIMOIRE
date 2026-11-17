@@ -1131,6 +1131,28 @@ sycl::event flash_fast_impl(sycl::queue& q, const float* qv, const uint8_t* kc,
             const int s_first = window > 0
                 ? sycl::max(0, start + r0 - window + 1) / BK * BK : 0;
             for (int s0 = s_first; s0 < kmax; s0 += BK) {
+                // QSA (2026-11-17): a key block that no row of this tile attends -- every key outside its
+                // selected blocks and before its own tail block -- leaves m, l and o exactly as they are (scores
+                // -inf: corr 1, or 0 on an empty row, and P 0), so it is skipped instead of multiplied and masked.
+                // A long prompt's sparse rows keep 2,048 tokens each, and this loop ran over all of them.
+                if (qbits) {
+                    bool any = false;
+                    const int b_lo = s0 / qrat, b_hi = (s0 + BK - 1) / qrat;
+                    const int nb = b_hi - b_lo + 1;
+                    for (int i = lane; i < RB * nb && !any; i += SG_SIZE) {
+                        const int r = i / nb, t = r0 + r;
+                        if (t >= tokens) continue;
+                        const int qpos = start + t;
+                        const int b = b_lo + i % nb;
+                        const int k_first = sycl::max(b * qrat, s0);
+                        if (k_first > qpos) continue;                       // causal: none of its keys yet
+                        const int tail = (qpos + 1) / qrat * qrat;
+                        if ((b + 1) * qrat - 1 >= tail) { any = true; break; }  // reaches the row's own tail
+                        const uint32_t* rb = qbits + size_t(t) * qwords;
+                        if ((rb[b >> 5] >> (b & 31)) & 1u) any = true;
+                    }
+                    if (!sycl::any_of_group(sg, any)) continue;
+                }
                 matrix::joint_matrix<sycl::sub_group, float, matrix::use::accumulator, TM, TN>
                     sa[BK / TN];
                 #pragma unroll

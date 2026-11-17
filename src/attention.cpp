@@ -200,6 +200,12 @@ static sycl::event launch_flash_decode_impl(sycl::queue& q, const AttnParams& p,
                         const int b = s / pp.qrat;
                         live = s >= tail || ((pp.qbits[b >> 5] >> (b & 31)) & 1u);
                     }
+                    // QSA (2026-11-17): a 16-key block with no selected key leaves m, l and acc exactly as they are
+                    // (every score -inf: mnew = m, corr 1 -- or 0 on a still-empty accumulator -- and pj 0), so it
+                    // is skipped instead of scored and its V rows read.  Before, the decode attended the whole
+                    // sequence and masked it: Flash-Next two B70s, tg128 ~53 tok/s at 2K, 19.9 at 60K, where the
+                    // indexer keeps 2,048 tokens.
+                    if (pp.qbits && !sycl::any_of_group(sg, live)) continue;
                     if (live) {
                         // 16 K bytes in flight per lane before their FMAs:
                         // the plain loop issued one dependent load per dim
@@ -368,13 +374,31 @@ static sycl::event flash_decode_gqa(sycl::queue& q, const AttnParams& p,
                 for (int b0 = s_beg & ~(KPL - 1); b0 < s_end; b0 += KB) {
                     const int sk = b0 + lane * KPL;
 
+                    // QSA (2026-11-17): which of this lane's keys are selected, BEFORE their K bytes are read --
+                    // a block with none leaves m, l and acc exactly as they are (all scores -inf), so it is
+                    // skipped, and a lane with none skips its K loads (its scores were discarded anyway).
+                    bool live[KPL];
+                    bool lane_live = false;
+                    #pragma unroll
+                    for (int k = 0; k < KPL; ++k) {
+                        const int s = sk + k;
+                        live[k] = s >= s_beg && s < s_end;
+                        if (live[k] && pp.qbits) {        // QSA: selected blocks + tail
+                            const int tail = seq / pp.qrat * pp.qrat;
+                            const int b = s / pp.qrat;
+                            live[k] = s >= tail || ((pp.qbits[b >> 5] >> (b & 31)) & 1u);
+                        }
+                        lane_live |= live[k];
+                    }
+                    if (pp.qbits && !sycl::any_of_group(sg, lane_live)) continue;
+
                     // ---- scores: 4 keys x GC heads per 32-bit K load ------
                     float sc[GC][KPL];
                     #pragma unroll
                     for (int g = 0; g < GC; ++g)
                         #pragma unroll
                         for (int k = 0; k < KPL; ++k) sc[g][k] = 0.0f;
-                    if (sk < s_end) {
+                    if (sk < s_end && (lane_live || !pp.qbits)) {
                         const uint8_t* kc = kh + sk;
                         #pragma unroll 8
                         for (int d = 0; d < HD; ++d) {
@@ -393,18 +417,6 @@ static sycl::event flash_decode_gqa(sycl::queue& q, const AttnParams& p,
                             }
                         }
                     }
-                    bool live[KPL];
-                    #pragma unroll
-                    for (int k = 0; k < KPL; ++k) {
-                        const int s = sk + k;
-                        live[k] = s >= s_beg && s < s_end;
-                        if (live[k] && pp.qbits) {        // QSA: selected blocks + tail
-                            const int tail = seq / pp.qrat * pp.qrat;
-                            const int b = s / pp.qrat;
-                            live[k] = s >= tail || ((pp.qbits[b >> 5] >> (b & 31)) & 1u);
-                        }
-                    }
-
                     // ---- sub-group-uniform online softmax, per head ------
                     float pr[GC][KPL];
                     #pragma unroll
