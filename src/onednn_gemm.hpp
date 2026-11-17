@@ -59,6 +59,11 @@ sycl::event onednn_gemm_int4(sycl::queue& q, const QuantWeight& w, const sycl_bf
 sycl::event onednn_gemm_a8rot(sycl::queue& q, const QuantWeight& w, const sycl_bf16* x, float* y,
                               int M, bool accumulate, const std::vector<sycl::event>& deps);
 
+// The same for a gate|up weight [2 FI][K] (gate rows first): h[M][FI] (bf16) = silu(x Wg^T) * (x Wu^T), the
+// SwiGLU as oneDNN post-ops (swish, then a multiply by the up rows), no f32 gate|up block in memory.
+sycl::event onednn_gemm_a8rot_swiglu(sycl::queue& q, const QuantWeight& w, const sycl_bf16* x, sycl_bf16* h,
+                                     int M, const std::vector<sycl::event>& deps);
+
 } // namespace b70
 
 #endif

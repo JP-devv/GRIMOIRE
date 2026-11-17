@@ -90,18 +90,19 @@ bool exact_m() {
 }
 
 struct Key {
-    int fmt, M, N, K, acc, a8, rot;
+    int fmt, M, N, K, acc, a8, rot, swi;
     bool operator<(const Key& o) const {
-        return std::tie(fmt, M, N, K, acc, a8, rot) <
-               std::tie(o.fmt, o.M, o.N, o.K, o.acc, o.a8, o.rot);
+        return std::tie(fmt, M, N, K, acc, a8, rot, swi) <
+               std::tie(o.fmt, o.M, o.N, o.K, o.acc, o.a8, o.rot, o.swi);
     }
 };
 
 struct Prim {
     dnnl::matmul       prim;
-    dnnl::memory::desc src, wei, dst, scr, scl, ascl;
+    dnnl::memory::desc src, wei, dst, scr, scl, ascl, bin;
     bool a8=false;
     bool rot=false;   // a8 source in the 128-point Hadamard domain (onednn_gemm_a8rot)
+    bool swi=false;   // SwiGLU's gate half: bf16 dst = swish(acc) * bin (onednn_gemm_a8rot_swiglu)
 };
 
 struct Ctx {
@@ -118,6 +119,10 @@ struct Ctx {
     size_t               x8_cap = 0;
     float*               as = nullptr;
     size_t               as_cap = 0;
+    float*               us = nullptr;       // SwiGLU: the up half's rows of one piece (f32)
+    size_t               us_cap = 0;
+    sycl_bf16*           hs = nullptr;       // SwiGLU: the staged tail's output rows
+    size_t               hs_cap = 0;
 };
 
 std::mutex& mu() { static std::mutex m; return m; }
@@ -146,7 +151,7 @@ void grow(sycl::queue& q, T*& p, size_t& cap, size_t need, const char* what) {
 }
 
 const Prim& prim_for(sycl::queue& q, Ctx& c, const QuantWeight& w, int M, bool acc,
-                     bool rot = false) {
+                     bool rot = false, bool swi = false) {
     static const int requested=[] {
         const char* e=std::getenv("GRIMOIRE_ONEDNN_W8A8");return e?std::atoi(e):0;
     }();
@@ -157,9 +162,10 @@ const Prim& prim_for(sycl::queue& q, Ctx& c, const QuantWeight& w, int M, bool a
     // rot: the caller (gemm_fast.cpp, INT4 prompts) rebuilt W as rotated int8 and wants the
     // source rotated the same way -- always int8 x int8.
     const bool a8=rot || (selected&&w.fmt==Fmt::INT8&&M>=32&&w.N>=256&&w.K%64==0);
-    const Key k{int(w.fmt), M, w.N, w.K, acc ? 1 : 0, a8?1:0, rot?1:0};
+    const Key k{int(w.fmt), M, w.N, w.K, acc ? 1 : 0, a8?1:0, rot?1:0, swi?1:0};
     auto it = c.prims.find(k);
     if (it != c.prims.end()) return it->second;
+    if (swi && (acc || !rot)) throw std::runtime_error("oneDNN SwiGLU primitive: rotated int8 source only, no sum");
     const auto t0 = std::chrono::steady_clock::now();
     const bool fp8 = w.fmt == Fmt::FP8_E4M3;
     // INT8 (2026-10-29): GRIMOIRE's symmetric per-row int8 -- the same layout as its FP8, one
@@ -170,10 +176,11 @@ const Prim& prim_for(sycl::queue& q, Ctx& c, const QuantWeight& w, int M, bool a
     Prim p;
     p.a8=a8;
     p.rot=rot;
+    p.swi=swi;
     p.src = dnnl::memory::desc({M, w.K}, a8?dt::s8:dt::bf16, tag::ab);
     // W is [N][K] row-major: oneDNN's [K][N] weights in the transposed tag.
     p.wei = dnnl::memory::desc({w.K, w.N}, fp8 ? dt::f8_e4m3 : s8 ? dt::s8 : dt::bf16, tag::ba);
-    p.dst = dnnl::memory::desc({M, w.N}, dt::f32, tag::ab);
+    p.dst = dnnl::memory::desc({M, w.N}, swi ? dt::bf16 : dt::f32, tag::ab);
     dnnl::primitive_attr attr;
     attr.set_scratchpad_mode(dnnl::scratchpad_mode::user);
     attr.set_deterministic(true);
@@ -190,30 +197,45 @@ const Prim& prim_for(sycl::queue& q, Ctx& c, const QuantWeight& w, int M, bool a
         po.append_sum(1.0f);
         attr.set_post_ops(po);
     }
+    if (swi) {
+        // SwiGLU's gate half (2026-11-17): after the scales, swish(g) = g / (1 + exp(-g)), times the up half's
+        // f32 rows (post-op 1's src), rounded once to the bf16 dst -- the f32 gate|up rows never reach memory
+        dnnl::post_ops po;
+        po.append_eltwise(dnnl::algorithm::eltwise_swish, 1.0f, 0.0f);
+        p.bin = dnnl::memory::desc({M, w.N}, dt::f32, tag::ab);
+        po.append_binary(dnnl::algorithm::binary_mul, p.bin);
+        attr.set_post_ops(po);
+    }
     dnnl::matmul::primitive_desc pd(c.eng, p.src, p.wei, p.dst, attr);
     if(a8&&std::string(pd.impl_info_str()).find(":ref:")!=std::string::npos)
-        throw std::runtime_error("oneDNN W8A8: only a reference implementation is available for this shape");
+        throw std::runtime_error(swi ? "oneDNN W8A8 SwiGLU: only a reference implementation for this shape"
+                                     : "oneDNN W8A8: only a reference implementation is available for this shape");
     p.scr  = pd.scratchpad_desc();
     p.prim = dnnl::matmul(pd);
     grow(q, c.scratch, c.scratch_cap, p.scr.get_size(), "scratchpad");
     static const bool verbose = std::getenv("GRIMOIRE_ONEDNN_VERBOSE") != nullptr;
     if (verbose)
         std::fprintf(stderr, "  oneDNN matmul %s M=%d N=%d K=%d%s: %s, scratchpad %zu B, "
-                     "created in %.1f ms\n", a8?"W8A8":fp8 ? "fp8" : s8 ? "s8" : "bf16", M, w.N, w.K,
+                     "created in %.1f ms\n", swi ? "W8A8 swiglu" : a8?"W8A8":fp8 ? "fp8" : s8 ? "s8" : "bf16", M, w.N, w.K,
                      acc ? " (+=)" : "", pd.impl_info_str(), p.scr.get_size(),
                      std::chrono::duration<double, std::milli>(
                          std::chrono::steady_clock::now() - t0).count());
     return c.prims.emplace(k, std::move(p)).first->second;
 }
 
-// One primitive over exactly its own row count, x and y at those rows.
-sycl::event exec(sycl::queue& q,Ctx& c, const Prim& p, const QuantWeight& w, const sycl_bf16* x, float* y,
-                 const std::vector<sycl::event>& deps) {
+// One primitive over exactly its own row count, x and y at those rows.  `preq`: an a8 primitive whose
+// source rows are already in c.x8 / c.as (the call before quantized the same x rows); `bin`: a SwiGLU
+// primitive's up-half rows.
+sycl::event exec(sycl::queue& q,Ctx& c, const Prim& p, const QuantWeight& w, const sycl_bf16* x, void* y,
+                 const std::vector<sycl::event>& deps, const float* bin = nullptr, bool preq = false) {
     using namespace dnnl::sycl_interop;
     std::unordered_map<int, dnnl::memory> args;
     std::vector<sycl::event> ready=deps;
     void* source=const_cast<sycl_bf16*>(x);
-    if(p.a8){
+    if(p.a8&&preq){
+        source=c.x8;
+        args[DNNL_ARG_ATTR_SCALES|DNNL_ARG_SRC]=make_memory(p.ascl,c.eng,memory_kind::usm,c.as);
+    }else if(p.a8){
         const int M=int(p.src.get_dims()[0]),K=w.K;
         grow(q,c.x8,c.x8_cap,size_t(M)*K,"int8 activations");
         grow(q,c.as,c.as_cap,size_t(M),"activation scales");
@@ -292,6 +314,9 @@ sycl::event exec(sycl::queue& q,Ctx& c, const Prim& p, const QuantWeight& w, con
     if (w.fmt == Fmt::FP8_E4M3 || w.fmt == Fmt::INT8)
         args[DNNL_ARG_ATTR_SCALES | DNNL_ARG_WEIGHTS] =
             make_memory(p.scl, c.eng, memory_kind::usm, const_cast<void*>(w.scales));
+    if (p.swi)
+        args[DNNL_ARG_ATTR_MULTIPLE_POST_OP(1) | DNNL_ARG_SRC_1] =
+            make_memory(p.bin, c.eng, memory_kind::usm, const_cast<float*>(bin));
     return execute(p.prim, c.strm, args, ready);
 }
 
@@ -518,5 +543,54 @@ sycl::event gemm_impl(sycl::queue& q, const QuantWeight& w, const sycl_bf16* x, 
     return e;
 }
 } // namespace
+
+// SwiGLU (2026-11-17): w = the rotated int8 gate|up rows [2 FI][K] (gate first, as swiglu_rows reads them).
+// Per piece of rows: x quantized once; the up half into f32 rows (c.us); the gate half with swish and the
+// multiply by those rows as post-ops, written as bf16 h [M][FI].  Before, the whole f32 gate|up block went
+// through memory and a separate SwiGLU kernel (Qwen3.8-27B, 4K prompt: ~1.26 GB a layer).  Same pieces and
+// staged tails as gemm_impl.  Throws before its first launch when oneDNN has no fast kernel for a shape.
+sycl::event onednn_gemm_a8rot_swiglu(sycl::queue& q, const QuantWeight& w, const sycl_bf16* x, sycl_bf16* h,
+                                     int M, const std::vector<sycl::event>& deps) {
+    if (w.fmt != Fmt::INT8 || w.K % 128 != 0 || w.N % 2 != 0 || !onednn_gemm_ok(w, M))
+        throw std::runtime_error("onednn_gemm_a8rot_swiglu: needs INT8 [2 FI][K] with per-row scales, K % 128 == 0");
+    std::lock_guard<std::mutex> lk(mu());
+    Ctx& c = ctx_for(q);
+    const int FI = w.N / 2;
+    const size_t K = size_t(w.K);
+    QuantWeight gw = w; gw.N = FI;
+    QuantWeight uw = w; uw.N = FI;
+    uw.payload = w.payload + size_t(FI) * K;
+    uw.scales = static_cast<const float*>(w.scales) + FI;
+    auto piece = [&](int P, const sycl_bf16* xin, sycl_bf16* hout, const std::vector<sycl::event>& d) {
+        const Prim& pu = prim_for(q, c, uw, P, false, true, false);
+        const Prim& pg = prim_for(q, c, gw, P, false, true, true);
+        grow(q, c.us, c.us_cap, size_t(P) * FI, "SwiGLU up rows");
+        const sycl::event e = exec(q, c, pu, uw, xin, c.us, d);           // quantizes xin into c.x8 / c.as
+        return exec(q, c, pg, gw, xin, hout, {e}, c.us, true);            // the same quantized rows
+    };
+    std::vector<sycl::event> d = deps;
+    sycl::event e;
+    int r0 = 0;
+    for (const int P : kPieces)
+        while (M - r0 >= P) {
+            e = piece(P, x + size_t(r0) * K, h + size_t(r0) * FI, d);
+            d = {e};
+            r0 += P;
+        }
+    const int rem = M - r0;
+    if (rem > 0) {
+        int T = kTails[2];
+        for (const int t : kTails) if (rem <= t) { T = t; break; }
+        if (size_t(T) * K > c.xs_cap) {
+            grow(q, c.xs, c.xs_cap, size_t(T) * K, "staging");
+            q.memset(c.xs, 0, c.xs_cap * sizeof(sycl_bf16)).wait();
+        }
+        grow(q, c.hs, c.hs_cap, size_t(T) * FI, "SwiGLU staging");
+        e = q.memcpy(c.xs, x + size_t(r0) * K, size_t(rem) * K * sizeof(sycl_bf16), d);
+        e = piece(T, c.xs, c.hs, {e});
+        e = q.memcpy(h + size_t(r0) * FI, c.hs, size_t(rem) * FI * sizeof(sycl_bf16), {e});
+    }
+    return e;
+}
 
 } // namespace b70

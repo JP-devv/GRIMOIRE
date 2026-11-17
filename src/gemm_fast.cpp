@@ -3408,8 +3408,11 @@ sycl::event i4_pieces_run(sycl::queue& q, const QuantWeight& w, const sycl_bf16*
 #ifdef GRIMOIRE_WITH_ONEDNN
 namespace {
 
+// ON by default since 2026-11-17 (Ian: the fastest engine; one B70, Swift INT4, llama-benchy pp4096 1,992 -> 2,488
+// tok/s; quality measured 11-15: KL to the bf16 path 0.0087, top-1 against BF16 84.4% both ways).
+// GRIMOIRE_I4A8=0 = the bf16 prompt GEMM as before.
 bool i4a8_on() {
-    static const bool v = [] { const char* e = std::getenv("GRIMOIRE_I4A8"); return e && *e == '1'; }();
+    static const bool v = [] { const char* e = std::getenv("GRIMOIRE_I4A8"); return !(e && *e == '0'); }();
     return v;
 }
 int i4a8_min_m() {
@@ -3592,6 +3595,19 @@ sycl::event i4a8_run(sycl::queue& q, const QuantWeight& w, const sycl_bf16* x, v
     if constexpr (EPI != 1) {
         return onednn_gemm_a8rot(q, v, x, static_cast<float*>(out), M, EPI == 2, {e});
     } else {
+        // the SwiGLU as oneDNN post-ops (2026-11-17); GRIMOIRE_I4A8_SWIGLU=0, or no fast oneDNN kernel for the
+        // shape (said once), = the f32 rows + swiglu_rows below
+        static const bool post_env = [] { const char* s = std::getenv("GRIMOIRE_I4A8_SWIGLU");
+            return !(s && *s == '0'); }();
+        static std::atomic<bool> post_dead{false};
+        if (post_env && !post_dead.load()) {
+            try {
+                return onednn_gemm_a8rot_swiglu(q, v, x, static_cast<sycl_bf16*>(out), M, {e});
+            } catch (const std::exception& ex) {
+                post_dead.store(true);
+                std::fprintf(stderr, "  i4a8 SwiGLU post-ops OFF for this process (%s)\n", ex.what());
+            }
+        }
         const int FI = N / 2;
         constexpr int R = 1024;
         float* yt = grow(q, s.y8, s.y8_cap, size_t(std::min(M, R)) * N);
