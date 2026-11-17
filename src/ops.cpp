@@ -3240,17 +3240,36 @@ sycl::event launch_qsa_topk_blocks(sycl::queue& q, const float* logits,
                     }
                     sycl::group_barrier(it.get_group());
                 }
-                if (lane == 0) {
-                    const uint32_t thr = sel[0];
-                    uint32_t ties = sel[2];
-                    int c = 0;
-                    for (int n = 0; n < vis && c < topk; ++n) {
-                        const uint32_t k = key_of(lg[n]);
-                        if (k > thr) o[c++] = n;
-                        else if (k == thr && ties) { o[c++] = n; --ties; }
-                    }
-                    for (; c < topk; ++c) o[c] = -1;
+                // The ordered scan over all lanes (2026-11-17; was lane 0 alone over every visible block --
+                // ~15K at 60K tokens, per QSA layer and decode token): each lane takes a contiguous range,
+                // counts its keys above the threshold and its ties, an exclusive scan gives every lane its
+                // first output slot and the ties before it, and the lane writes its picks in index order --
+                // the same set and order as the serial scan (ties: the lowest indices first).
+                const uint32_t thr = sel[0];
+                const uint32_t ties_all = sel[2];
+                const int per = (vis + WG - 1) / WG;
+                const int n0 = sycl::min(vis, lane * per), n1 = sycl::min(vis, n0 + per);
+                uint32_t above = 0u, tie = 0u;
+                for (int n = n0; n < n1; ++n) {
+                    const uint32_t k = key_of(lg[n]);
+                    above += k > thr ? 1u : 0u;
+                    tie += k == thr ? 1u : 0u;
                 }
+                const uint32_t above_before = sycl::exclusive_scan_over_group(it.get_group(), above,
+                                                                              sycl::plus<uint32_t>());
+                const uint32_t tie_before = sycl::exclusive_scan_over_group(it.get_group(), tie,
+                                                                            sycl::plus<uint32_t>());
+                uint32_t ties_left = tie_before < ties_all ? ties_all - tie_before : 0u;
+                int c = int(above_before + (tie_before < ties_all ? tie_before : ties_all));
+                for (int n = n0; n < n1 && c < topk; ++n) {
+                    const uint32_t k = key_of(lg[n]);
+                    if (k > thr) o[c++] = n;
+                    else if (k == thr && ties_left) { o[c++] = n; --ties_left; }
+                }
+                const uint32_t total = sycl::reduce_over_group(it.get_group(),
+                    above + (tie_before < ties_all ? sycl::min(tie, ties_all - tie_before) : 0u),
+                    sycl::plus<uint32_t>());
+                for (int k = int(total) + lane; k < topk; k += WG) o[k] = -1;
             });
     });
 }
