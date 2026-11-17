@@ -13928,11 +13928,14 @@ const float* Grimoire::forward_qwen4_exp(int token) {
     auto tld = [&](int li, const char* step) {
         if (li == tl_l1 || li == tl_l2) tlm(li, step);
     };
+    // GRIMOIRE_TIMELINE_POS=<n>: count tokens (GRIMOIRE_TIMELINE_TOKEN) only from position n on -- a token deep in a
+    // long prompt's reply, not the warm-up's
+    static const int tl_min_pos = [] { const char* e = std::getenv("GRIMOIRE_TIMELINE_POS"); return e ? std::atoi(e) : 0; }();
     auto tl_end = [&]() {
         if (!timeline) return;
         q.wait();
         if (!tl_done && tl_tok == kTlToken) { dump_timeline(); tl_done = true; tl.clear(); }
-        ++tl_tok;
+        if (pos >= tl_min_pos) ++tl_tok;
     };
     mark("start");
 
