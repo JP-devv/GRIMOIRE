@@ -20281,7 +20281,12 @@ bool Grimoire::prefill(const std::vector<int32_t>& tokens,
         if(dpas_ok || (M>=2 && M<=16 && !exact_verify && !smallm_gemv && sh_tab && sh_tiles==1 &&
            w.w.payload && !w.has_i4() && moe_mxfp4_grouped_esimd(w.w,w.w.N,false))){
             const size_t need=size_t(M)*size_t(w.w.K);
-            const bool from_bn = x==bn && bn_bf_sync && w.w.K==H;
+            // dense_pure (one card, dense model, a 32+ row prompt) writes only bn_bf, not the fp32 bn: there bn_bf IS
+            // the input, as the large-M path below takes it (x_bf=bn_bf whenever x==bn).  Before 2026-11-17 this
+            // path converted the stale fp32 bn: since kSpecBatch 64 (11-14) a 32..64-row prompt took it on one card
+            // -- Qwen3.8-27B INT8 one B70, "capital of France?" -> "utting_advanced_advanced..." (v1.10.7 too), INT4
+            // at exactly 32 rows.  GRIMOIRE_SMALLM_VERIFY could not see it: its reference read the same stale bn.
+            const bool from_bn = x==bn && (bn_bf_sync || dense_pure) && w.w.K==H;
             if(!from_bn && need>smallm_cap){
                 if(smallm_bf){ q.wait(); sycl::free(smallm_bf,q); }
                 smallm_bf=sycl::malloc_device<sycl_bf16>(need,q);
