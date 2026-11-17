@@ -51,6 +51,7 @@
 #include "native_smallm.hpp"
 #include "hadamard128.hpp"
 #include "flash_team.hpp"
+#include "flash_team_i8.hpp"
 #include <sycl/ext/oneapi/matrix/matrix.hpp>
 #include <sycl/ext/intel/esimd.hpp>
 #include <sycl/ext/oneapi/experimental/prefetch.hpp>
@@ -772,6 +773,11 @@ struct FlashScratch {
     sycl_bf16* kp = nullptr; size_t kp_cap = 0;
     sycl_bf16* vp = nullptr; size_t vp_cap = 0;
     sycl_bf16* qb = nullptr; size_t qb_cap = 0; // Q * scale*log2(e), [H][Tp][D]
+    // int8 S (GRIMOIRE_FLASH_I8, int8 keys): K [KVH][D/4][Sp] u32 + scales, Q int8 [H][Tp][D] + row scales
+    uint32_t* ki8 = nullptr; size_t ki8_cap = 0;
+    float* ks = nullptr; size_t ks_cap = 0;
+    int8_t* qi8 = nullptr; size_t qi8_cap = 0;
+    float* qs = nullptr; size_t qs_cap = 0;
 };
 
 FlashScratch& flash_scratch_for(sycl::queue& q) {
@@ -987,6 +993,38 @@ sycl::event flash_fast_impl(sycl::queue& q, const float* qv, const uint8_t* kc,
     const bool k8 = flash_kv_kmajor() && flash_kv_k8_storage();
     // int8 keys: k = int8 * the key's scale (float[KVH][seq_cap] after the keys), rounded to bf16 once
     const float* kscl = k8 ? reinterpret_cast<const float*>(kc + size_t(KVH) * seq_cap * D) : nullptr;
+    // GRIMOIRE_FLASH_I8=1 (2026-11-17, opt-in, needs int8 keys): S = Q K^T on int8 XMX (src/flash_team_i8.hpp) --
+    // the cache's int8 keys and scales as they are, Q quantized per row.  MEASURED tools/bench_flash_i8.cpp, one B70,
+    // Qwen3.8 geometry: x1.3-1.6 the bf16 team kernel; output rms error vs exact K / V 3.0-3.1% (FP8 cache 4.5-5.4%).
+    static const bool i8s_env = [] { const char* v = std::getenv("GRIMOIRE_FLASH_I8"); return v && *v == '1'; }();
+    static const bool team_env = [] { const char* v = std::getenv("GRIMOIRE_FLASH_TEAM"); return !(v && *v == '0'); }();
+    const bool i8s = k8 && i8s_env && team_env && D == 256 && use_esimd && block >= 64 && Sp % 32 == 0;
+    if (i8s) {
+        // K: a 32-key x D/4 tile of u32 (4 dims of one key) through local memory -> [D/4][Sp]; keys past kend 0
+        constexpr int TK = 32, DQ = D / 4;
+        if (!grow(q, fs.ki8, fs.ki8_cap, size_t(KVH) * DQ * Sp) || !grow(q, fs.ks, fs.ks_cap, size_t(KVH) * Sp))
+            throw std::runtime_error("flash_fast: int8 K scratch allocation failed");
+        uint32_t* Ki8 = fs.ki8; float* KS = fs.ks;
+        e = q.submit([&](sycl::handler& h) {
+            h.depends_on(deps);
+            sycl::local_accessor<uint32_t, 1> sh(sycl::range<1>(size_t(DQ) * (TK + 1)), h);
+            h.parallel_for(sycl::nd_range<1>(size_t(KVH) * (Sp / TK) * 256, 256), [=](sycl::nd_item<1> it) {
+                const int g = int(it.get_group(0)), i = int(it.get_local_id(0));
+                const int hh = g / (Sp / TK), s0 = (g % (Sp / TK)) * TK;
+                const uint32_t* kc32 = reinterpret_cast<const uint32_t*>(kc);
+                for (int idx = i; idx < TK * DQ; idx += 256) {
+                    const int key = idx / DQ, dq = idx % DQ, s = s0 + key;
+                    sh[size_t(dq) * (TK + 1) + key] = s < kend ? kc32[(size_t(hh) * seq_cap + s) * DQ + dq] : 0u;
+                }
+                if (i < TK) KS[size_t(hh) * Sp + s0 + i] = s0 + i < kend ? kscl[size_t(hh) * seq_cap + s0 + i] : 0.0f;
+                it.barrier(sycl::access::fence_space::local_space);
+                for (int idx = i; idx < TK * DQ; idx += 256) {
+                    const int dq = idx / TK, key = idx % TK;
+                    Ki8[(size_t(hh) * DQ + dq) * Sp + s0 + key] = sh[size_t(dq) * (TK + 1) + key];
+                }
+            });
+        });
+    } else
     if (flash_kv_kmajor() && pack2 && Sp % 32 == 0) {
         // K: a 32-key x D tile through local memory -> [D/2][Sp] u32 rows of 32 keys (128 bytes per row piece)
         constexpr int TK = 32, DPR = D / 2;
@@ -1091,6 +1129,13 @@ sycl::event flash_fast_impl(sycl::queue& q, const float* qv, const uint8_t* kc,
     // 3840-token chunk 4.3 -> 2.2 ms; vs this kernel at 64-key blocks max |diff| 2e-7..8e-7 of max |out| (same math;
     // vs its default 128-key blocks 1e-4..8e-4, the block max differs).  128-key teams spilled 1,280 bytes, slower.
     static const bool team = [] { const char* v = std::getenv("GRIMOIRE_FLASH_TEAM"); return !(v && *v == '0'); }();
+    if (i8s) {
+        if (!grow(q, fs.qi8, fs.qi8_cap, size_t(H) * Tp * D) || !grow(q, fs.qs, fs.qs_cap, size_t(H) * Tp))
+            throw std::runtime_error("flash_fast: int8 Q scratch allocation failed");
+        e = flash_i8_pack_q(q, Qb, fs.qi8, fs.qs, H, Tp, D, {e});
+        if constexpr (D == 256)
+            return flash_team_i8<D, 64, 4, 2>(q, e, fs.qi8, fs.qs, Tp, fs.ki8, fs.ks, Vp, Sp, out, tokens, start, H, KVH);
+    }
     if (use_esimd && team && block >= 64)
         return flash_team<D, 64, 4, 2>(q, e, Qb, Tp, Kp, Vp, Sp, out, tokens, start, H, KVH);
     if (use_esimd && block == 128 && tpw == 16)
