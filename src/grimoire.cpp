@@ -19247,6 +19247,16 @@ bool Grimoire::prefill_qwen4_exp(const std::vector<int32_t>& tokens,
                     qsalap(3);
                     static const bool qsa_gather=std::getenv("GRIMOIRE_QSA_GATHER")!=nullptr;
                     const int qwords=(nb+31)/32;
+                    // 2026-11-18: prompt rows (not a verify) over their selected block lists (attention.cpp
+                    // launch_qsa_prefill_list): the masked XMX kernel below scans the whole context per row tile --
+                    // 1.21 s of the 8,192-row chunk at 24-32K (Flash-Next two B70s).  No bitmap needed.
+                    static const bool plist=[]{ const char* e=std::getenv("GRIMOIRE_QSA_LIST"); return !(e&&*e=='0'); }();
+                    if(!vsm&&!qsa_gather&&plist&&qsa_prefill_list_ok(HD,QH,KVH,RAT,max_seq)){
+                        qsalap(4);
+                        launch_qsa_prefill_list(q,qv+rr*QH*HD,kc,vc,attn+rr*QH*HD,sc,sp,QH,KVH,max_seq,
+                            cfg.attn_softmax_scale(HD),bsel,BTK,RAT,none);
+                        qsalap(5);
+                    } else {
                     // verify: one bitmap for the whole call (the queue is in order), not a
                     // malloc, a wait and a free in each of the QSA layers
                     if(vsm&&!vqb&&!qsa_gather&&flash_fast_supported(HD,QH,KVH)&&qwords<=(NBLK+31)/32){
@@ -19300,6 +19310,7 @@ bool Grimoire::prefill_qwen4_exp(const std::vector<int32_t>& tokens,
                         cfg.attn_softmax_scale(HD),none);
                     qsalap(5);
                     }
+                    }   // list / bitmap
                     }
                 }
             } else {

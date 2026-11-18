@@ -1125,6 +1125,13 @@ sycl::event launch_flash_decode(sycl::queue& q, const AttnParams& p,
 // a geometry the list kernel does not cover falls back to launch_flash_decode (bitmap).
 sycl::event launch_flash_decode_qsa(sycl::queue& q, const AttnParams& p, const int32_t* qblk, int qn,
                                     const std::vector<sycl::event>& deps = {});
+// Qwen4-Exp QSA PROMPT rows over their selected block lists (attention.cpp): rows at positions start_pos.., blk =
+// [rows][qn] block indices (launch_qsa_topk_blocks), plus each row's tail block; out [rows][num_heads][256].
+bool qsa_prefill_list_ok(int head_dim, int num_heads, int num_kv_heads, int qrat, int seq_cap);
+sycl::event launch_qsa_prefill_list(sycl::queue& q, const float* qv, const uint8_t* k_cache, const uint8_t* v_cache,
+                                    float* out, int rows, int start_pos, int num_heads, int num_kv_heads, int seq_cap,
+                                    float scale, const int32_t* blk, int qn, int qrat,
+                                    const std::vector<sycl::event>& deps = {});
 sycl::event launch_flash_merge(sycl::queue& q, const AttnParams& p,
                                const std::vector<sycl::event>& deps = {});
 // Small speculative verify batch: one subgroup per query, with all queries in

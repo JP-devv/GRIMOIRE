@@ -826,6 +826,148 @@ sycl::event kmajor_decode(sycl::queue& q, const AttnParams& p, const std::vector
 }
 } // namespace
 
+// QSA PROMPT rows over their selected block lists (2026-11-18).  The masked XMX prompt kernel scans every key of the
+// context for every row tile (bitmap per row): at a 32K prompt the 8,192-row chunk from 24K took 1.21 s in it
+// (GRIMOIRE_Q4_TIMING, Flash-Next two B70s) for rows that attend 2,049 keys each, and it grows with the position.
+// Here a sub-group owns (row, kv head, GC query heads) and walks that row's list (qn blocks, ascending, -1 = hole) and
+// its tail block [pos/qrat*qrat, pos], loads as flash_decode_qsa_list, and writes the normalized output itself (no
+// split, no merge).  Same keys per row as the bitmap; summation order differs.  head_dim 256, FP8 dim-major K.
+template <int GC>
+static sycl::event qsa_prefill_list_impl(sycl::queue& q, const float* qv, const uint8_t* k_cache,
+                                         const uint8_t* v_cache, float* out, int rows, int start_pos, int QH,
+                                         int KVH, int seq_cap, float scale, const int32_t* blk, int qn, int qrat,
+                                         const std::vector<sycl::event>& deps) {
+    constexpr int HD = 256, DPL = HD / SG_SIZE, KPB = 4;
+    const int G = QH / KVH, chunks = G / GC;
+    return q.submit([&](sycl::handler& h) {
+        h.depends_on(deps);
+        h.parallel_for(sycl::nd_range<1>(size_t(rows) * KVH * chunks * SG_SIZE, size_t(SG_SIZE)),
+            [=](sycl::nd_item<1> it) [[sycl::reqd_sub_group_size(SG_SIZE)]] {
+                constexpr float NINF = -std::numeric_limits<float>::infinity();
+                const auto sg   = it.get_sub_group();
+                const int  lane = int(sg.get_local_id()[0]);
+                const int  gid  = int(it.get_group(0));
+                const int  ch   = gid % chunks;
+                const int  kvh  = (gid / chunks) % KVH;
+                const int  row  = gid / (chunks * KVH);
+                const int  head0 = kvh * G + ch * GC;
+                const int  seq  = start_pos + row + 1;              // causal: keys [0, seq)
+                const int  tailb = seq / qrat;
+                const int  d0   = lane * DPL;
+                const int32_t* lst = blk + int64_t(row) * qn;
+                const uint8_t* kh = k_cache + int64_t(kvh) * HD * seq_cap;
+                const uint8_t* vh = v_cache + int64_t(kvh) * seq_cap * HD;
+                const float* qrow = qv + int64_t(row) * QH * HD;
+                float qr[GC][DPL];
+                #pragma unroll
+                for (int g = 0; g < GC; ++g)
+                    #pragma unroll
+                    for (int i = 0; i < DPL; ++i) qr[g][i] = qrow[int64_t(head0 + g) * HD + d0 + i];
+                float m[GC], l[GC], acc[GC][DPL];
+                #pragma unroll
+                for (int g = 0; g < GC; ++g) {
+                    m[g] = NINF; l[g] = 0.0f;
+                    #pragma unroll
+                    for (int i = 0; i < DPL; ++i) acc[g][i] = 0.0f;
+                }
+                for (int ii = 0; ii <= qn; ++ii) {
+                    const int b = ii < qn ? lst[ii] : tailb;
+                    if (b < 0) continue;
+                    const int s0 = b * qrat;
+                    bool live[KPB];
+                    #pragma unroll
+                    for (int k = 0; k < KPB; ++k) live[k] = s0 + k < seq;
+                    if (!live[0]) continue;
+                    uint32_t kw[DPL];
+                    #pragma unroll
+                    for (int i = 0; i < DPL; ++i)
+                        kw[i] = *reinterpret_cast<const uint32_t*>(kh + int64_t(d0 + i) * seq_cap + s0);
+                    uint64_t vw[KPB][DPL / 8];
+                    #pragma unroll
+                    for (int k = 0; k < KPB; ++k)
+                        #pragma unroll
+                        for (int w = 0; w < DPL / 8; ++w)
+                            vw[k][w] = live[k] ? *reinterpret_cast<const uint64_t*>(
+                                                     vh + int64_t(s0 + k) * HD + d0 + 8 * w) : 0ull;
+                    float sc[GC][KPB];
+                    #pragma unroll
+                    for (int g = 0; g < GC; ++g)
+                        #pragma unroll
+                        for (int k = 0; k < KPB; ++k) sc[g][k] = 0.0f;
+                    #pragma unroll
+                    for (int i = 0; i < DPL; ++i) {
+                        float kf[KPB];
+                        #pragma unroll
+                        for (int k = 0; k < KPB; ++k) kf[k] = e4m3_to_f32(uint8_t(kw[i] >> (8 * k)));
+                        #pragma unroll
+                        for (int g = 0; g < GC; ++g)
+                            #pragma unroll
+                            for (int k = 0; k < KPB; ++k) sc[g][k] = sycl::fma(qr[g][i], kf[k], sc[g][k]);
+                    }
+                    #pragma unroll
+                    for (int g = 0; g < GC; ++g) {
+                        float pr[KPB], mx = NINF;
+                        #pragma unroll
+                        for (int k = 0; k < KPB; ++k) {
+                            const float sv = sycl::reduce_over_group(sg, sc[g][k], sycl::plus<float>());
+                            pr[k] = live[k] ? sv * scale : NINF;
+                            mx = sycl::fmax(mx, pr[k]);
+                        }
+                        const float mnew = sycl::fmax(m[g], mx);
+                        const float corr = sycl::isinf(m[g]) ? 0.0f : sycl::exp(m[g] - mnew);
+                        float ps = 0.0f;
+                        #pragma unroll
+                        for (int k = 0; k < KPB; ++k) {
+                            pr[k] = live[k] ? sycl::exp(pr[k] - mnew) : 0.0f;
+                            ps += pr[k];
+                        }
+                        l[g] = sycl::fma(l[g], corr, ps);
+                        m[g] = mnew;
+                        #pragma unroll
+                        for (int i = 0; i < DPL; ++i) acc[g][i] *= corr;
+                        #pragma unroll
+                        for (int k = 0; k < KPB; ++k) {
+                            if (!live[k]) continue;
+                            #pragma unroll
+                            for (int w = 0; w < DPL / 8; ++w)
+                                #pragma unroll
+                                for (int bb = 0; bb < 8; ++bb)
+                                    acc[g][8 * w + bb] = sycl::fma(pr[k], e4m3_to_f32(uint8_t(vw[k][w] >> (8 * bb))),
+                                                                   acc[g][8 * w + bb]);
+                        }
+                    }
+                }
+                float* orow = out + int64_t(row) * QH * HD;
+                #pragma unroll
+                for (int g = 0; g < GC; ++g) {
+                    const float inv = l[g] > 0.0f ? 1.0f / l[g] : 0.0f;
+                    #pragma unroll
+                    for (int i = 0; i < DPL; ++i) orow[int64_t(head0 + g) * HD + d0 + i] = acc[g][i] * inv;
+                }
+            });
+    });
+}
+
+bool qsa_prefill_list_ok(int head_dim, int num_heads, int num_kv_heads, int qrat, int seq_cap) {
+    return head_dim == 256 && qrat == 4 && !kv_kmajor_flag() && num_kv_heads > 0 &&
+           num_heads % num_kv_heads == 0 && (seq_cap % 4) == 0;
+}
+
+sycl::event launch_qsa_prefill_list(sycl::queue& q, const float* qv, const uint8_t* k_cache, const uint8_t* v_cache,
+                                    float* out, int rows, int start_pos, int num_heads, int num_kv_heads, int seq_cap,
+                                    float scale, const int32_t* blk, int qn, int qrat,
+                                    const std::vector<sycl::event>& deps) {
+    const int G = num_heads / num_kv_heads;
+    if (G % 3 == 0)
+        return qsa_prefill_list_impl<3>(q, qv, k_cache, v_cache, out, rows, start_pos, num_heads, num_kv_heads,
+                                        seq_cap, scale, blk, qn, qrat, deps);
+    if (G % 2 == 0)
+        return qsa_prefill_list_impl<2>(q, qv, k_cache, v_cache, out, rows, start_pos, num_heads, num_kv_heads,
+                                        seq_cap, scale, blk, qn, qrat, deps);
+    return qsa_prefill_list_impl<1>(q, qv, k_cache, v_cache, out, rows, start_pos, num_heads, num_kv_heads,
+                                    seq_cap, scale, blk, qn, qrat, deps);
+}
+
 sycl::event launch_flash_decode_qsa(sycl::queue& q, const AttnParams& p, const int32_t* qblk, int qn,
                                     const std::vector<sycl::event>& deps) {
     if (qblk && qn > 0 && p.qbits && p.qrat == 4 && p.head_dim == 256 && !kv_kmajor_flag() && p.window_left <= 0 &&

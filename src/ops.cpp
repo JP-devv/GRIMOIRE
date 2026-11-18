@@ -3000,44 +3000,79 @@ sycl::event launch_qsa_index_logits(sycl::queue& q, const float* qv,
                                     int rows, int n_heads, int head_dim,
                                     int n_blocks, const int32_t* visible,
                                     const std::vector<sycl::event>& deps) {
+    // 2026-11-18: a lane per BLOCK (16 blocks a sub-group), each lane the whole dot product of its block's key with
+    // every head of the row's query (query values are the same address for all lanes: one broadcast load), heads in
+    // registers.  The old form launched one 16-lane sub-group per (row, block) pair with the lanes splitting the
+    // dims and a reduction per head: 67M sub-groups for an 8,192-row prompt chunk at 32K tokens, 1.18 s a chunk
+    // (GRIMOIRE_Q4_TIMING, Flash-Next two B70s) for 67 GFLOP.  The dot's summation order changes (rounding only);
+    // decode, prompt and the MTP head all use this kernel, so they still rank blocks with the same arithmetic.
+    // ONE key cache, SHARED by every query row (rule 16): keys are indexed by block, never by row.
+    constexpr int MAXH = 8;
+    // GRIMOIRE_QSA_LOGITS_OLD=1: the 11-17 kernel (a sub-group per row and block, lanes over the dims)
+    static const bool old = [] { const char* e = std::getenv("GRIMOIRE_QSA_LOGITS_OLD"); return e && *e == '1'; }();
+    if (old || n_heads > MAXH || head_dim % 4)
+        return q.submit([&](sycl::handler& h) {
+            h.depends_on(deps);
+            h.parallel_for(sycl::nd_range<1>(size_t(rows) * n_blocks * SG_SIZE, SG_SIZE),
+                [=](sycl::nd_item<1> it) [[sycl::reqd_sub_group_size(SG_SIZE)]] {
+                    const auto sg = it.get_sub_group();
+                    const int lane = int(sg.get_local_id()[0]);
+                    const int gid  = int(it.get_group(0));
+                    const int row  = gid / n_blocks;
+                    const int n    = gid % n_blocks;
+                    const int vis  = visible ? visible[row] : n_blocks;
+                    if (n >= vis) {
+                        if (lane == 0) logits[int64_t(row) * n_blocks + n] = -std::numeric_limits<float>::infinity();
+                        return;
+                    }
+                    const float* kn = keys + int64_t(n) * head_dim;
+                    float acc = 0.0f;
+                    for (int hh = 0; hh < n_heads; ++hh) {
+                        const float* qh = qv + (int64_t(row) * n_heads + hh) * head_dim;
+                        float dot = 0.0f;
+                        for (int d = lane; d < head_dim; d += SG_SIZE) dot = sycl::fma(qh[d], kn[d], dot);
+                        dot = sycl::reduce_over_group(sg, dot, sycl::plus<float>());
+                        if (lane == 0) acc += dot > 0.0f ? dot : 0.0f;
+                    }
+                    if (lane == 0) logits[int64_t(row) * n_blocks + n] = acc / sycl::sqrt(float(head_dim));
+                });
+        });
+    const int nbg = (n_blocks + SG_SIZE - 1) / SG_SIZE;
     return q.submit([&](sycl::handler& h) {
         h.depends_on(deps);
         h.parallel_for(
-            sycl::nd_range<1>(size_t(rows) * n_blocks * SG_SIZE, SG_SIZE),
+            sycl::nd_range<1>(size_t(rows) * nbg * SG_SIZE, SG_SIZE),
             [=](sycl::nd_item<1> it) [[sycl::reqd_sub_group_size(SG_SIZE)]] {
-                const auto sg = it.get_sub_group();
-                const int lane = int(sg.get_local_id()[0]);
+                const int lane = int(it.get_local_id(0));
                 const int gid  = int(it.get_group(0));
-                const int row  = gid / n_blocks;
-                const int n    = gid % n_blocks;
+                const int row  = gid / nbg;
+                const int n    = (gid % nbg) * SG_SIZE + lane;
+                if (n >= n_blocks) return;
                 const int vis  = visible ? visible[row] : n_blocks;
-                if (n >= vis) {
-                    if (lane == 0)
-                        logits[int64_t(row) * n_blocks + n] =
-                            -std::numeric_limits<float>::infinity();
-                    return;
+                float* out = logits + int64_t(row) * n_blocks + n;
+                if (n >= vis) { *out = -std::numeric_limits<float>::infinity(); return; }
+                const sycl::float4* kn = reinterpret_cast<const sycl::float4*>(keys + int64_t(n) * head_dim);
+                const float* qr = qv + int64_t(row) * n_heads * head_dim;
+                float dot[MAXH];
+                #pragma unroll
+                for (int hh = 0; hh < MAXH; ++hh) dot[hh] = 0.0f;
+                for (int d4 = 0; d4 < head_dim / 4; ++d4) {
+                    const sycl::float4 kv = kn[d4];
+                    #pragma unroll
+                    for (int hh = 0; hh < MAXH; ++hh) {
+                        if (hh >= n_heads) break;
+                        const sycl::float4 qq = reinterpret_cast<const sycl::float4*>(qr + int64_t(hh) * head_dim)[d4];
+                        dot[hh] = sycl::fma(qq.x(), kv.x(), dot[hh]);
+                        dot[hh] = sycl::fma(qq.y(), kv.y(), dot[hh]);
+                        dot[hh] = sycl::fma(qq.z(), kv.z(), dot[hh]);
+                        dot[hh] = sycl::fma(qq.w(), kv.w(), dot[hh]);
+                    }
                 }
-                // ONE key cache, SHARED by every query row.  The blocks
-                // are the sequence's, not the query's: striding this by
-                // row reads past the blocks that were actually pooled and
-                // into whatever the allocation happened to hold, which is
-                // a wrong block ranking at M > 1 and perfectly fluent.
-                // (Decode is M == 1, so it never saw it.)
-                const float* kn = keys + int64_t(n) * head_dim;
                 float acc = 0.0f;
-                for (int hh = 0; hh < n_heads; ++hh) {
-                    const float* qh = qv +
-                        (int64_t(row) * n_heads + hh) * head_dim;
-                    float dot = 0.0f;
-                    for (int d = lane; d < head_dim; d += SG_SIZE)
-                        dot = sycl::fma(qh[d], kn[d], dot);
-                    dot = sycl::reduce_over_group(sg, dot, sycl::plus<float>());
-                    // relu per head, before the sum
-                    if (lane == 0) acc += dot > 0.0f ? dot : 0.0f;
-                }
-                if (lane == 0)
-                    logits[int64_t(row) * n_blocks + n] =
-                        acc / sycl::sqrt(float(head_dim));
+                #pragma unroll
+                for (int hh = 0; hh < MAXH; ++hh)
+                    if (hh < n_heads) acc += dot[hh] > 0.0f ? dot[hh] : 0.0f;   // relu per head, before the sum
+                *out = acc / sycl::sqrt(float(head_dim));
             });
     });
 }
