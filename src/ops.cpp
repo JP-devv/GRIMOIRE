@@ -3199,7 +3199,8 @@ sycl::event launch_qsa_topk_blocks(sycl::queue& q, const float* logits,
     //    per full-attention layer at 6K tokens.  The set is emitted in
     //    INDEX order; attention over it does not depend on the order.
     constexpr int WG = 256;
-    static const bool agg = [] { const char* e = std::getenv("GRIMOIRE_QSA_TOPK_AGG"); return !(e && *e == '0'); }();
+    static const bool agg_env = [] { const char* e = std::getenv("GRIMOIRE_QSA_TOPK_AGG"); return !(e && *e == '0'); }();
+    const bool agg = agg_env;      // a kernel may not read a function-local static
     return q.submit([&](sycl::handler& h) {
         h.depends_on(deps);
         sycl::local_accessor<uint32_t, 1> hist(256, h);
