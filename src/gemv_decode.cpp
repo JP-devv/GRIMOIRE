@@ -1474,7 +1474,9 @@ sycl::event launch_int4_smallm(sycl::queue& q, const QuantWeight& w, const sycl_
     int KS = K >= 12288 ? 4
            : (tiles >= 256 && tiles < 600 && K >= 4096) ? (ilv ? 4 : 2)
            : std::min(32, std::max(1, K / 256));
-    if (tiles <= 64 && K >= 4096) KS = 8;      // narrow outputs (one-card k / v, N = 1024): 10.3 -> 6.6 us at M = 5
+    // narrow outputs (k / v): 8 contiguous slices -- one card N = 1024 10.3 -> 6.6 us at M = 5; interleaving them
+    // measured slower (one card 7.9, two-card N = 512 6.8 -> 10.7 us), so <= 64 tiles keep contiguous slices
+    if (tiles <= 64 && K >= 4096) KS = 8;
     // Opt-in Swift group128 TP2/K6 plans, measured on the actual half-width
     // shapes (tools/tp_int4_probe1111.cpp), warm128 launches + median3 trials.
     // down 56.3 -> 49.6us; z 21.6 -> 19.0us; out 21.6 -> 18.7us on G31.
@@ -1507,8 +1509,8 @@ sycl::event launch_int4_smallm(sycl::queue& q, const QuantWeight& w, const sycl_
         return !(e && *e == '0'); }();
     if (fdq)
         return (1 << w.int4_gshift()) == 64
-            ? int4_smallm_fdq_impl<1, 64>(q, w, X, Y, M, KS, kc, TPT, deps, ilv)
-            : int4_smallm_fdq_impl<1, 128>(q, w, X, Y, M, KS, kc, TPT, deps, ilv);
+            ? int4_smallm_fdq_impl<1, 64>(q, w, X, Y, M, KS, kc, TPT, deps, ilv && tiles > 64)
+            : int4_smallm_fdq_impl<1, 128>(q, w, X, Y, M, KS, kc, TPT, deps, ilv && tiles > 64);
     return (1 << w.int4_gshift()) == 64
         ? int4_smallm_impl<1, 64>(q, w, X, Y, M, KS, kc, TPT, deps)
         : int4_smallm_impl<1, 128>(q, w, X, Y, M, KS, kc, TPT, deps);
