@@ -8757,7 +8757,14 @@ bool Grimoire::build(const std::string& dir, const UploadOptions& requested_opt,
         dc.shards.push_back(std::move(st));
         dc.unmap_all();
         auto dr=[&](const std::string& n)->TensorRef{
-            auto it=dc.index.find(n);return it==dc.index.end()?TensorRef{}:it->second;
+            auto it=dc.index.find(n);
+            if(it!=dc.index.end())return it->second;
+            // 2026-11-18: a GPTQ / AutoRound drafter (e.g. urakozz/Qwen3.8-27B-DFlash2-W4A16-g64-AutoRound, W4A16
+            // g64) ships "<base>.weight" as <base>.qweight / qzeros / scales -- the target's resolver reads them
+            static const std::string W=".weight";
+            if(n.size()>W.size()&&n.compare(n.size()-W.size(),W.size(),W)==0)
+                return dc.linear_ref(n.substr(0,n.size()-W.size()));
+            return TensorRef{};
         };
         bool dok=true;
         size_t db=0;
