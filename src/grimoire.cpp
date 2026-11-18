@@ -17672,7 +17672,11 @@ bool Grimoire::ple_fetch_rows(const LayerDev& d, int p0, int M) {
             if (!ck.shards[size_t(T.shard)]->read_raw(sub, dst, er)) bad = true;
         }
     };
-    const size_t nt = n < 512 ? 1 : std::min<size_t>(16, n / 256);
+    // Rows from the FILE: one thread per row (up to 16) -- the reads overlap on the SSD.  A decode token reads 16 rows;
+    // serially that was ~1.9 ms a token on the Tower (one PLE layer, device timeline 11-18, Flash-Next two B70s), every
+    // context length.  Rows from RAM: memcpy, threads only for big prompt chunks.
+    const size_t nt = (ple_fd >= 0 && !pr && n > 1) ? std::min<size_t>(n, 16)
+                                                     : (n < 512 ? 1 : std::min<size_t>(16, n / 256));
     if (nt == 1) work(0, n);
     else {
         std::vector<std::thread> th;
