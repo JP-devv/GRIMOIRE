@@ -10,7 +10,7 @@ The aim is straightforward: make high-performance local LLM inference possible o
 
 > **Project status: Experimental.** GRIMOIRE is actively developed, but it is not yet a stable, production-ready release. Expect incomplete features, changing model support, and performance or compatibility issues. Ready-to-use Docker images are on the [Releases](https://github.com/doopeworld/GRIMOIRE/releases) page (latest: **v1.10.6**, 2026-11-13); [Run a model](#run-a-model) below lists every model with its Hugging Face download, launch flags and measured speed.
 >
-> **main is the current code.** Two-GPU tensor parallel, Intel oneDNN for the prompt GEMMs and the Qwen3.8-Flash-Next two-card speed-ups were merged into main on 2026-10-28 (before, they were on the `dual-1022` / `onednn-1025` branches) and are in release **v1.10.0**. **GGUF support** joined main on 2026-10-29 (it was on `feature/gguf-battlemage`) and is in release **v1.10.1**; **v1.10.2** includes the native GGUF decode and prompt speed-ups and MTP on GGUF; **v1.10.3** adds three opt-in speed modes and changes no default; **v1.10.4** (2026-11-05) makes MXFP4 speculative decoding faster (Qwen3.8-27B MXFP4 + MTP: +26% for one user), lets 4-bit models use the overlapped two-GPU prompt path (Qwen3.8-27B GPTQ on two B70s: pp4096 1,733 -> 3,093), halves the two-GPU decode exchange, and keeps Flash-Next fast on a busy machine ([details](#served-image-validation-2026-11-05-v1104)). **v1.10.6** (2026-11-13) makes speculative decoding serve several users at once on one and two cards: Swift-1.5 Qwen3.8-27B GPTQ-Int4 on two B70s scores **133.6** in BetterBench against vLLM's 131.0 on the same machine and wins at 1, 2, 4 and 8 users; it also runs Qwen3.8-27B-Uncensored (FP8 as INT8) on two cards with a 262K context ([details](#release-v1106-2026-11-13)). v1.10.6's source joined main on 2026-11-15 together with **copy drafting** and faster long prompts (no release image yet, [details](#on-main-since-2026-11-15-no-release-image-yet)). **v1.10.8** (2026-11-17) reads prompts faster on one and two cards (one B70 4K: 2,698 tok/s, two B70s 3,480), fixes Qwen3.8 INT8 on one card and speeds up Flash-Next on long prompts ([details](#release-v1108-2026-11-17)). Still on a branch: the not validated for release Flash-Next MTP head on [`flashnext-mtp`](https://github.com/doopeworld/GRIMOIRE/tree/flashnext-mtp).
+> **main is the current code.** Two-GPU tensor parallel, Intel oneDNN for the prompt GEMMs and the Qwen3.8-Flash-Next two-card speed-ups were merged into main on 2026-10-28 (before, they were on the `dual-1022` / `onednn-1025` branches) and are in release **v1.10.0**. **GGUF support** joined main on 2026-10-29 (it was on `feature/gguf-battlemage`) and is in release **v1.10.1**; **v1.10.2** includes the native GGUF decode and prompt speed-ups and MTP on GGUF; **v1.10.3** adds three opt-in speed modes and changes no default; **v1.10.4** (2026-11-05) makes MXFP4 speculative decoding faster (Qwen3.8-27B MXFP4 + MTP: +26% for one user), lets 4-bit models use the overlapped two-GPU prompt path (Qwen3.8-27B GPTQ on two B70s: pp4096 1,733 -> 3,093), halves the two-GPU decode exchange, and keeps Flash-Next fast on a busy machine ([details](#served-image-validation-2026-11-05-v1104)). **v1.10.6** (2026-11-13) makes speculative decoding serve several users at once on one and two cards: Swift-1.5 Qwen3.8-27B GPTQ-Int4 on two B70s scores **133.6** in BetterBench against vLLM's 131.0 on the same machine and wins at 1, 2, 4 and 8 users; it also runs Qwen3.8-27B-Uncensored (FP8 as INT8) on two cards with a 262K context ([details](#release-v1106-2026-11-13)). v1.10.6's source joined main on 2026-11-15 together with **copy drafting** and faster long prompts (no release image yet, [details](#on-main-since-2026-11-15-no-release-image-yet)). **v1.10.8** (2026-11-17) reads prompts faster on one and two cards (one B70 4K: 2,698 tok/s, two B70s 3,480), fixes Qwen3.8 INT8 on one card and speeds up Flash-Next on long prompts ([details](#release-v1108-2026-11-17)). **v1.10.9** (2026-11-18) makes Qwen3.8-Flash-Next write much faster at long context (two B70s, after a 60K prompt: 31 -> 46 tok/s), loads Flash-Next 4-bit on two cards and speeds up one-card speculative decoding ([details](#release-v1109-2026-11-18)). Still on a branch: the not validated for release Flash-Next MTP head on [`flashnext-mtp`](https://github.com/doopeworld/GRIMOIRE/tree/flashnext-mtp).
 
 ## Our test system
 
@@ -118,6 +118,50 @@ the file's own `nextn` head 28.0 -> 71.6 tok/s (a DPAS kernel that checks up to 
 about the cost of one).  The BF16 GGUF gives **token-identical** output to the safetensors release;
 UD-IQ4_XS, UD-IQ2_XXS, Q4_0 and Q8_0 files load and generate correctly (Q8_0 as `--proj int8`: 99.2%
 top-1).  Qwen3.8-Flash-Next GGUF: not supported yet.
+
+### Release v1.10.9, 2026-11-18
+
+Built for the Arc Pro B70 and the Arc Pro B60 / Arc B580; measured on this machine's two Arc Pro B70s with the
+release image's own binaries, llama-benchy 0.4.0 (`--no-cache`), reading = prompt tokens per second, writing = tg128
+after a prompt of that length (MTP on for Qwen3.8, off for Flash-Next):
+
+| Model | GPUs | Reading | Writing |
+|---|---|---|---|
+| Qwen3.8-Flash-Next NVFP4, `--proj int8` (4K / 16K / 32K / 60K) | 2, tensor + expert parallel | 1,564 / 1,379 / 1,294 / 1,351 | **48.3 / 48.7 / 47.0 / 46.2** |
+| Qwen3.8-Flash-Next NVFP4, `--proj int4` (4K / 32K / 60K) | 2, tensor + expert parallel | 1,350 / 1,642 / 1,376 | **53.5 / 50.0 / 49.0** |
+| Swift-1.5 Qwen3.8-27B GPTQ-Int4 (4K / 32K) | 2, tensor parallel | **3,498** / 3,024 | **143** / 134 |
+| Swift-1.5 Qwen3.8-27B GPTQ-Int4 (512 / 4K tokens; 4 / 8 users = total) | 1 | 2,656 (4K) | 110 / 100; 4 users 240-246, 8 users 312-329 |
+| Swift-1.5 Qwen3.8-27B GPTQ-Int4, 32K tokens before the request (`--depth 32768`) | 1 | -- | 84 |
+
+Against v1.10.8 on the same machine: Flash-Next 8-bit writing after 4K / 16K / 32K / 60K 35 / 42 / 37 / 31 -> 48 / 49
+/ 47 / 46; Flash-Next 4-bit did not load on two cards; two-card Qwen3.8 writing after 4K 118 -> 143.  Flash-Next
+reading here is the first run after a reboot (the n-gram table read from disk); warm, the same build reads 32K / 60K
+at 1,638 / 1,368.
+
+**What v1.10.9 changes:**
+
+- Flash-Next decode: the sparse (QSA) attention reads only the selected key blocks, all 16 lanes of a block at once
+  (it walked every key of the context: 1.15 ms a layer at 60K tokens, now a few tens of microseconds); the indexer's
+  block selection adds its histogram once per sub-group; the n-gram (PLE) table rows of a token are read in parallel.
+- Flash-Next prompts: the indexer's block scoring computes a whole block per lane (an 8,192-row chunk at 24-32K tokens:
+  1.18 s -> 0.22 s).
+- Flash-Next: the n-gram table's background copy into RAM is off by default (`GRIMOIRE_PLE_RAM=1` turns it on): while
+  it ran, two-card Flash-Next wrote ~30 tok/s instead of ~50.  Flash-Next `--proj int4` now loads on two cards.
+- Flash-Next MTP (`GRIMOIRE_MTP=1 GRIMOIRE_MTP_K=2`, still opt-in): the verify rows use the same sparse attention;
+  code and edit answers 50-80% faster, prose 5-15% slower; give the head room with ~12 fewer experts a layer in VRAM
+  (e.g. `GRIMOIRE_EXPERT_VRAM_PER_LAYER=164` instead of 170).
+- Qwen3.8 one card: the 4-bit speculative verify GEMMs split their work by interleaved blocks (verify step ~4%
+  faster).
+- DFlash: GPTQ / AutoRound drafters load (for example `urakozz/Qwen3.8-27B-DFlash2-W4A16-g64-AutoRound`).
+- Opt-in, for testing: INT8 keys in the KV cache (`GRIMOIRE_KV_K8=1`) and int8 prompt attention (`GRIMOIRE_FLASH_I8=1`).
+
+Validation, the image's own binaries: the model suite (`tools/regress_all_g0.sh`, gpu0) gives text identical to
+v1.10.8 in 22 of 23 Qwen3.8 / Flash-Next cases; the 23rd, Flash-Next with a 6K-token document, rewords its first
+sentence ("shared a very long passage" / "pasted a very long excerpt"; the block scoring adds in another order).
+Copy / edit texts are identical on one and two cards; on one card, long free answers (review, essay, story) change
+after 900-5,400 characters (the verify GEMMs' summation order).  The 30K-token document test on two cards reads in
+10.2 s, again in 0.02 s, next turn 0.17 s, text identical to before.  Results and scripts:
+[`tools/bench/pp1117/RESULTS-2026-11-18.md`](tools/bench/pp1117/RESULTS-2026-11-18.md).
 
 ### Release v1.10.8, 2026-11-17
 
@@ -377,11 +421,14 @@ answers are not token-identical to the default, so treat it as a throughput opti
 ### 1. Get the image
 
 ```
-curl -LO https://github.com/doopeworld/GRIMOIRE/releases/download/v1.10.8/grimoire-b70-v1.10.8.tar.gz
-docker load < grimoire-b70-v1.10.8.tar.gz              # -> grimoire-b70:v1.10.8
-docker tag grimoire-b70:v1.10.8 grimoire-b70:latest    # the commands below use :latest
+curl -LO https://github.com/doopeworld/GRIMOIRE/releases/download/v1.10.9/grimoire-b70-v1.10.9.tar.gz
+docker load < grimoire-b70-v1.10.9.tar.gz              # -> grimoire-b70:v1.10.9
+docker tag grimoire-b70:v1.10.9 grimoire-b70:latest    # the commands below use :latest
 ```
 
+v1.10.9 ([above](#release-v1109-2026-11-18)) makes Qwen3.8-Flash-Next write much faster at long context (two B70s,
+60K: 31 -> 46 tok/s) and read faster on long prompts, loads Flash-Next 4-bit on two cards and makes one-card Qwen3.8
+speculative decoding ~4% faster.
 v1.10.8 ([above](#release-v1108-2026-11-17)) makes prompts faster on one and two cards, fixes INT8 on one card and
 speeds up Flash-Next on long prompts. v1.10.7 ([above](#release-v1107-2026-11-16)) turns the prompt cache on and adds copy drafting and the long-context
 work. v1.10.6 ([above](#release-v1106-2026-11-13)) adds the multi-user speculative decoding work to everything v1.10.4
