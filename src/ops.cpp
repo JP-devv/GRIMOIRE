@@ -3199,12 +3199,13 @@ sycl::event launch_qsa_topk_blocks(sycl::queue& q, const float* logits,
     //    per full-attention layer at 6K tokens.  The set is emitted in
     //    INDEX order; attention over it does not depend on the order.
     constexpr int WG = 256;
+    static const bool agg = [] { const char* e = std::getenv("GRIMOIRE_QSA_TOPK_AGG"); return !(e && *e == '0'); }();
     return q.submit([&](sycl::handler& h) {
         h.depends_on(deps);
         sycl::local_accessor<uint32_t, 1> hist(256, h);
         sycl::local_accessor<uint32_t, 1> sel(4, h);   // prefix, mask, remaining
         h.parallel_for(sycl::nd_range<1>(size_t(rows) * WG, WG),
-            [=](sycl::nd_item<1> it) {
+            [=](sycl::nd_item<1> it) [[sycl::reqd_sub_group_size(16)]] {
                 const int row  = int(it.get_group(0));
                 const int lane = int(it.get_local_id(0));
                 const float* lg = logits + int64_t(row) * n_blocks;
@@ -3225,6 +3226,38 @@ sycl::event launch_qsa_topk_blocks(sycl::queue& q, const float* logits,
                     hist[lane] = 0u;
                     sycl::group_barrier(it.get_group());
                     const uint32_t prefix = sel[0], mask = sel[1];
+                    if (agg) {
+                        // 2026-11-18: sub-group-aggregated histogram.  The indexer's logits crowd a few bins (pass 0 =
+                        // sign + top exponent bits; every all-negative block is exactly 0.0), so one SLM atomic per
+                        // element serialized ~15K adds per pass at 60K tokens.  Here a sub-group adds once per
+                        // DISTINCT bin among its 16 elements (the smallest pending bin first); the counts, and so the
+                        // selected set, are exactly the same.
+                        const auto sg = it.get_sub_group();
+                        for (int nb = 0; nb < vis; nb += WG) {
+                            const int n = nb + lane;
+                            uint32_t bin = 256u;
+                            if (n < vis) {
+                                const uint32_t k = key_of(lg[n]);
+                                if ((k & mask) == prefix) bin = (k >> shift) & 0xFFu;
+                            }
+                            bool pending = bin < 256u;
+                            while (sycl::any_of_group(sg, pending)) {
+                                const uint32_t lb = sycl::reduce_over_group(sg, pending ? bin : 256u,
+                                                                            sycl::minimum<uint32_t>());
+                                const bool mine = pending && bin == lb;
+                                const uint32_t cnt = sycl::reduce_over_group(sg, mine ? 1u : 0u,
+                                                                             sycl::plus<uint32_t>());
+                                if (sg.get_local_id()[0] == 0) {
+                                    sycl::atomic_ref<uint32_t, sycl::memory_order::relaxed,
+                                                     sycl::memory_scope::work_group,
+                                                     sycl::access::address_space::local_space>
+                                        a(hist[lb]);
+                                    a.fetch_add(cnt);
+                                }
+                                pending = pending && !mine;
+                            }
+                        }
+                    } else
                     for (int n = lane; n < vis; n += WG) {
                         const uint32_t k = key_of(lg[n]);
                         if ((k & mask) == prefix) {

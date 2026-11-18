@@ -14227,6 +14227,10 @@ const float* Grimoire::forward_qwen4_exp(int token) {
                     ap.splits = GRAPH_SPLITS;
                     ap.d_seq_len = s.d_seq_len;
                     ap.qbits = q4_qbits; ap.qwords = qwords; ap.qrat = RAT;
+                    // the selected list itself (attention.cpp flash_decode_qsa_list); GRIMOIRE_QSA_LIST=0 = bitmap
+                    static const bool qsa_list = [] { const char* e = std::getenv("GRIMOIRE_QSA_LIST");
+                                                      return !(e && *e == '0'); }();
+                    if (qsa_list) { ap.qblk = q4_blk; ap.qn = BTK; }
                     launch_flash_decode(q, ap, none);
                     tld(i, ".flash");
                     launch_flash_merge(q, ap, none);
@@ -15831,6 +15835,9 @@ int Grimoire::mtp4_draft(int next_token, int position, bool from_mtp_hidden) {
             if (!q4_qbits) return -1;
             launch_qsa_block_bits(q, q4_blk, 1, BTK, q4_qbits, qwords, none);
             ap.qbits = q4_qbits; ap.qwords = qwords; ap.qrat = RAT;
+            static const bool qsa_list = [] { const char* e = std::getenv("GRIMOIRE_QSA_LIST");
+                                              return !(e && *e == '0'); }();
+            if (qsa_list) { ap.qblk = q4_blk; ap.qn = BTK; }
         }
         launch_flash_decode(q, ap, none);
         launch_flash_merge(q, ap, none);

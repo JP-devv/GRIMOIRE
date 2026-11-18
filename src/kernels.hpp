@@ -373,6 +373,11 @@ struct AttnParams {
     // in the incomplete tail block [seq/qrat*qrat, seq).  nullptr = dense.
     const uint32_t* qbits = nullptr;
     int qwords = 0, qrat = 4;
+    // The same selection as a LIST (2026-11-18): qn block indices, ascending, -1 = hole (launch_qsa_topk_blocks'
+    // output), plus the tail block.  Set = flash_decode_qsa_list (head_dim 256, FP8 D-major K), which reads each
+    // selected block's 256 K rows with all 16 lanes at once instead of walking the whole sequence.
+    const int32_t* qblk = nullptr;
+    int qn = 0;
 };
 
 // Pick enough chunks to fill the machine without shredding the sequence.

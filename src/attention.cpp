@@ -496,6 +496,149 @@ static sycl::event flash_decode_gqa(sycl::queue& q, const AttnParams& p,
 
 
 // ---------------------------------------------------------------------
+// QSA decode over the selected block LIST (2026-11-18), head_dim 256, FP8, D-major K.
+//
+// The bitmap path (flash_decode_gqa + qbits) walks every key of its split and skips unselected 64-key blocks; a
+// selected 4-key block then costs 256 K loads one row (seq_cap bytes) apart, issued by the lanes that own it, a
+// few in flight -- Flash-Next two B70s at 60K tokens: 1.15 ms per QSA layer (device timeline, 12 layers = ~14 ms of
+// a 34 ms token) for 2,048 selected keys.  Here a split takes a slice of the list (the top-k blocks, ascending, then
+// the tail block [seq/qrat*qrat, seq)), and for each block every lane loads its own 16 dims of the 4 keys (16
+// independent 32-bit loads) and the 4 V rows' 16 dims, all before any arithmetic; the score is a sub-group sum.
+// Same partial layout and split count as the other decode kernels, so launch_flash_merge is unchanged.  Same set
+// of keys as the bitmap path; the summation order differs (rounding only).  GRIMOIRE_QSA_LIST=0 = the bitmap path.
+// ---------------------------------------------------------------------
+template <int GC>
+static sycl::event flash_decode_qsa_list(sycl::queue& q, const AttnParams& p,
+                                         const std::vector<sycl::event>& deps) {
+    constexpr int HD = 256, DPL = HD / SG_SIZE, KPB = 4;   // dims per lane, keys per block
+    const int G      = p.num_heads / p.num_kv_heads;
+    const int chunks = G / GC;
+    const int splits = decode_splits(p);
+    const int kps = keys_per_split();
+    return q.submit([&](sycl::handler& h) {
+        h.depends_on(deps);
+        const AttnParams pp = p;
+        h.parallel_for(
+            sycl::nd_range<1>(size_t(pp.num_kv_heads) * chunks * splits * SG_SIZE, size_t(SG_SIZE)),
+            [=](sycl::nd_item<1> it) [[sycl::reqd_sub_group_size(SG_SIZE)]] {
+                constexpr float NINF = -std::numeric_limits<float>::infinity();
+                const auto sg   = it.get_sub_group();
+                const int  lane = int(sg.get_local_id()[0]);
+                const int  gid  = int(it.get_group(0));
+                const int  part = gid % splits;
+                const int  rest = gid / splits;
+                const int  kvh  = rest / chunks;
+                const int  head0 = kvh * G + (rest % chunks) * GC;
+                const int  seq  = pp.d_seq_len ? pp.d_seq_len[0] : pp.seq_len;
+                const int  nsp  = pp.capture ? splits_for(seq, pp.splits, kps, splits) : splits;
+                if (part >= nsp) return;
+                const int items = pp.qn + 1;                       // the list, then the tail block
+                const int per   = (items + nsp - 1) / nsp;
+                const int i_beg = part * per;
+                const int i_end = sycl::min(i_beg + per, items);
+                const int tailb = seq / pp.qrat;
+                const int d0    = lane * DPL;
+
+                const uint8_t* kh = pp.k_cache + int64_t(kvh) * HD * pp.seq_cap;
+                const uint8_t* vh = pp.v_cache + int64_t(kvh) * pp.seq_cap * HD;
+                float qr[GC][DPL];
+                #pragma unroll
+                for (int g = 0; g < GC; ++g)
+                    #pragma unroll
+                    for (int i = 0; i < DPL; ++i) qr[g][i] = pp.q[int64_t(head0 + g) * HD + d0 + i];
+                float m[GC], l[GC], acc[GC][DPL];
+                #pragma unroll
+                for (int g = 0; g < GC; ++g) {
+                    m[g] = NINF; l[g] = 0.0f;
+                    #pragma unroll
+                    for (int i = 0; i < DPL; ++i) acc[g][i] = 0.0f;
+                }
+                for (int ii = i_beg; ii < i_end; ++ii) {
+                    const int b = ii < pp.qn ? pp.qblk[ii] : tailb;
+                    if (b < 0) continue;                           // hole (uniform: one block per sub-group step)
+                    const int s0 = b * pp.qrat;                    // qrat == KPB (checked at dispatch)
+                    bool live[KPB];
+                    #pragma unroll
+                    for (int k = 0; k < KPB; ++k) live[k] = s0 + k < seq;
+                    if (!live[0]) continue;
+                    // ---- every load first: 16 K words (4 keys x this lane's 16 dims) and the live V rows ----
+                    uint32_t kw[DPL];
+                    #pragma unroll
+                    for (int i = 0; i < DPL; ++i)
+                        kw[i] = *reinterpret_cast<const uint32_t*>(kh + int64_t(d0 + i) * pp.seq_cap + s0);
+                    uint64_t vw[KPB][DPL / 8];
+                    #pragma unroll
+                    for (int k = 0; k < KPB; ++k)
+                        #pragma unroll
+                        for (int w = 0; w < DPL / 8; ++w)
+                            vw[k][w] = live[k] ? *reinterpret_cast<const uint64_t*>(
+                                                     vh + int64_t(s0 + k) * HD + d0 + 8 * w) : 0ull;
+                    // ---- scores: this lane's 16 dims, then the sub-group sum ----
+                    float sc[GC][KPB];
+                    #pragma unroll
+                    for (int g = 0; g < GC; ++g)
+                        #pragma unroll
+                        for (int k = 0; k < KPB; ++k) sc[g][k] = 0.0f;
+                    #pragma unroll
+                    for (int i = 0; i < DPL; ++i) {
+                        float kf[KPB];
+                        #pragma unroll
+                        for (int k = 0; k < KPB; ++k) kf[k] = e4m3_to_f32(uint8_t(kw[i] >> (8 * k)));
+                        #pragma unroll
+                        for (int g = 0; g < GC; ++g)
+                            #pragma unroll
+                            for (int k = 0; k < KPB; ++k) sc[g][k] = sycl::fma(qr[g][i], kf[k], sc[g][k]);
+                    }
+                    #pragma unroll
+                    for (int g = 0; g < GC; ++g) {
+                        float pr[KPB], mx = NINF;
+                        #pragma unroll
+                        for (int k = 0; k < KPB; ++k) {
+                            const float s = sycl::reduce_over_group(sg, sc[g][k], sycl::plus<float>());
+                            pr[k] = live[k] ? s * pp.softmax_scale : NINF;
+                            mx = sycl::fmax(mx, pr[k]);
+                        }
+                        const float mnew = sycl::fmax(m[g], mx);
+                        const float corr = sycl::isinf(m[g]) ? 0.0f : sycl::exp(m[g] - mnew);
+                        float ps = 0.0f;
+                        #pragma unroll
+                        for (int k = 0; k < KPB; ++k) {
+                            pr[k] = live[k] ? sycl::exp(pr[k] - mnew) : 0.0f;
+                            ps += pr[k];
+                        }
+                        l[g] = sycl::fma(l[g], corr, ps);
+                        m[g] = mnew;
+                        #pragma unroll
+                        for (int i = 0; i < DPL; ++i) acc[g][i] *= corr;
+                        #pragma unroll
+                        for (int k = 0; k < KPB; ++k) {
+                            if (!live[k]) continue;
+                            #pragma unroll
+                            for (int w = 0; w < DPL / 8; ++w)
+                                #pragma unroll
+                                for (int bb = 0; bb < 8; ++bb)
+                                    acc[g][8 * w + bb] = sycl::fma(pr[k], e4m3_to_f32(uint8_t(vw[k][w] >> (8 * bb))),
+                                                                   acc[g][8 * w + bb]);
+                        }
+                    }
+                }
+                // UNNORMALIZED partials + (m, l), exactly what the merge reads.
+                #pragma unroll
+                for (int g = 0; g < GC; ++g) {
+                    const int64_t pidx = int64_t(head0 + g) * splits + part;
+                    float* po = pp.partials + pidx * HD + d0;
+                    #pragma unroll
+                    for (int i = 0; i < DPL; ++i) po[i] = acc[g][i];
+                    if (lane == 0) {
+                        pp.part_m[pidx] = m[g];
+                        pp.part_l[pidx] = l[g];
+                    }
+                }
+            });
+    });
+}
+
+// ---------------------------------------------------------------------
 // ESIMD split-K decode attention, head_dim 256, FP8 E4M3 KV.
 //
 // The SIMT kernels give a lane one key and walk head_dim serially: at short
@@ -685,6 +828,14 @@ sycl::event kmajor_decode(sycl::queue& q, const AttnParams& p, const std::vector
 
 sycl::event launch_flash_decode(sycl::queue& q, const AttnParams& p,
                                 const std::vector<sycl::event>& deps) {
+    // QSA list (the caller keeps qbits set too, so any other kernel below still applies the same selection)
+    if (p.qblk && p.qn > 0 && p.qrat == 4 && p.head_dim == 256 && !kv_kmajor_flag() && p.window_left <= 0 &&
+        p.num_kv_heads > 0 && p.num_heads % p.num_kv_heads == 0 && (p.seq_cap % 4) == 0) {
+        const int G = p.num_heads / p.num_kv_heads;
+        if (G % 3 == 0) return flash_decode_qsa_list<3>(q, p, deps);
+        if (G % 2 == 0) return flash_decode_qsa_list<2>(q, p, deps);
+        return flash_decode_qsa_list<1>(q, p, deps);
+    }
     if (kv_kmajor_flag()) return kmajor_decode(q, p, deps);
     if (flash_esimd_on() && p.head_dim == 256 && p.num_kv_heads > 0 &&
         p.num_heads % p.num_kv_heads == 0 && (p.num_heads / p.num_kv_heads) % 2 == 0 &&
