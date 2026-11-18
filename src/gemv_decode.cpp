@@ -1466,9 +1466,15 @@ sycl::event launch_int4_smallm(sycl::queue& q, const QuantWeight& w, const sycl_
     // MEASURED 2026-11-05, tools/i4sweep_probe.cpp (engine kernel, GPTQ-style group 128, M = 7, us,
     // the old rule -> this): gate_up 183.6 -> 167.3 (the old "wide outputs: 4 slices" clause),
     // o 38.5 -> 35.0, z 35.2 -> 32.9, lm_head 1191.0 -> 1165.0; down / q / dn_qkv / k-v unchanged.
+    // Interleaved K slices (2026-11-18, default; GRIMOIRE_I4_SMALLM_ILV=0 = contiguous ranges): a tile's slices read
+    // adjacent 64-byte pieces of the same weight rows.  MEASURED tools/i4sweep_probe.cpp, one B70, M = 5, weights from
+    // DRAM, us (rule -> interleaved, best plan): down 90.4 -> 84.9 (4 slices), out / o 38.3 -> 32.0 (4), kv (N = 1024)
+    // 10.3 -> 6.6 (8 slices, contiguous or interleaved); q / qkv / gate_up / z / lm_head within 1-2%.
+    static const bool ilv = [] { const char* e = std::getenv("GRIMOIRE_I4_SMALLM_ILV"); return !(e && *e == '0'); }();
     int KS = K >= 12288 ? 4
-           : (tiles >= 256 && tiles < 600 && K >= 4096) ? 2
+           : (tiles >= 256 && tiles < 600 && K >= 4096) ? (ilv ? 4 : 2)
            : std::min(32, std::max(1, K / 256));
+    if (tiles <= 64 && K >= 4096) KS = 8;      // narrow outputs (one-card k / v, N = 1024): 10.3 -> 6.6 us at M = 5
     // Opt-in Swift group128 TP2/K6 plans, measured on the actual half-width
     // shapes (tools/tp_int4_probe1111.cpp), warm128 launches + median3 trials.
     // down 56.3 -> 49.6us; z 21.6 -> 19.0us; out 21.6 -> 18.7us on G31.
@@ -1499,8 +1505,6 @@ sycl::event launch_int4_smallm(sycl::queue& q, const QuantWeight& w, const sycl_
     // GRIMOIRE_I4_FASTDQ=0: the original dequant (int4_smallm_impl).
     static const bool fdq = [] { const char* e = std::getenv("GRIMOIRE_I4_FASTDQ");
         return !(e && *e == '0'); }();
-    // GRIMOIRE_I4_SMALLM_ILV=1 (2026-11-18, diagnostic): the K slices interleave by 128-K block (int4_smallm.hpp)
-    static const bool ilv = [] { const char* e = std::getenv("GRIMOIRE_I4_SMALLM_ILV"); return e && *e == '1'; }();
     if (fdq)
         return (1 << w.int4_gshift()) == 64
             ? int4_smallm_fdq_impl<1, 64>(q, w, X, Y, M, KS, kc, TPT, deps, ilv)
