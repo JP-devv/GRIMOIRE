@@ -202,7 +202,7 @@ sycl::event int4_smallm_impl(sycl::queue& q, const QuantWeight& w, const sycl_bf
 template <int RBN, int GS>
 sycl::event int4_smallm_fdq_impl(sycl::queue& q, const QuantWeight& w, const sycl_bf16* X,
                                  float* Y, int M, int KS, int kc, int TPT,
-                                 const std::vector<sycl::event>& deps) {
+                                 const std::vector<sycl::event>& deps, bool ilv = false) {
     static_assert(GS == 64 || GS == 128, "INT4 group of 64 or 128");
     constexpr int CT = 16;
     const int N = w.N, K = w.K;
@@ -227,8 +227,12 @@ sycl::event int4_smallm_fdq_impl(sycl::queue& q, const QuantWeight& w, const syc
             const int tile = int(it.get_group(0)) * TPT + tw;
             const bool live = tile < tiles;
             const int n0 = (live ? tile : 0) * CT;
-            const int kb = ks * kc;
-            const int ke = kb + kc < K ? kb + kc : K;
+            // ilv (2026-11-18, GRIMOIRE_I4_SMALLM_ILV=1): the K slices interleave by 128-K block (slice ks takes
+            // blocks ks, ks + KS, ...) instead of one contiguous range each, so a tile's KS threads read adjacent
+            // 64-byte pieces of the same weight rows at a time (one DRAM page) rather than KS ranges kc / 2 bytes apart
+            const int kb = ilv ? ks * 128 : ks * kc;
+            const int ke = ilv ? K : (ks * kc + kc < K ? ks * kc + kc : K);
+            const int kst = ilv ? 128 * KS : 128;
             constexpr auto PFH = sycl::ext::oneapi::experimental::properties{
                 es::cache_hint_L1<es::cache_hint::cached>, es::cache_hint_L2<es::cache_hint::cached>};
             const es::simd<uint32_t, 16> gbase =
@@ -245,19 +249,19 @@ sycl::event int4_smallm_fdq_impl(sycl::queue& q, const QuantWeight& w, const syc
                     zn[g] = es::gather<uint8_t, 16>(zer, gi);
                     sn[g] = es::gather<uint16_t, 16>(sclh, gi * 2u);
                 }
-                for (int k = kb; k < ke; k += 128) {
-                    if (k + 128 < ke)
-                        es::prefetch_2d<uint32_t, 16, CT>(payw, PW, PH, PP, (k + 128) / 8, n0, PFH);
+                for (int k = kb; k < ke; k += kst) {
+                    if (k + kst < ke)
+                        es::prefetch_2d<uint32_t, 16, CT>(payw, PW, PH, PP, (k + kst) / 8, n0, PFH);
                     es::simd<uint32_t, 8 * CT> twh[2];
                     twh[0] = es::load_2d<uint32_t, 8, CT, 1, true, false>(payw, PW, PH, PP, k / 8, n0);
                     twh[1] = es::load_2d<uint32_t, 8, CT, 1, true, false>(payw, PW, PH, PP, k / 8 + 8, n0);
                     es::simd<uint32_t, 16> zc[NGS], scb[NGS];
                     #pragma unroll
                     for (int g = 0; g < NGS; ++g) { zc[g] = zn[g]; scb[g] = sn[g]; }
-                    if (k + 128 < ke) {
+                    if (k + kst < ke) {
                         #pragma unroll
                         for (int g = 0; g < NGS; ++g) {
-                            const es::simd<uint32_t, 16> gi = gbase + uint32_t((k + 128 + GS * g) / GS);
+                            const es::simd<uint32_t, 16> gi = gbase + uint32_t((k + kst + GS * g) / GS);
                             zn[g] = es::gather<uint8_t, 16>(zer, gi);
                             sn[g] = es::gather<uint16_t, 16>(sclh, gi * 2u);
                         }

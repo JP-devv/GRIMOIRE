@@ -1499,10 +1499,12 @@ sycl::event launch_int4_smallm(sycl::queue& q, const QuantWeight& w, const sycl_
     // GRIMOIRE_I4_FASTDQ=0: the original dequant (int4_smallm_impl).
     static const bool fdq = [] { const char* e = std::getenv("GRIMOIRE_I4_FASTDQ");
         return !(e && *e == '0'); }();
+    // GRIMOIRE_I4_SMALLM_ILV=1 (2026-11-18, diagnostic): the K slices interleave by 128-K block (int4_smallm.hpp)
+    static const bool ilv = [] { const char* e = std::getenv("GRIMOIRE_I4_SMALLM_ILV"); return e && *e == '1'; }();
     if (fdq)
         return (1 << w.int4_gshift()) == 64
-            ? int4_smallm_fdq_impl<1, 64>(q, w, X, Y, M, KS, kc, TPT, deps)
-            : int4_smallm_fdq_impl<1, 128>(q, w, X, Y, M, KS, kc, TPT, deps);
+            ? int4_smallm_fdq_impl<1, 64>(q, w, X, Y, M, KS, kc, TPT, deps, ilv)
+            : int4_smallm_fdq_impl<1, 128>(q, w, X, Y, M, KS, kc, TPT, deps, ilv);
     return (1 << w.int4_gshift()) == 64
         ? int4_smallm_impl<1, 64>(q, w, X, Y, M, KS, kc, TPT, deps)
         : int4_smallm_impl<1, 128>(q, w, X, Y, M, KS, kc, TPT, deps);

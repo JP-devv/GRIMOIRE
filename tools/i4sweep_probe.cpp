@@ -104,7 +104,7 @@ int main(int argc, char** argv) {
         launch_int4_smallm(q, ws[0], xb, y, 8); check("engine M=8", 8);
         launch_int4_smallm(q, ws[0], xb, y, 16); check("engine M=16", 16);
         launch_int4_smallm(q, ws[0], xb, y, MR); check("engine M=32", MR);
-        for (int M : {7, 16, 24, 32}) {
+        for (int M : {4, 5, 7, 16}) {   // 11-18: 5 = an MTP K4 verify
             char nm[64];
             std::snprintf(nm, sizeof nm, "engine M=%d", M);
             timeit(nm, [&](const QuantWeight& w) { launch_int4_smallm(q, w, xb, y, M); });
