@@ -19256,6 +19256,26 @@ bool Grimoire::prefill_qwen4_exp(const std::vector<int32_t>& tokens,
                         // the row's tail block
                         launch_qsa_block_bits(q,bsel,sc,BTK,qbits,qwords,none);
                         qsalap(4);
+                        // 2026-11-18: verify rows (an MTP round, <= 16 rows) take the decode kernel over each row's
+                        // selected block LIST (launch_flash_decode_qsa) -- the prompt kernel below first converts the
+                        // WHOLE K / V cache to bf16 (~60 MB a call at 60K keys) for a handful of rows that attend
+                        // 2,048 keys each.  Same keys per row (top-k list + tail).  GRIMOIRE_QSA_LIST=0 = old.
+                        static const bool vlist=[]{ const char* e=std::getenv("GRIMOIRE_QSA_LIST"); return !(e&&*e=='0'); }();
+                        if(vsm&&!seqb&&vlist&&sc<=16&&HD==256&&RAT==4&&!kv_kmajor_flag()){
+                            for(int j=0;j<sc;++j){
+                                AttnParams ap{};
+                                ap.q=qv+(rr+j)*QH*HD; ap.k_cache=kc; ap.v_cache=vc;
+                                ap.out=attn+(rr+j)*QH*HD;
+                                ap.seq_len=sp+j+1; ap.seq_cap=max_seq;
+                                ap.head_dim=HD; ap.num_heads=QH; ap.num_kv_heads=KVH;
+                                ap.softmax_scale=cfg.attn_softmax_scale(HD);
+                                ap.partials=s.part; ap.part_m=s.pm; ap.part_l=s.pl;
+                                ap.splits=GRAPH_SPLITS;
+                                ap.qbits=qbits+size_t(j)*qwords; ap.qwords=qwords; ap.qrat=RAT;
+                                launch_flash_decode_qsa(q,ap,bsel+size_t(j)*BTK,BTK,none);
+                                launch_flash_merge(q,ap,none);
+                            }
+                        } else
                         launch_flash_prefill_qsa(q,qv+rr*QH*HD,kc,vc,attn+rr*QH*HD,
                             sc,sp,QH,KVH,HD,max_seq,cfg.attn_softmax_scale(HD),
                             qbits,qwords,RAT,none);
