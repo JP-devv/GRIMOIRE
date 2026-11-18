@@ -508,7 +508,7 @@ static sycl::event flash_decode_gqa(sycl::queue& q, const AttnParams& p,
 // of keys as the bitmap path; the summation order differs (rounding only).  GRIMOIRE_QSA_LIST=0 = the bitmap path.
 // ---------------------------------------------------------------------
 template <int GC>
-static sycl::event flash_decode_qsa_list(sycl::queue& q, const AttnParams& p,
+static sycl::event flash_decode_qsa_list(sycl::queue& q, const AttnParams& p, const int32_t* qblk, int qn,
                                          const std::vector<sycl::event>& deps) {
     constexpr int HD = 256, DPL = HD / SG_SIZE, KPB = 4;   // dims per lane, keys per block
     const int G      = p.num_heads / p.num_kv_heads;
@@ -532,7 +532,7 @@ static sycl::event flash_decode_qsa_list(sycl::queue& q, const AttnParams& p,
                 const int  seq  = pp.d_seq_len ? pp.d_seq_len[0] : pp.seq_len;
                 const int  nsp  = pp.capture ? splits_for(seq, pp.splits, kps, splits) : splits;
                 if (part >= nsp) return;
-                const int items = pp.qn + 1;                       // the list, then the tail block
+                const int items = qn + 1;                          // the list, then the tail block
                 const int per   = (items + nsp - 1) / nsp;
                 const int i_beg = part * per;
                 const int i_end = sycl::min(i_beg + per, items);
@@ -554,7 +554,7 @@ static sycl::event flash_decode_qsa_list(sycl::queue& q, const AttnParams& p,
                     for (int i = 0; i < DPL; ++i) acc[g][i] = 0.0f;
                 }
                 for (int ii = i_beg; ii < i_end; ++ii) {
-                    const int b = ii < pp.qn ? pp.qblk[ii] : tailb;
+                    const int b = ii < qn ? qblk[ii] : tailb;
                     if (b < 0) continue;                           // hole (uniform: one block per sub-group step)
                     const int s0 = b * pp.qrat;                    // qrat == KPB (checked at dispatch)
                     bool live[KPB];
@@ -826,16 +826,20 @@ sycl::event kmajor_decode(sycl::queue& q, const AttnParams& p, const std::vector
 }
 } // namespace
 
-sycl::event launch_flash_decode(sycl::queue& q, const AttnParams& p,
-                                const std::vector<sycl::event>& deps) {
-    // QSA list (the caller keeps qbits set too, so any other kernel below still applies the same selection)
-    if (p.qblk && p.qn > 0 && p.qrat == 4 && p.head_dim == 256 && !kv_kmajor_flag() && p.window_left <= 0 &&
+sycl::event launch_flash_decode_qsa(sycl::queue& q, const AttnParams& p, const int32_t* qblk, int qn,
+                                    const std::vector<sycl::event>& deps) {
+    if (qblk && qn > 0 && p.qbits && p.qrat == 4 && p.head_dim == 256 && !kv_kmajor_flag() && p.window_left <= 0 &&
         p.num_kv_heads > 0 && p.num_heads % p.num_kv_heads == 0 && (p.seq_cap % 4) == 0) {
         const int G = p.num_heads / p.num_kv_heads;
-        if (G % 3 == 0) return flash_decode_qsa_list<3>(q, p, deps);
-        if (G % 2 == 0) return flash_decode_qsa_list<2>(q, p, deps);
-        return flash_decode_qsa_list<1>(q, p, deps);
+        if (G % 3 == 0) return flash_decode_qsa_list<3>(q, p, qblk, qn, deps);
+        if (G % 2 == 0) return flash_decode_qsa_list<2>(q, p, qblk, qn, deps);
+        return flash_decode_qsa_list<1>(q, p, qblk, qn, deps);
     }
+    return launch_flash_decode(q, p, deps);                // the bitmap path, same selection
+}
+
+sycl::event launch_flash_decode(sycl::queue& q, const AttnParams& p,
+                                const std::vector<sycl::event>& deps) {
     if (kv_kmajor_flag()) return kmajor_decode(q, p, deps);
     if (flash_esimd_on() && p.head_dim == 256 && p.num_kv_heads > 0 &&
         p.num_heads % p.num_kv_heads == 0 && (p.num_heads / p.num_kv_heads) % 2 == 0 &&

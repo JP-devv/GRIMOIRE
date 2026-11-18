@@ -373,11 +373,10 @@ struct AttnParams {
     // in the incomplete tail block [seq/qrat*qrat, seq).  nullptr = dense.
     const uint32_t* qbits = nullptr;
     int qwords = 0, qrat = 4;
-    // The same selection as a LIST (2026-11-18): qn block indices, ascending, -1 = hole (launch_qsa_topk_blocks'
-    // output), plus the tail block.  Set = flash_decode_qsa_list (head_dim 256, FP8 D-major K), which reads each
-    // selected block's 256 K rows with all 16 lanes at once instead of walking the whole sequence.
-    const int32_t* qblk = nullptr;
-    int qn = 0;
+    // DO NOT GROW THIS STRUCT without re-checking the verify team kernel at >= 32768 keys (attn_verify_dpas.cpp
+    // verify_attn_team_impl, ESIMD, captures the whole struct): MEASURED 11-18, two more fields here (a pointer +
+    // an int) and one-card Qwen MTP at depth 32768 kept 0% of its drafts (25 tok/s; GRIMOIRE_VERIFY_TEAM=0 68).
+    // The QSA block list therefore travels as arguments of launch_flash_decode_qsa, not in here.
 };
 
 // Pick enough chunks to fill the machine without shredding the sequence.
@@ -1121,6 +1120,11 @@ sycl::event launch_causal_conv1d_l2norm(sycl::queue& q, const ConvParams& p,
 
 sycl::event launch_flash_decode(sycl::queue& q, const AttnParams& p,
                                 const std::vector<sycl::event>& deps = {});
+// Qwen4-Exp QSA decode over the selected block LIST (attention.cpp flash_decode_qsa_list): qblk = qn block indices,
+// ascending, -1 = hole (launch_qsa_topk_blocks' output), plus the tail block.  p.qbits must hold the same selection:
+// a geometry the list kernel does not cover falls back to launch_flash_decode (bitmap).
+sycl::event launch_flash_decode_qsa(sycl::queue& q, const AttnParams& p, const int32_t* qblk, int qn,
+                                    const std::vector<sycl::event>& deps = {});
 sycl::event launch_flash_merge(sycl::queue& q, const AttnParams& p,
                                const std::vector<sycl::event>& deps = {});
 // Small speculative verify batch: one subgroup per query, with all queries in

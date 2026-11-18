@@ -14230,8 +14230,8 @@ const float* Grimoire::forward_qwen4_exp(int token) {
                     // the selected list itself (attention.cpp flash_decode_qsa_list); GRIMOIRE_QSA_LIST=0 = bitmap
                     static const bool qsa_list = [] { const char* e = std::getenv("GRIMOIRE_QSA_LIST");
                                                       return !(e && *e == '0'); }();
-                    if (qsa_list) { ap.qblk = q4_blk; ap.qn = BTK; }
-                    launch_flash_decode(q, ap, none);
+                    if (qsa_list) launch_flash_decode_qsa(q, ap, q4_blk, BTK, none);
+                    else launch_flash_decode(q, ap, none);
                     tld(i, ".flash");
                     launch_flash_merge(q, ap, none);
                 } else {
@@ -15822,6 +15822,8 @@ int Grimoire::mtp4_draft(int next_token, int position, bool from_mtp_hidden) {
         ap.partials = s.part; ap.part_m = s.pm; ap.part_l = s.pl;
         ap.splits = GRAPH_SPLITS;
         ap.d_seq_len = s.d_seq_len;
+        const int32_t* ap_list = nullptr;   // the selected block list (launch_flash_decode_qsa)
+        int ap_n = 0;
         if (visible > BTK) {
             // the indexer's selection as a bitmap, the split-K flash decode masked to it (as
             // forward_qwen4_exp's default sparse path)
@@ -15837,9 +15839,10 @@ int Grimoire::mtp4_draft(int next_token, int position, bool from_mtp_hidden) {
             ap.qbits = q4_qbits; ap.qwords = qwords; ap.qrat = RAT;
             static const bool qsa_list = [] { const char* e = std::getenv("GRIMOIRE_QSA_LIST");
                                               return !(e && *e == '0'); }();
-            if (qsa_list) { ap.qblk = q4_blk; ap.qn = BTK; }
+            if (qsa_list) ap_list = q4_blk, ap_n = BTK;
         }
-        launch_flash_decode(q, ap, none);
+        if (ap_list) launch_flash_decode_qsa(q, ap, ap_list, ap_n, none);
+        else launch_flash_decode(q, ap, none);
         launch_flash_merge(q, ap, none);
     }
     if (gated) launch_gate_sigmoid_mul(q, s.attn_out, s.gsplit, cfg.n_heads * d.head_dim, none);
