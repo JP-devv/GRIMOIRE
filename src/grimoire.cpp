@@ -3082,6 +3082,17 @@ struct Grimoire {
     uint8_t*  ple_stage = nullptr;  size_t ple_stage_cap = 0;
     int64_t*  ple_iota = nullptr;   size_t ple_iota_cap = 0;
     double    ple_read_ms = 0.0;    long ple_read_rows = 0;
+    // PLE lookahead (11-19): while one prompt chunk computes, a background thread reads the NEXT chunk's rows from
+    // the file (rank 0) -- prefill_part tells it the prompt tail (ple_plan_*).  The fetch for that chunk then copies
+    // them instead of ~300K 160-byte reads with both cards waiting (Flash-Next two cards, 8K chunk: PLE ~1.2 of
+    // ~5.3 s, fenced).  Same rows, same bits.  GRIMOIRE_PLE_AHEAD=0 = off.
+    std::vector<int32_t> ple_plan_tok;  int ple_plan_p0 = -1;
+    std::thread ple_ahead_th;
+    const void* ple_ahead_d = nullptr;  int ple_ahead_p0 = -1, ple_ahead_M = 0;
+    std::vector<uint8_t> ple_ahead_buf; std::atomic<bool> ple_ahead_bad{false};
+    void ple_ahead_start(const void* layer, int p0, int M);
+    void ple_ahead_join() { if (ple_ahead_th.joinable()) ple_ahead_th.join(); }
+    void ple_ahead_drop() { ple_ahead_join(); ple_ahead_d = nullptr; ple_ahead_p0 = -1; ple_ahead_M = 0; }
     // GRIMOIRE_PLE_FILE: the table flattened to one file (tools/ple_flatten.py),
     // row r at r * row_bytes -- one pread per row, on a dataset whose
     // recordsize is small (ZFS reads whole records: 128K per 160-byte row
@@ -12087,6 +12098,10 @@ int Grimoire::admit_sequence(const std::vector<int32_t>& prompt,
                 const int budget = prefill_token_budget();
                 if (budget <= 0 || int(tail.size()) <= budget)
                     return prefill(tail, nullptr, nullptr, false);
+                // the chunks to come, for the PLE lookahead (prefill_qwen4_exp); dropped on every way out
+                ple_plan_tok = tail; ple_plan_p0 = pos;
+                struct PlanEnd { Grimoire* g; ~PlanEnd() { g->ple_plan_p0 = -1; g->ple_plan_tok.clear(); g->ple_ahead_drop(); } }
+                    plan_end{this};
                 for (size_t off = 0; off < tail.size(); off += size_t(budget)) {
                     const size_t len = std::min(size_t(budget), tail.size() - off);
                     const std::vector<int32_t> chunk(tail.begin() + off, tail.begin() + off + len);
@@ -12357,6 +12372,7 @@ void Grimoire::release() {
     if (tp_scratch) { sycl::free(tp_scratch, q); tp_scratch = nullptr; tp_scratch_elems = 0; }
     if (tshm.stage) { sycl::free(tshm.stage, q); tshm.stage = nullptr; }
     if (tpa.th.joinable()) { tpa_drain(); tpa.stop.store(true); tpa.th.join(); }
+    ple_ahead_drop();
     if (kflag) { q.wait(); sycl::free(kflag, q); kflag = nullptr; kflag_tag = 0; }
     if (tshm.res) { sycl::free(tshm.res, q); tshm.res = nullptr; }
     if (tshm.peer) { sycl::free(tshm.peer, q); tshm.peer = nullptr; }
@@ -17932,6 +17948,18 @@ bool Grimoire::ple_fetch_rows(const LayerDev& d, int p0, int M) {
         q.memcpy(ple_iota, io.data(), n * sizeof(int64_t)).wait();
     }
     if (q4_tok_h.size() < size_t(p0 + M)) return false;
+    // rows a lookahead thread already read (ple_ahead_start): the same ids, from the same file
+    if (ple_ahead_d == &d && ple_ahead_p0 >= 0 && p0 >= ple_ahead_p0 && p0 + M <= ple_ahead_p0 + ple_ahead_M) {
+        const auto ta = std::chrono::steady_clock::now();
+        ple_ahead_join();
+        if (!ple_ahead_bad.load()) {
+            std::memcpy(ple_stage, ple_ahead_buf.data() + size_t(p0 - ple_ahead_p0) * NH * rowb, n * rowb);
+            ple_read_ms += std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - ta).count();
+            ple_read_rows += long(n);
+            return true;
+        }
+        ple_ahead_drop();     // read them here after all
+    }
     if (ple_fd >= 0 && !ple_ram_tried) {
         ple_ram_tried = true;
         struct stat st{};
@@ -17982,6 +18010,48 @@ bool Grimoire::ple_fetch_rows(const LayerDev& d, int p0, int M) {
         std::chrono::steady_clock::now() - t0).count();
     ple_read_rows += long(n);
     return !bad;
+}
+
+// The next prompt chunk's rows, [p0, p0 + M), on a background thread (file-backed table only).  Its ids need the
+// token history up to p0 + M: the current history plus the planned tail's tokens.
+void Grimoire::ple_ahead_start(const void* layer, int p0, int M) {
+    ple_ahead_drop();
+    const LayerDev& d = *static_cast<const LayerDev*>(layer);
+    if (ple_fd < 0 || (ple_ram && ple_ram->ready.load()) || M <= 0 || ple_plan_p0 < 0 ||
+        p0 < ple_plan_p0 || size_t(p0 - ple_plan_p0 + M) > ple_plan_tok.size() || size_t(p0 + M) > q4_tok_h.size())
+        return;
+    const int NH = (cfg.ngram_size - 1) * cfg.heads_per_ngram;
+    const size_t rowb = size_t(d.ple_wid) * (d.ple_fp8 ? 1 : sizeof(bf16_t));
+    const size_t n = size_t(M) * NH;
+    std::vector<int32_t> hist(q4_tok_h.begin(), q4_tok_h.begin() + p0 + M);
+    std::copy(ple_plan_tok.begin() + (p0 - ple_plan_p0), ple_plan_tok.begin() + (p0 - ple_plan_p0 + M), hist.begin() + p0);
+    std::vector<int64_t> ids(n);
+    for (int m = 0; m < M; ++m)
+        qwen4_exp::ple_ngram_ids(hist[size_t(p0 + m)], hist.data(), p0 + m, d.ple_mul_h.data(), d.ple_size_h.data(),
+                                 d.ple_off_h.data(), cfg.ngram_size - 1, cfg.heads_per_ngram, NH, cfg.eos_token_id,
+                                 ids.data() + size_t(m) * NH);
+    ple_ahead_buf.resize(n * rowb);
+    ple_ahead_bad.store(false);
+    ple_ahead_d = &d; ple_ahead_p0 = p0; ple_ahead_M = M;
+    uint8_t* const buf = ple_ahead_buf.data();
+    const int fd = ple_fd;
+    const int64_t rows = d.ple_rows;
+    ple_ahead_th = std::thread([this, ids = std::move(ids), buf, fd, rows, rowb, n] {
+        b70::unpin_self();
+        auto work = [&](size_t b, size_t e) {
+            for (size_t i = b; i < e && !ple_ahead_bad.load(std::memory_order_relaxed); ++i) {
+                uint8_t* dst = buf + i * rowb;
+                const int64_t r = ids[i];
+                if (r < 0 || r >= rows) { std::memset(dst, 0, rowb); continue; }
+                if (::pread(fd, dst, rowb, off_t(r) * off_t(rowb)) != ssize_t(rowb)) ple_ahead_bad.store(true);
+            }
+        };
+        const size_t nt = std::min<size_t>(n, 16);
+        std::vector<std::thread> th;
+        for (size_t t = 0; t < nt; ++t)
+            th.emplace_back([&work, b = n * t / nt, e = n * (t + 1) / nt] { b70::unpin_self(); work(b, e); });
+        for (auto& x : th) x.join();
+    });
 }
 
 static size_t mem_available_bytes();
@@ -19242,6 +19312,17 @@ bool Grimoire::prefill_qwen4_exp(const std::vector<int32_t>& tokens,
     if (!seqb) {
         if (q4_tok_h.size() < size_t(max_seq)) q4_tok_h.resize(size_t(max_seq), 0);
         std::copy(tokens.begin(), tokens.end(), q4_tok_h.begin() + start_pos);
+    }
+    // PLE lookahead: the next planned chunk's rows are read while this one computes (rank 0, file-backed table)
+    {
+        static const bool ahead_on = [] { const char* e = std::getenv("GRIMOIRE_PLE_AHEAD"); return !(e && *e == '0'); }();
+        const int np0 = start_pos + M;
+        if (ahead_on && !verify && !seqb && ple_plan_p0 >= 0 && (!tp_mega || tp_rank == 0) &&
+            np0 < ple_plan_p0 + int(ple_plan_tok.size()) && np0 >= ple_plan_p0) {
+            const int nM = std::min(M, ple_plan_p0 + int(ple_plan_tok.size()) - np0);
+            for (const LayerDev& ld : L)
+                if (ld.ple && ld.ple_ssd) { ple_ahead_start(&ld, np0, nM); break; }
+        }
     }
     if (pp_later) {
         if (!pp_recv_hidden(hyper, size_t(M) * WIDE)) {
