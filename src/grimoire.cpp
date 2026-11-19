@@ -65,6 +65,8 @@
 #include <functional>
 #include <type_traits>
 #include <dlfcn.h>
+#include <pthread.h>
+#include <sched.h>
 
 namespace sycl_ext = sycl::ext::oneapi::experimental;
 #include <cstdio>
@@ -6730,12 +6732,26 @@ int Grimoire::tpa_post(const TpaJob& j0, bool with_event) {
 // The helper: jobs in order.  It signals every event it owes -- after a failure too (the rest of the scope then
 // only signals) -- so the card never waits on an event nobody will set.
 void Grimoire::tpa_main() {
+    // its own core (11-19: unpinned, the two ranks' main threads and helpers crowded the free cores -- the
+    // 285H's P-cores all hold a decode thread or pool workers -- and drafts got 25% slower).  Default: the
+    // last CPUs, one per rank (the Tower: 14 / 15, LP-E cores; the helper mostly waits, its share of the CPU
+    // experts is handed out by a counter).  GRIMOIRE_TP_ASYNC_CPU=<cpu> sets it, -1 = unpinned.
     b70::unpin_self();                // started from a pinned thread it would inherit one CPU
+    {
+        const int nc = int(std::thread::hardware_concurrency());
+        const char* e = std::getenv("GRIMOIRE_TP_ASYNC_CPU");
+        const int cpu = e && *e ? std::atoi(e) : (nc >= 8 ? nc - tp_world + tp_rank : -1);
+        if (cpu >= 0 && cpu < nc) {
+            cpu_set_t cs; CPU_ZERO(&cs); CPU_SET(cpu, &cs);
+            if (pthread_setaffinity_np(pthread_self(), sizeof cs, &cs) == 0)
+                std::printf("  TP async: helper thread on CPU %d\n", cpu);
+        }
+    }
     uint64_t t = 0;
     long idle = 0;
     while (!tpa.stop.load(std::memory_order_acquire)) {
         if (t == tpa.head.load(std::memory_order_acquire)) {
-            if (++idle > 200000) std::this_thread::sleep_for(std::chrono::microseconds(20));
+            if (++idle > 20000) std::this_thread::sleep_for(std::chrono::microseconds(20));
             else _mm_pause();
             continue;
         }
@@ -6748,7 +6764,6 @@ void Grimoire::tpa_main() {
                 else if (j.kind == 1) {
                     if (tpa_wait_tag(j.rtag, "TP async: small-M rows' routes")) { cx_rows_host(j.d, j.M, false); ok = true; }
                 } else if (tpa_wait_tag(j.rtag, "TP async: CPU experts route")) {
-                    const b70::ScopedCpuPin pin(cx_caller_cpu);     // where the decode thread would have run them
                     tpa.last_cx_n = cx_decode_host(const_cast<void*>(j.d));
                     ok = true;
                 }
@@ -14112,11 +14127,11 @@ void Grimoire::route_trace(const LayerDev& d, int kind, const int32_t* ids, int 
 
 const float* Grimoire::forward_qwen4_exp(int token) {
     // TP async for decode too (GRIMOIRE_TP_ASYNC=2): the token is queued ahead, the helper thread does the small
-    // all-reduces' host part and the CPU experts (pinned where this thread would have been)
+    // all-reduces' host part and the CPU experts
     static const bool tpa_dec_env = [] { const char* e = std::getenv("GRIMOIRE_TP_ASYNC"); return e && *e == '2'; }();
     const bool tpa_dec = tpa_dec_env && tp_mega && !pp_enabled() && tpa_begin();
     struct TpaScopeEnd { Grimoire* g; bool on; ~TpaScopeEnd() { if (on) g->tpa_end(); } } tpa_scope_end{this, tpa_dec};
-    const b70::ScopedCpuPin cx_pin(tpa_dec ? -1 : cx_caller_cpu);      // see the CPU experts' start
+    const b70::ScopedCpuPin cx_pin(cx_caller_cpu);      // see the CPU experts' start (TP async: it queues the step)
     power_gov_tick();
     tm_heat_step();                                     // GRIMOIRE_EXPERT_HEAT: a step boundary
     // MTP head (mtp4): its caches at the previous position -- that token's backbone state
@@ -19137,6 +19152,7 @@ bool Grimoire::prefill_qwen4_exp(const std::vector<int32_t>& tokens,
     // TP async (GRIMOIRE_TP_ASYNC=1): this verify is queued ahead; every exit drains the helper
     const bool tpa_on = vsm && tp_mega && tpa_begin();
     struct TpaScopeEnd { Grimoire* g; bool on; ~TpaScopeEnd() { if (on) g->tpa_end(); } } tpa_scope_end{this, tpa_on};
+    const b70::ScopedCpuPin tpa_pin(tpa_on ? cx_caller_cpu : -1);   // the thread that queues it, on decode's core
     uint32_t* vqb = nullptr;    // verify: the QSA layers' block bitmap (freed with mem)
 
     Xe2DenseMXFP4 q4_dense_f32 = load_xe2_dense_mxfp4_f32();
