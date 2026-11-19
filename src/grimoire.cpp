@@ -3238,6 +3238,8 @@ struct Grimoire {
     float   *q4_hyper=nullptr, *q4_normed=nullptr, *q4_gate=nullptr;
     float   *q4_lora=nullptr,  *q4_inj=nullptr,   *q4_pinj=nullptr;
     float   *q4_pend=nullptr;
+    // prefill_qwen4_exp's verify buffers, kept between MTP rounds (GRIMOIRE_Q4_VERIFY_CACHE): (pointer, bytes)
+    std::vector<std::pair<void*, size_t>> q4v_cache;
     // QSA scratch
     float   *q4_ixqk=nullptr, *q4_pool=nullptr, *q4_lg=nullptr;
     int32_t *q4_blk=nullptr, *q4_idx=nullptr, *q4_vis=nullptr;
@@ -18698,7 +18700,29 @@ bool Grimoire::prefill_qwen4_exp(const std::vector<int32_t>& tokens,
             if (L[li].ple) { vx_poff[li] = ps; ps += size_t(std::max(0, SLEN) + kSpecBatch) * WIDE; }
         }
     }
-    auto df = [&](size_t n) { return sycl::malloc_device<float>(n, q); };
+    // verify (11-19): the call's buffers stay allocated for the next verify -- ~40 device allocations and frees
+    // an MTP round before (unitrace, Flash-Next two cards: ~11 a round reached Level Zero, a free ~60 us, after
+    // the round's last sync).  Slots are taken in the same order every call and grow when a call needs more;
+    // the code never relied on fresh memory (the USM pool hands out used memory too).
+    // GRIMOIRE_Q4_VERIFY_CACHE=0 = allocate and free per call.
+    static const bool vcache_on = [] { const char* e = std::getenv("GRIMOIRE_Q4_VERIFY_CACHE");
+        return !(e && *e == '0'); }();
+    const bool vcache = verify && vcache_on;
+    size_t vci = 0;
+    std::vector<void*> vcached;
+    auto dalloc = [&](size_t bytes) -> void* {
+        if (!vcache) return sycl::aligned_alloc_device(256, std::max<size_t>(bytes, 1), q);
+        if (vci >= q4v_cache.size()) q4v_cache.push_back({nullptr, 0});
+        auto& sl = q4v_cache[vci++];
+        if (sl.second < bytes || !sl.first) {
+            if (sl.first) { q.wait(); sycl::free(sl.first, q); }
+            sl.first = sycl::aligned_alloc_device(256, std::max<size_t>(bytes, 1), q);
+            sl.second = sl.first ? bytes : 0;
+        }
+        vcached.push_back(sl.first);
+        return sl.first;
+    };
+    auto df = [&](size_t n) { return static_cast<float*>(dalloc(n * sizeof(float))); };
     float* hyper  = df(size_t(M) * WIDE);
     float* normed = df(size_t(SUB) * WIDE);
     float* gate   = df(size_t(SUB) * WIDE);
@@ -18719,26 +18743,26 @@ bool Grimoire::prefill_qwen4_exp(const std::vector<int32_t>& tokens,
     float* mh     = df(size_t(SUB) * TK * MI);
     float* rlog   = df(size_t(SUB) * E);
     float* shout  = df(size_t(SUB) * H);
-    sycl_bf16* xb = sycl::malloc_device<sycl_bf16>(size_t(SUB) * WX, q);
-    int8_t* a8    = sycl::malloc_device<int8_t>(size_t(SUB) * WX, q);
+    sycl_bf16* xb = static_cast<sycl_bf16*>(dalloc((size_t(SUB) * WX) * sizeof(sycl_bf16)));
+    int8_t* a8    = static_cast<int8_t*>(dalloc((size_t(SUB) * WX) * sizeof(int8_t)));
     float*  a8s   = df(size_t(SUB));
     // native GGUF: the out projection's tiled V-head columns, one sub-chunk
     float* gguf_v_input = gguf_native_enabled(ck) ? df(size_t(SUB) * Hv * Dv) : nullptr;
-    int32_t* dtok = sycl::malloc_device<int32_t>(size_t(M), q);
-    int32_t* rex  = sycl::malloc_device<int32_t>(size_t(M) * TK, q);
+    int32_t* dtok = static_cast<int32_t*>(dalloc((size_t(M)) * sizeof(int32_t)));
+    int32_t* rex  = static_cast<int32_t*>(dalloc((size_t(M) * TK) * sizeof(int32_t)));
     float*   rwt  = df(size_t(M) * TK);
     // QSA
     float*   ixqk = df(size_t(SUB) * std::max(1, (IH + IKV) * IHD));
     float*   ixq  = df(size_t(SUB) * std::max(1, IH * IHD));
     float*   ixk  = df(size_t(SUB) * std::max(1, IHD));
     float*   lgt  = df(size_t(SUB) * NBLK);
-    int32_t* bsel = sycl::malloc_device<int32_t>(size_t(SUB) * std::max(1, BTK), q);
-    int32_t* idx  = sycl::malloc_device<int32_t>(size_t(SUB) * EXPW, q);
-    int32_t* vis  = sycl::malloc_device<int32_t>(size_t(SUB), q);
-    int32_t* sql  = sycl::malloc_device<int32_t>(size_t(SUB), q);
-    int32_t* qps  = sycl::malloc_device<int32_t>(size_t(SUB), q);
+    int32_t* bsel = static_cast<int32_t*>(dalloc((size_t(SUB) * std::max(1, BTK)) * sizeof(int32_t)));
+    int32_t* idx  = static_cast<int32_t*>(dalloc((size_t(SUB) * EXPW) * sizeof(int32_t)));
+    int32_t* vis  = static_cast<int32_t*>(dalloc((size_t(SUB)) * sizeof(int32_t)));
+    int32_t* sql  = static_cast<int32_t*>(dalloc((size_t(SUB)) * sizeof(int32_t)));
+    int32_t* qps  = static_cast<int32_t*>(dalloc((size_t(SUB)) * sizeof(int32_t)));
     // PLE
-    int64_t* pids = sycl::malloc_device<int64_t>(size_t(SUB) * std::max(1, NH), q);
+    int64_t* pids = static_cast<int64_t*>(dalloc((size_t(SUB) * std::max(1, NH)) * sizeof(int64_t)));
     float*   pemb = df(size_t(SUB) * std::max(1, cfg.ple_embed_dim));
     float*   pkey = df(size_t(SUB) * WIDE);
     float*   pval = df(size_t(SUB) * H);
@@ -18754,7 +18778,10 @@ bool Grimoire::prefill_qwen4_exp(const std::vector<int32_t>& tokens,
         (void*)bsel,(void*)idx,(void*)vis,(void*)sql,(void*)qps,(void*)pids,
         (void*)pemb,(void*)pkey,(void*)pval,(void*)pgat,(void*)pcnv};
     if (gguf_native_enabled(ck)) mem.push_back(gguf_v_input);
-    auto cleanup = [&]() { for (void* p : mem) if (p) sycl::free(p, q); };
+    auto cleanup = [&]() {
+        for (void* p : mem)
+            if (p && !(vcache && std::find(vcached.begin(), vcached.end(), p) != vcached.end())) sycl::free(p, q);
+    };
     for (void* p : mem) if (!p) { cleanup(); return false; }
 
     const std::vector<sycl::event> none{};
@@ -19262,7 +19289,7 @@ bool Grimoire::prefill_qwen4_exp(const std::vector<int32_t>& tokens,
                     // verify: one bitmap for the whole call (the queue is in order), not a
                     // malloc, a wait and a free in each of the QSA layers
                     if(vsm&&!vqb&&!qsa_gather&&flash_fast_supported(HD,QH,KVH)&&qwords<=(NBLK+31)/32){
-                        vqb=sycl::malloc_device<uint32_t>(size_t(SUB)*size_t((NBLK+31)/32),q);
+                        vqb=static_cast<uint32_t*>(dalloc(size_t(SUB)*size_t((NBLK+31)/32)*sizeof(uint32_t)));
                         if(vqb) mem.push_back(vqb);
                     }
                     uint32_t* qbits=(!qsa_gather&&flash_fast_supported(HD,QH,KVH))
@@ -19474,7 +19501,14 @@ bool Grimoire::prefill_qwen4_exp(const std::vector<int32_t>& tokens,
         // split head keep decode's GEMV row by row
         float* vlog=nullptr;
         const int HN=lm_head.w.N;
-        if(vsm&&!vexact&&verify&&!tp_head_split&&lm_head.w.payload&&!lm_head.has_i4()&&HN>=cfg.vocab){
+        // Megatron TP with the head split over the vocabulary (11-19): the rows as one small-M GEMM over this
+        // rank's shard too -- the GEMV row by row read the 318 MB INT8 shard once per row (Flash-Next two cards,
+        // MTP 3: 4 x 0.53 ms of a 38 ms verify).  Each rank's values come from the same kernel, so
+        // tp_head_pick merges like values.  GRIMOIRE_VERIFY_SPLIT_HEAD_SMALLM=0 = the GEMV per row.
+        static const bool vsplit=[]{ const char* e=std::getenv("GRIMOIRE_VERIFY_SPLIT_HEAD_SMALLM");
+            return !(e&&*e=='0'); }();
+        const bool head_rows_ok=tp_head_split?(vsplit&&HN>=head_valid):HN>=cfg.vocab;
+        if(vsm&&!vexact&&verify&&head_rows_ok&&lm_head.w.payload&&!lm_head.has_i4()){
             const bool hi4=int4_smallm_ok(lm_head.w,M,xb,nullptr);
             const bool hf8=!hi4&&fp8_smallm_ok(lm_head.w,M,xb,nullptr);
             const bool hnq=!hi4&&!hf8&&native_smallm_ok(lm_head.w,M,xb,nullptr);

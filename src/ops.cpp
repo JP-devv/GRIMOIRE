@@ -1159,7 +1159,14 @@ sycl::event router_topk_esimd_rows(sycl::queue& q, const float* logits, int toke
             const int t = int(it.get_group(0));
             int32_t* oe = out_e + int64_t(t) * top_k;
             float* ow = out_w + int64_t(t) * top_k;
-            es::simd<float, E> v = es::block_load<float, E>(logits + int64_t(t) * E);
+            // more than 256 logits (Flash-Next: 512) arrive as 256-float blocks, as router_topk_esimd
+            es::simd<float, E> v;
+            if constexpr (E <= 256) v = es::block_load<float, E>(logits + int64_t(t) * E);
+            else {
+                #pragma unroll
+                for (int c = 0; c < E / 256; ++c)
+                    v.template select<256, 1>(c * 256) = es::block_load<float, 256>(logits + int64_t(t) * E + c * 256);
+            }
             es::simd<int, E> idx(0, 1);
             es::simd_mask<E> live = 1;
             es::simd<float, 16> sv = 0.0f;
@@ -1345,6 +1352,14 @@ sycl::event launch_router_topk_batched(
         return !(e && *e == '0'); }();
     if (topk_es && n_experts == 256 && top_k >= 1 && top_k <= 16)
         return router_topk_esimd_rows<256>(q, logits, tokens, top_k, out_expert, out_weight,
+                                           normalize, deps);
+    // Flash-Next routes 512 (11-19): its MTP verify (4 rows) took 49.5 us a layer in the sub-group kernel below,
+    // ~2.5 ms of a 38 ms two-card verify, where decode's register kernel takes 7.7 us for one row.  The row
+    // kernel repeats router_topk_esimd<512>'s operations per row; with normalize the weights are the same
+    // softmax as below.  GRIMOIRE_TOPK_ROWS512=0 = the sub-group kernel.
+    static const bool rows512 = [] { const char* e = std::getenv("GRIMOIRE_TOPK_ROWS512"); return !(e && *e == '0'); }();
+    if (topk_es && rows512 && normalize && n_experts == 512 && top_k >= 1 && top_k <= 16)
+        return router_topk_esimd_rows<512>(q, logits, tokens, top_k, out_expert, out_weight,
                                            normalize, deps);
     return q.submit([&](sycl::handler& h) {
         h.depends_on(deps);
