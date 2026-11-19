@@ -507,7 +507,7 @@ static sycl::event flash_decode_gqa(sycl::queue& q, const AttnParams& p,
 // Same partial layout and split count as the other decode kernels, so launch_flash_merge is unchanged.  Same set
 // of keys as the bitmap path; the summation order differs (rounding only).  GRIMOIRE_QSA_LIST=0 = the bitmap path.
 // ---------------------------------------------------------------------
-template <int GC>
+template <int GC, bool KeyMajor = false>
 static sycl::event flash_decode_qsa_list(sycl::queue& q, const AttnParams& p, const int32_t* qblk, int qn,
                                          const std::vector<sycl::event>& deps) {
     constexpr int HD = 256, DPL = HD / SG_SIZE, KPB = 4;   // dims per lane, keys per block
@@ -563,9 +563,19 @@ static sycl::event flash_decode_qsa_list(sycl::queue& q, const AttnParams& p, co
                     if (!live[0]) continue;
                     // ---- every load first: 16 K words (4 keys x this lane's 16 dims) and the live V rows ----
                     uint32_t kw[DPL];
-                    #pragma unroll
-                    for (int i = 0; i < DPL; ++i)
-                        kw[i] = *reinterpret_cast<const uint32_t*>(kh + int64_t(d0 + i) * pp.seq_cap + s0);
+                    uint64_t kr[KPB][DPL / 8];
+                    if constexpr (KeyMajor) {
+                        #pragma unroll
+                        for (int k = 0; k < KPB; ++k)
+                            #pragma unroll
+                            for (int w = 0; w < DPL / 8; ++w)
+                                kr[k][w] = live[k] ? *reinterpret_cast<const uint64_t*>(
+                                    kh + int64_t(s0 + k) * HD + d0 + 8 * w) : 0ull;
+                    } else {
+                        #pragma unroll
+                        for (int i = 0; i < DPL; ++i)
+                            kw[i] = *reinterpret_cast<const uint32_t*>(kh + int64_t(d0 + i) * pp.seq_cap + s0);
+                    }
                     uint64_t vw[KPB][DPL / 8];
                     #pragma unroll
                     for (int k = 0; k < KPB; ++k)
@@ -583,7 +593,12 @@ static sycl::event flash_decode_qsa_list(sycl::queue& q, const AttnParams& p, co
                     for (int i = 0; i < DPL; ++i) {
                         float kf[KPB];
                         #pragma unroll
-                        for (int k = 0; k < KPB; ++k) kf[k] = e4m3_to_f32(uint8_t(kw[i] >> (8 * k)));
+                        for (int k = 0; k < KPB; ++k) {
+                            if constexpr (KeyMajor)
+                                kf[k] = e4m3_to_f32(uint8_t(kr[k][i / 8] >> (8 * (i % 8))));
+                            else
+                                kf[k] = e4m3_to_f32(uint8_t(kw[i] >> (8 * k)));
+                        }
                         #pragma unroll
                         for (int g = 0; g < GC; ++g)
                             #pragma unroll
@@ -970,9 +985,14 @@ sycl::event launch_qsa_prefill_list(sycl::queue& q, const float* qv, const uint8
 
 sycl::event launch_flash_decode_qsa(sycl::queue& q, const AttnParams& p, const int32_t* qblk, int qn,
                                     const std::vector<sycl::event>& deps) {
-    if (qblk && qn > 0 && p.qbits && p.qrat == 4 && p.head_dim == 256 && !kv_kmajor_flag() && p.window_left <= 0 &&
+    if (qblk && qn > 0 && p.qbits && p.qrat == 4 && p.head_dim == 256 && p.window_left <= 0 &&
         p.num_kv_heads > 0 && p.num_heads % p.num_kv_heads == 0 && (p.seq_cap % 4) == 0) {
         const int G = p.num_heads / p.num_kv_heads;
+        if (kv_kmajor_flag()) {
+            if (G % 3 == 0) return flash_decode_qsa_list<3, true>(q, p, qblk, qn, deps);
+            if (G % 2 == 0) return flash_decode_qsa_list<2, true>(q, p, qblk, qn, deps);
+            return flash_decode_qsa_list<1, true>(q, p, qblk, qn, deps);
+        }
         if (G % 3 == 0) return flash_decode_qsa_list<3>(q, p, qblk, qn, deps);
         if (G % 2 == 0) return flash_decode_qsa_list<2>(q, p, qblk, qn, deps);
         return flash_decode_qsa_list<1>(q, p, qblk, qn, deps);
@@ -1039,7 +1059,8 @@ sycl::event launch_flash_decode(sycl::queue& q, const AttnParams& p,
 // ---------------------------------------------------------------------
 sycl::event launch_flash_merge(sycl::queue& q, const AttnParams& p,
                                const std::vector<sycl::event>& deps) {
-    if (kv_kmajor_flag()) return q.ext_oneapi_submit_barrier(deps);   // kmajor_decode merged already
+    if (kv_kmajor_flag() && !p.qbits)
+        return q.ext_oneapi_submit_barrier(deps);   // Dense key-major decode merged already.
     return q.submit([&](sycl::handler& h) {
         h.depends_on(deps);
         const AttnParams pp = p;
@@ -1529,6 +1550,7 @@ static sycl::event launch_qsa_attention_impl(
     const uint8_t* v_cache, const int32_t* idx, float* out, int rows,
     int n_heads, int kv_heads, int head_dim, int seq_cap, int n_idx,
     float softmax_scale, const std::vector<sycl::event>& deps) {
+    const bool key_major = kv_kmajor_flag();
     return q.submit([&](sycl::handler& h) {
         h.depends_on(deps);
         h.parallel_for(
@@ -1562,8 +1584,8 @@ static sycl::event launch_qsa_attention_impl(
                     if (s >= 0 && s < seq_cap) {
                         float dot = 0.0f;
                         for (int d = 0; d < head_dim; ++d)
-                            dot = sycl::fma(qh[d], e4m3_to_f32(
-                                kh[int64_t(d) * seq_cap + s]), dot);
+                            dot = sycl::fma(qh[d], e4m3_to_f32(kh[key_major
+                                ? int64_t(s) * head_dim + d : int64_t(d) * seq_cap + s]), dot);
                         score = dot * softmax_scale;
                     }
                     const float mblk = sycl::reduce_over_group(
@@ -1606,7 +1628,6 @@ sycl::event launch_qsa_attention(
     const uint8_t* v_cache, const int32_t* idx, float* out, int rows,
     int n_heads, int kv_heads, int head_dim, int seq_cap, int n_idx,
     float softmax_scale, const std::vector<sycl::event>& deps) {
-    kv_kmajor_refuse("launch_qsa_attention");
     return head_dim > MAX_HEAD_DIM
          ? launch_qsa_attention_impl<MAX_DPL_WIDE>(q, qv, k_cache, v_cache,
              idx, out, rows, n_heads, kv_heads, head_dim, seq_cap, n_idx,
