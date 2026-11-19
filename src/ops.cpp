@@ -3599,7 +3599,7 @@ sycl::event launch_ple_embed_gather(sycl::queue& q, const void* table,
                                     const int64_t* ids, float* out, int rows,
                                     int ngram_heads, int head_dim,
                                     int64_t table_rows,
-                                    const std::vector<sycl::event>& deps) {
+                                    const std::vector<sycl::event>& deps, bool round_to_bf16) {
     const int width = ngram_heads * head_dim;
     const uint8_t* raw = static_cast<const uint8_t*>(table);
     const bf16_t*  bf  = static_cast<const bf16_t*>(table);
@@ -3617,7 +3617,10 @@ sycl::event launch_ple_embed_gather(sycl::queue& q, const void* table,
                     const int64_t at = row * head_dim + d;
                     v = fp8 ? e4m3_to_f32(raw[at]) * scale : bf16_to_f32(bf[at]);
                 }
-                out[int64_t(r) * width + w] = v;
+                // The original two-rank broadcast rounds its partial to
+                // bf16 and adds +0 from the rank that did not read the table.
+                out[int64_t(r) * width + w] =
+                    round_to_bf16 ? bf16_to_f32(f32_to_bf16(v)) + 0.0f : v;
             });
     });
 }

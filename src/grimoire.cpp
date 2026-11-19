@@ -41,6 +41,7 @@
 // =====================================================================
 #include "kernels.hpp"
 #include "kv_vmm.hpp"
+#include "ple_read_pool.hpp"
 #include "sample_logits.hpp"
 #include "attn_verify.hpp"
 #include "b70/engine.hpp"
@@ -2609,6 +2610,12 @@ struct Grimoire {
     // larger than a slot (GRIMOIRE_TP_SHM_ROWS rows, default 256 = 5 MiB at
     // hidden 5120) go in pieces, so no single transfer is large.  The socket
     // path (tp_allreduce_sum) is the fallback: GRIMOIRE_TP_SHM=0.
+    struct alignas(64) TpPleRows {
+        std::atomic<uint64_t> ready{0};
+        alignas(64) std::atomic<uint64_t> consumed{0};
+        size_t bytes = 0;
+        uint8_t data[16384];
+    };
     struct TpShm {
         uint8_t* base = nullptr; size_t bytes = 0;
         size_t slot_elems = 0;       // floats per slot; bigger calls go in pieces
@@ -2711,6 +2718,8 @@ struct Grimoire {
         // adds it to this card's own partial, rounded the same way -- the same two fp32 operands, so the same bits.
         bool small_peer = false;
         uint8_t* sb_cpu = nullptr; float* sb_dev = nullptr; int sb_fd = -1; size_t sb_bytes = 0;
+        TpPleRows* ple = nullptr;
+        uint64_t ple_seq = 0;
     } tshm;
     bool tp_shm_setup(std::string& err);
     bool tp_shm_allreduce(float* dev, size_t elems);
@@ -3097,6 +3106,7 @@ struct Grimoire {
     struct PleRam { std::atomic<bool> ready{false}, stop{false}, done{false};
                     uint8_t* buf = nullptr; size_t bytes = 0; };
     std::shared_ptr<PleRam> ple_ram;
+    std::unique_ptr<PleReadPool> ple_readers;
     bool ple_ram_tried = false;
     void ple_ram_start(size_t bytes);
     // GRIMOIRE_Q4_TIMING decode totals: ple, hc, deltanet, full attn, moe, head
@@ -4290,6 +4300,8 @@ struct Grimoire {
     }
     // PLE from the file: rows for positions [p0, p0+M) into ple_stage.
     bool ple_fetch_rows(const LayerDev& d, int p0, int M);
+    bool ple_prepare_rows(size_t rows, size_t bytes);
+    bool tp_ple_rows(const LayerDev& d, size_t rows, size_t bytes);
     TieredMoeView tm_view(const LayerDev& d) const {
         return TieredMoeView{tm_lay, d.tm_eptr, cfg.n_experts, cfg.top_k};
     }
@@ -5505,6 +5517,11 @@ bool Grimoire::tp_shm_setup(std::string& err){
         tshm.pipe_off=tshm.bytes;
         tshm.bytes+=size_t(W)*size_t(tshm.pipe_slots)*tshm.pipe_piece*sizeof(float);
     }
+    size_t ple_offset = 0;
+    if (const char* e = std::getenv("GRIMOIRE_TP_PLE_RAW"); W == 2 && cfg.is_qwen4_exp && e && *e == '1') {
+        ple_offset = (tshm.bytes + alignof(TpPleRows) - 1) & ~(alignof(TpPleRows) - 1);
+        tshm.bytes = ple_offset + sizeof(TpPleRows);
+    }
     // Named after rank 0's PID, which it sends with the go-ahead: unique per
     // server even when several containers share the host's /dev/shm
     // (--ipc=host).
@@ -5530,6 +5547,11 @@ bool Grimoire::tp_shm_setup(std::string& err){
     if(m==MAP_FAILED){err=std::string("TP shared memory map failed: ")+std::strerror(errno);return false;}
     tshm.base=static_cast<uint8_t*>(m);
     if(tp_rank==0)std::memset(tshm.base,0,kTpShmHeader);
+    if (ple_offset) {
+        tshm.ple = reinterpret_cast<TpPleRows*>(tshm.base + ple_offset);
+        tshm.ple_seq = 0;
+        if (tp_rank == 0) std::construct_at(tshm.ple);
+    }
     // everyone mapped (and rank 0 zeroed the flags) before anyone uses it
     int ready=1;
     if(!tp_agree(ready)||ready!=1){err="TP shm handshake failed";return false;}
@@ -12555,7 +12577,7 @@ void Grimoire::release() {
     if (tp_wq_gu) { sycl::free(tp_wq_gu, q); tp_wq_gu = nullptr; tp_wq_gu_cap = 0; }
     if (tp_wq_dn) { sycl::free(tp_wq_dn, q); tp_wq_dn = nullptr; tp_wq_dn_cap = 0; }
     tshm.qd2h.reset(); tshm.qh2d.reset();
-    if (tshm.base) { ::munmap(tshm.base, tshm.bytes); tshm.base = nullptr; }
+    if (tshm.base) { ::munmap(tshm.base, tshm.bytes); tshm.base = nullptr; tshm.ple = nullptr; }
     if (tp_act) { sycl::free(tp_act, q); tp_act = nullptr; tp_act_elems = 0; }
     if(tp_expert){sycl::free(tp_expert,q);tp_expert=nullptr;}
     if(tp_weight){sycl::free(tp_weight,q);tp_weight=nullptr;}
@@ -12705,6 +12727,7 @@ void Grimoire::release() {
         ple_ram.reset();
     }
     ple_ram_tried = false;
+    ple_readers.reset();
     if (ple_fd >= 0) { ::close(ple_fd); ple_fd = -1; }
     tm_cap = tm_icap = 0; tm_any = false; tm_vram_per_layer = -1; tm_vram_bytes = tm_host_bytes = 0;
     if (tm_cq) { tm_cq->wait(); tm_cq.reset(); }
@@ -14505,10 +14528,19 @@ const float* Grimoire::forward_qwen4_exp(int token) {
             const int NH = (cfg.ngram_size - 1) * cfg.heads_per_ngram;
             const int HD = cfg.ple_embed_dim / NH;
             const int state_len = (cfg.ple_conv_kernel - 1) * cfg.ngram_size;
+            const size_t raw_bytes = size_t(NH) * d.ple_wid * (d.ple_fp8 ? 1 : sizeof(bf16_t));
+            static const char* async_env = std::getenv("GRIMOIRE_TP_ASYNC");
+            const bool raw_exchange = tshm.ple && d.ple_ssd && raw_bytes <= sizeof(TpPleRows::data) &&
+                tshm.sb_cpu && tshm.small_bf16 && ksend_on() && !tp_peer_copy.active() &&
+                size_t(NH) * HD <= tshm.small_max && !(async_env && (*async_env == '1' || *async_env == '2'));
             // Megatron TP: only rank 0 reads the table (one 51 GB copy in RAM, not
             // two); the gathered rows reach rank 1 through the all-reduce below,
             // to which it adds zeros -- the same values on both ranks.
-            if (tp_mega && tp_rank != 0) {
+            if (raw_exchange) {
+                if (!tp_ple_rows(d, size_t(NH), raw_bytes)) return nullptr;
+                launch_ple_embed_gather(q, ple_stage, d.ple_fp8, d.ple_scale,
+                                       ple_iota, q4_emb, 1, NH, HD, NH, none, true);
+            } else if (tp_mega && tp_rank != 0) {
                 q.memset(q4_emb, 0, size_t(NH) * HD * sizeof(float));
             } else
             if (d.ple_ssd) {
@@ -14525,7 +14557,7 @@ const float* Grimoire::forward_qwen4_exp(int token) {
             launch_ple_embed_gather(q, d.ple_table, d.ple_fp8, d.ple_scale,
                                     q4_ids, q4_emb, 1, NH, HD, d.ple_rows, none);
             }
-            if (tp_mega && !tp_block_reduce(q4_emb, size_t(NH) * HD)) {
+            if (tp_mega && !raw_exchange && !tp_block_reduce(q4_emb, size_t(NH) * HD)) {
                 std::fprintf(stderr, "TP: PLE row broadcast failed\n");
                 return nullptr;
             }
@@ -18108,15 +18140,12 @@ bool Grimoire::prefill_sandwich(const std::vector<int32_t>& tokens,
 // is one pread.  Rows land in pinned ple_stage in id order, and the
 // existing gather kernel reads them through the identity list ple_iota.
 // ---------------------------------------------------------------------
-bool Grimoire::ple_fetch_rows(const LayerDev& d, int p0, int M) {
-    const int NH = (cfg.ngram_size - 1) * cfg.heads_per_ngram;
-    const size_t rowb = size_t(d.ple_wid) * (d.ple_fp8 ? 1 : sizeof(bf16_t));
-    const size_t n = size_t(M) * NH;
-    if (n * rowb > ple_stage_cap) {
+bool Grimoire::ple_prepare_rows(size_t n, size_t bytes) {
+    if (bytes > ple_stage_cap) {
         q.wait();
         if (ple_stage) sycl::free(ple_stage, q);
-        ple_stage = sycl::malloc_host<uint8_t>(n * rowb, q);
-        ple_stage_cap = ple_stage ? n * rowb : 0;
+        ple_stage = sycl::malloc_host<uint8_t>(bytes, q);
+        ple_stage_cap = ple_stage ? bytes : 0;
         if (!ple_stage) return false;
     }
     if (n > ple_iota_cap) {
@@ -18129,6 +18158,58 @@ bool Grimoire::ple_fetch_rows(const LayerDev& d, int p0, int M) {
         for (size_t i = 0; i < n; ++i) io[i] = int64_t(i);
         q.memcpy(ple_iota, io.data(), n * sizeof(int64_t)).wait();
     }
+    return true;
+}
+
+bool Grimoire::tp_ple_rows(const LayerDev& d, size_t rows, size_t bytes) {
+    auto& shared = *tshm.ple;
+    const uint64_t seq = ++tshm.ple_seq;
+    const auto wait_for = [](const std::atomic<uint64_t>& counter, uint64_t target) {
+        const auto start = std::chrono::steady_clock::now();
+        for (unsigned spins = 0; counter.load(std::memory_order_acquire) < target; ++spins) {
+            __builtin_ia32_pause();
+            if ((spins & 0xffff) == 0xffff) {
+                if (std::chrono::steady_clock::now() - start > std::chrono::seconds(120)) return false;
+                std::this_thread::yield();
+            }
+        }
+        return true;
+    };
+    if (tp_rank == 0) {
+        if (!wait_for(shared.consumed, seq - 1)) {
+            std::fprintf(stderr, "TP PLE: timed out waiting for the previous rows to be read\n");
+            return false;
+        }
+        bool ok = false;
+        try { ok = ple_fetch_rows(d, pos, 1); }
+        catch (const std::exception& ex) { std::fprintf(stderr, "TP PLE: %s\n", ex.what()); }
+        if (ok) std::memcpy(shared.data, ple_stage, bytes);
+        shared.bytes = ok ? bytes : 0;
+        shared.ready.store(seq, std::memory_order_release);
+        if (!ok) std::fprintf(stderr, "TP PLE: reading table rows failed\n");
+        return ok;
+    }
+    if (!wait_for(shared.ready, seq)) {
+        std::fprintf(stderr, "TP PLE: timed out waiting for table rows\n");
+        return false;
+    }
+    bool ok = false;
+    try {
+        ok = shared.bytes == bytes && ple_prepare_rows(rows, bytes);
+        if (ok) std::memcpy(ple_stage, shared.data, bytes);
+    } catch (const std::exception& ex) {
+        std::fprintf(stderr, "TP PLE: %s\n", ex.what());
+    }
+    shared.consumed.store(seq, std::memory_order_release);
+    if (!ok) std::fprintf(stderr, "TP PLE: peer rows unavailable\n");
+    return ok;
+}
+
+bool Grimoire::ple_fetch_rows(const LayerDev& d, int p0, int M) {
+    const int NH = (cfg.ngram_size - 1) * cfg.heads_per_ngram;
+    const size_t rowb = size_t(d.ple_wid) * (d.ple_fp8 ? 1 : sizeof(bf16_t));
+    const size_t n = size_t(M) * NH;
+    if (!ple_prepare_rows(n, n * rowb)) return false;
     if (q4_tok_h.size() < size_t(p0 + M)) return false;
     if (ple_fd >= 0 && !ple_ram_tried) {
         ple_ram_tried = true;
@@ -18169,7 +18250,15 @@ bool Grimoire::ple_fetch_rows(const LayerDev& d, int p0, int M) {
     // context length.  Rows from RAM: memcpy, threads only for big prompt chunks.
     const size_t nt = (ple_fd >= 0 && !pr && n > 1) ? std::min<size_t>(n, 16)
                                                      : (n < 512 ? 1 : std::min<size_t>(16, n / 256));
+    static const bool read_pool = [] {
+        const char* e = std::getenv("GRIMOIRE_PLE_READ_POOL");
+        return e && *e == '1';
+    }();
     if (nt == 1) work(0, n);
+    else if (read_pool && M == 1) {
+        if (!ple_readers) ple_readers = std::make_unique<PleReadPool>(nt);
+        ple_readers->read(n, work);
+    }
     else {
         std::vector<std::thread> th;
         for (size_t t = 0; t < nt; ++t)

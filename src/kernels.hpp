@@ -492,7 +492,7 @@ sycl::event launch_ple_conv(sycl::queue& q, const float* conv_in,
 sycl::event launch_ple_embed_gather(sycl::queue& q, const void* table,
     bool fp8, float scale, const int64_t* ids, float* out, int rows,
     int ngram_heads, int head_dim, int64_t table_rows,
-    const std::vector<sycl::event>& deps = {});
+    const std::vector<sycl::event>& deps = {}, bool round_to_bf16 = false);
 // ---- Qwen4-Exp QSA (host reference: b70/qwen4_exp.hpp) ---------------
 sycl::event launch_qsa_block_bits(sycl::queue& q, const int32_t* blocks, int rows,
     int topk, uint32_t* bits, int words, const std::vector<sycl::event>& deps = {});
