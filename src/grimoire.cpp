@@ -3029,10 +3029,12 @@ struct Grimoire {
     // queues a whole verify ahead instead of stopping at every exchange (11-19, Flash-Next two cards: ~3,000
     // kernels a verify, the GPU busy ~29 of 43 ms a step).  After every wait the next command is a kernel.
     struct TpaJob {
-        int kind = 0;                 // 0 the small all-reduce's host part, 1 the CPU experts of M rows (verify)
+        int kind = 0;                 // 0 the small all-reduce's host part, 1 the CPU experts of M rows (verify),
+                                      // 2 the CPU experts of a decode step
         uint64_t s = 0, tag = 0; size_t elems = 0; bool b16 = false, peer16 = false;
         const float* host_add = nullptr;
-        const void* d = nullptr; int M = 0; uint64_t rtag = 0;   // kind 1: the LayerDev, rows, routes' ksend tag
+        bool add_if_cx = false;       // host_add only if the last kind-2 job had RAM experts (decode)
+        const void* d = nullptr; int M = 0; uint64_t rtag = 0;   // kind 1/2: the LayerDev, rows, routes' ksend tag
         int ev = -1;
     };
     struct TpAsync {
@@ -3052,6 +3054,8 @@ struct Grimoire {
         std::atomic<uint64_t> head{0}, tail{0};
         std::thread th;
         std::atomic<bool> stop{false}, err{false};
+        int last_cx_n = 0;            // helper: RAM experts of the last kind-2 job
+        bool next_add_if_cx = false;  // main: the next small all-reduce's add_if_cx
     } tpa;
     bool tpa_init();
     bool tpa_begin();                 // a verify that may queue ahead; false = synchronous as before
@@ -3062,6 +3066,7 @@ struct Grimoire {
     bool tpa_wait_tag(uint64_t tag, const char* what);
     bool tp_small_host(const TpaJob& j);
     void cx_rows_host(const void* layer, int M, bool stats);
+    int  cx_decode_host(void* layer);
     // the same, M rows at a time (short-prompt prefill), grown on demand
     size_t    px_cap = 0;
     int32_t*  px_route = nullptr;  float* px_wt = nullptr;
@@ -6463,6 +6468,7 @@ bool Grimoire::tp_small_allreduce(float* dev,size_t elems,uint64_t pre_tag,const
     static const bool st_any=std::getenv("GRIMOIRE_TP_SMALL_AR_TIME")!=nullptr;
     if(tpa.scope&&!st_any&&tshm.sp_piece&&elems<=tshm.sp_piece&&ksend_on()&&tpa.used<int(tpa.ev.size())){
         TpaJob j; j.kind=0; j.s=++tshm.seq; j.elems=elems; j.host_add=host_add;
+        j.add_if_cx=tpa.next_add_if_cx; tpa.next_add_if_cx=false;
         j.b16=tshm.small_bf16&&!host_add&&!pre_tag;
         j.peer16=j.b16&&tshm.small_peer;
         if(pre_tag) j.tag=pre_tag;
@@ -6491,6 +6497,7 @@ bool Grimoire::tp_small_allreduce(float* dev,size_t elems,uint64_t pre_tag,const
         return true;
     }
     if(tpa.scope) tpa_drain();        // the synchronous way below must not overtake queued jobs
+    tpa.next_add_if_cx=false;
     const int peer=1-tp_rank;
     auto sflag=[&](int r){return reinterpret_cast<std::atomic<uint64_t>*>(tshm.base+1024+64*size_t(r));};
     const uint64_t s=++tshm.seq;
@@ -6639,7 +6646,7 @@ bool Grimoire::tpa_init() {
     if (tpa.tried) return tpa.ready;
     tpa.tried = true;
     const char* e = std::getenv("GRIMOIRE_TP_ASYNC");
-    if (!(e && *e == '1')) return false;
+    if (!(e && (*e == '1' || *e == '2'))) return false;
     auto no = [&](const char* why) { std::printf("  TP async: off -- %s\n", why); std::fflush(stdout); return false; };
     if (!tp_mega || tp_world != 2 || !tshm.base || !tshm.sb_cpu || !tshm.sp_piece || tp_peer_copy.active())
         return no("needs Megatron TP on two cards with the BAR small all-reduce");
@@ -6668,8 +6675,9 @@ bool Grimoire::tpa_init() {
         if (tpa.ev_create(tpa.pool, &ed, &tpa.ev[i]) != ZE_RESULT_SUCCESS) { tpa.ev.resize(i); return no("events"); }
     }
     tpa.th = std::thread([this] { tpa_main(); });
-    std::printf("  TP async: on (GRIMOIRE_TP_ASYNC=1) -- the MTP verify is queued ahead; small all-reduces and its"
-                " CPU experts on a helper thread, the card waits on %u host-signaled events\n", NE);
+    std::printf("  TP async: on (GRIMOIRE_TP_ASYNC=%s) -- %s queued ahead; small all-reduces and CPU experts on a"
+                " helper thread, the card waits on %u host-signaled events\n", e, *e == '2' ? "the MTP verify and decode"
+                : "the MTP verify", NE);
     std::fflush(stdout);
     tpa.ready = true;
     return true;
@@ -6722,6 +6730,7 @@ int Grimoire::tpa_post(const TpaJob& j0, bool with_event) {
 // The helper: jobs in order.  It signals every event it owes -- after a failure too (the rest of the scope then
 // only signals) -- so the card never waits on an event nobody will set.
 void Grimoire::tpa_main() {
+    b70::unpin_self();                // started from a pinned thread it would inherit one CPU
     uint64_t t = 0;
     long idle = 0;
     while (!tpa.stop.load(std::memory_order_acquire)) {
@@ -6736,7 +6745,13 @@ void Grimoire::tpa_main() {
             bool ok = false;
             try {
                 if (j.kind == 0) ok = tp_small_host(j);
-                else if (tpa_wait_tag(j.rtag, "TP async: small-M rows' routes")) { cx_rows_host(j.d, j.M, false); ok = true; }
+                else if (j.kind == 1) {
+                    if (tpa_wait_tag(j.rtag, "TP async: small-M rows' routes")) { cx_rows_host(j.d, j.M, false); ok = true; }
+                } else if (tpa_wait_tag(j.rtag, "TP async: CPU experts route")) {
+                    const b70::ScopedCpuPin pin(cx_caller_cpu);     // where the decode thread would have run them
+                    tpa.last_cx_n = cx_decode_host(const_cast<void*>(j.d));
+                    ok = true;
+                }
             } catch (...) { ok = false; }
             if (!ok) {
                 tpa.err.store(true);
@@ -6800,7 +6815,8 @@ bool Grimoire::tp_small_host(const TpaJob& j) {
         else tp_bar_sum_bf16(bar, a16, b16, n);
     } else {
         float* const mine = slot(tp_rank);
-        if (j.host_add) for (size_t i = 0; i < n; ++i) mine[i] = tshm.stage[i] + j.host_add[i];
+        const float* add = j.add_if_cx ? (tpa.last_cx_n > 0 ? j.host_add : nullptr) : j.host_add;
+        if (add) for (size_t i = 0; i < n; ++i) mine[i] = tshm.stage[i] + add[i];
         else std::memcpy(mine, tshm.stage, n * sizeof(float));
         const uint64_t c = ++tshm.sp_cnt;
         sflag(tp_rank)->store(c, std::memory_order_release);
@@ -14095,7 +14111,12 @@ void Grimoire::route_trace(const LayerDev& d, int kind, const int32_t* ids, int 
 }
 
 const float* Grimoire::forward_qwen4_exp(int token) {
-    const b70::ScopedCpuPin cx_pin(cx_caller_cpu);      // see the CPU experts' start
+    // TP async for decode too (GRIMOIRE_TP_ASYNC=2): the token is queued ahead, the helper thread does the small
+    // all-reduces' host part and the CPU experts (pinned where this thread would have been)
+    static const bool tpa_dec_env = [] { const char* e = std::getenv("GRIMOIRE_TP_ASYNC"); return e && *e == '2'; }();
+    const bool tpa_dec = tpa_dec_env && tp_mega && !pp_enabled() && tpa_begin();
+    struct TpaScopeEnd { Grimoire* g; bool on; ~TpaScopeEnd() { if (on) g->tpa_end(); } } tpa_scope_end{this, tpa_dec};
+    const b70::ScopedCpuPin cx_pin(tpa_dec ? -1 : cx_caller_cpu);      // see the CPU experts' start
     power_gov_tick();
     tm_heat_step();                                     // GRIMOIRE_EXPERT_HEAT: a step boundary
     // MTP head (mtp4): its caches at the previous position -- that token's backbone state
@@ -14548,6 +14569,7 @@ const float* Grimoire::forward_qwen4_exp(int token) {
 
         uint64_t ar_tag = 0;             // the MoE all-reduce's copy out, queued before the CPU experts
         const float* ar_add = nullptr;   // and their partial, added on the host (tp_small_ar_send)
+        bool ar_add_if_cx = false;       // TP async: ar_add only if the helper's CPU-expert job had experts
         if (d.moe_layer) {
             const int I = cfg.moe_inter;
             gemv_any(d.router, s.h2, s.rlogits, none);
@@ -14632,35 +14654,20 @@ const float* Grimoire::forward_qwen4_exp(int token) {
                 // all-reduce now; the CPU experts' partial joins it on the host
                 ar_tag = tp_small_ar_send(q4_pend, size_t(H));
                 tld(i, ".arsend");
+                int n = 0;
+                if (tpa_dec && ar_tag && cx_tag) {
+                    // TP async: the helper waits for the routes, runs the RAM experts into cx_y, and the
+                    // all-reduce adds cx_y only when it had experts (as below)
+                    TpaJob jb; jb.kind = 2; jb.d = &d; jb.rtag = cx_tag;
+                    tpa_post(jb, false);
+                    ar_add = cx_y; ar_add_if_cx = true;
+                } else {
                 if (cx_tag) { if (!kwait(cx_tag, "CPU experts route")) return nullptr; }
                 else cx_ready.wait();
-                route_trace(d, 2, cx_route, 1);
-                tm_heat_credit(d, cx_route, size_t(cfg.top_k));
-                const auto t0 = std::chrono::steady_clock::now();
-                const uint8_t* blk[64]; float wt[64]; int n = 0;
-                for (int k = 0; k < cfg.top_k && n < 64; ++k) {
-                    const int e = cx_route[k];
-                    if (e >= 0 && e < cfg.n_experts) ++d.tm_hits[size_t(e)];
-                    if (e < 0 || e >= cfg.n_experts || d.tm_tier_h[size_t(e)] != 1) continue;
-                    blk[n] = d.tm_hptr[size_t(e)]; wt[n] = cx_wt[k]; ++n;
+                n = cx_decode_host(&d);
                 }
-                // no RAM expert routed here (most layers): nothing to add
-                const double cx_w0 = cpu_exp.wait_us();
-                if (n > 0) cpu_exp.ffn(tm_lay, blk, wt, n, cx_x, cx_y);
-                cxd_wait_us += cpu_exp.wait_us() - cx_w0;
-                cx_nexp += n;
-                const double cx_dt = std::chrono::duration<double, std::milli>(
-                    std::chrono::steady_clock::now() - t0).count();
-                cx_ms += cx_dt;
-                ++cx_calls;
-                if (n > 0) {
-                    cxd_ms += cx_dt; ++cxd_calls; cxd_nexp += n;
-                    if (n == 1) { cxd1_ms += cx_dt; ++cxd1_calls; }
-                    int b = 0;
-                    for (double u = cx_dt * 1e3; u >= 50.0 && b < 7; u *= 0.5) ++b;
-                    ++cxd_hist[b];
-                }
-                if (n > 0 && ar_tag) ar_add = cx_y;
+                if (ar_add_if_cx) {}
+                else if (n > 0 && ar_tag) ar_add = cx_y;
                 else if (n > 0 && tm_heat_moves > 0) {
                     // heat engine: the add reads the pinned partial itself -- no copy that could queue behind
                     // the engine's expert copies (the same floats, the same add)
@@ -14680,6 +14687,7 @@ const float* Grimoire::forward_qwen4_exp(int token) {
             ffn_gemv(d, false, s.sh_g, q4_pend, none);
         }
         // Megatron TP: this rank's experts and half of the shared expert
+        tpa.next_add_if_cx = ar_add_if_cx;
         if (tp_mega && !(ar_tag ? tp_small_allreduce(q4_pend, size_t(H), ar_tag, ar_add)
                                 : tp_block_reduce(q4_pend, size_t(H)))) {
             std::fprintf(stderr, "TP: MoE all-reduce failed\n");
@@ -14730,6 +14738,10 @@ const float* Grimoire::forward_qwen4_exp(int token) {
     q4lap(5);
     mark("head");
     q4_periodic();
+    if (tpa_dec) {
+        tpa_scope_end.on = false;
+        if (!tpa_end()) { std::fprintf(stderr, "TP async: a helper job failed in this decode step\n"); return nullptr; }
+    }
     tl_end();
     ++pos;
     return s.logits;
@@ -18472,6 +18484,39 @@ void Grimoire::tm_prefetch(const LayerDev& next, int M) {
 // CPU runs the RAM-resident ones row by row at DRAM speed.  The GPU path
 // alone re-read every RAM expert over PCIe for EVERY row: 1.8 s of MoE for a
 // 21-token prompt.  out = routed sum (overwritten).
+// forward_qwen4_exp's CPU experts after the routes landed in cx_route / cx_wt / cx_x: the bookkeeping and the
+// RAM experts into cx_y; returns how many there were (the main thread, or the TP async helper).
+int Grimoire::cx_decode_host(void* layer) {
+    LayerDev& d = *static_cast<LayerDev*>(layer);
+    route_trace(d, 2, cx_route, 1);
+    tm_heat_credit(d, cx_route, size_t(cfg.top_k));
+    const auto t0 = std::chrono::steady_clock::now();
+    const uint8_t* blk[64]; float wt[64]; int n = 0;
+    for (int k = 0; k < cfg.top_k && n < 64; ++k) {
+        const int e = cx_route[k];
+        if (e >= 0 && e < cfg.n_experts) ++d.tm_hits[size_t(e)];
+        if (e < 0 || e >= cfg.n_experts || d.tm_tier_h[size_t(e)] != 1) continue;
+        blk[n] = d.tm_hptr[size_t(e)]; wt[n] = cx_wt[k]; ++n;
+    }
+    // no RAM expert routed here (most layers): nothing to add
+    const double cx_w0 = cpu_exp.wait_us();
+    if (n > 0) cpu_exp.ffn(tm_lay, blk, wt, n, cx_x, cx_y);
+    cxd_wait_us += cpu_exp.wait_us() - cx_w0;
+    cx_nexp += n;
+    const double cx_dt = std::chrono::duration<double, std::milli>(
+        std::chrono::steady_clock::now() - t0).count();
+    cx_ms += cx_dt;
+    ++cx_calls;
+    if (n > 0) {
+        cxd_ms += cx_dt; ++cxd_calls; cxd_nexp += n;
+        if (n == 1) { cxd1_ms += cx_dt; ++cxd1_calls; }
+        int b = 0;
+        for (double u = cx_dt * 1e3; u >= 50.0 && b < 7; u *= 0.5) ++b;
+        ++cxd_hist[b];
+    }
+    return n;
+}
+
 bool Grimoire::tiered_moe_cpu_rows(const LayerDev& d, const float* x, const int32_t* rex,
                                    const float* rwt, float* mh, float* out, int M,
                                    const std::function<void()>& gpu_more,
