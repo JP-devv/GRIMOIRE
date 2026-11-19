@@ -4211,7 +4211,8 @@ struct Grimoire {
     void tm_prefetch(const LayerDev& next, int M);
     bool tiered_moe_cpu_rows(const LayerDev& d, const float* x, const int32_t* rex,
                              const float* rwt, float* mh, float* out, int M,
-                             const std::function<void()>& gpu_more = {});
+                             const std::function<void()>& gpu_more = {},
+                             uint64_t* fold_tag = nullptr, const float** fold_add = nullptr);
     // GRIMOIRE_ROUTE_TRACE=<file>: append one MoE call's routes (kind 0 prompt, 1 small-M
     // prompt / verify, 2 decode) for offline placement studies; nothing when unset.
     void route_trace(const LayerDev& d, int kind, const int32_t* ids, int M);
@@ -18219,7 +18220,8 @@ void Grimoire::tm_prefetch(const LayerDev& next, int M) {
 // 21-token prompt.  out = routed sum (overwritten).
 bool Grimoire::tiered_moe_cpu_rows(const LayerDev& d, const float* x, const int32_t* rex,
                                    const float* rwt, float* mh, float* out, int M,
-                                   const std::function<void()>& gpu_more) {
+                                   const std::function<void()>& gpu_more,
+                                   uint64_t* fold_tag, const float** fold_add) {
     const int H = cfg.hidden, K = cfg.top_k;
     const size_t R = size_t(M) * K;
     if (size_t(M) > px_cap) {
@@ -18275,6 +18277,15 @@ bool Grimoire::tiered_moe_cpu_rows(const LayerDev& d, const float* x, const int3
     // more GPU work for the time the host spends on the RAM experts (the verify's shared expert,
     // queued here as a decode step queues it), landing in `out` before their partial
     if (gpu_more) gpu_more();
+    // fold (11-19, Megatron TP verify): the GPU partial (VRAM experts + shared expert) leaves for the MoE
+    // all-reduce now and the CPU experts' partial joins it on the host -- a decode step's order -- instead
+    // of a copy to the card, an add and the all-reduce's own copy out, all after the CPU.
+    // GRIMOIRE_VERIFY_CX_FOLD=0 = the copy and add as before.
+    static const bool vfold = [] { const char* e = std::getenv("GRIMOIRE_VERIFY_CX_FOLD"); return !(e && *e == '0'); }();
+    uint64_t ftag = 0;
+    if (fold_tag && fold_add && vfold && tm_heat_moves == 0) ftag = tp_small_ar_send(out, size_t(M) * H);
+    if (fold_tag) *fold_tag = ftag;
+    if (fold_add) *fold_add = nullptr;
     rx_lap(1);
     if (rtag) { if (!kwait(rtag, "small-M rows' routes")) return false; }
     else ready.wait();
@@ -18322,6 +18333,13 @@ bool Grimoire::tiered_moe_cpu_rows(const LayerDev& d, const float* x, const int3
     cx_ms += std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
     cx_calls += M;
     rx_lap(3);
+    if (ftag) {
+        // the host adds px_y to this rank's partial inside the all-reduce; rows with no RAM expert hold
+        // zeros (ffn_rows / ffn write every row they are given), so the add is always whole
+        *fold_add = px_y;
+        rx_lap(4);
+        return true;
+    }
     if (tm_heat_moves > 0) {
         launch_add(q, out, px_y, int(size_t(M) * H), {});    // heat engine: no copy behind its expert copies
     } else {
@@ -19032,6 +19050,8 @@ bool Grimoire::prefill_qwen4_exp(const std::vector<int32_t>& tokens,
         q4clk = t;
     };
     if (q4t) { q.wait(); q4clk = std::chrono::steady_clock::now(); }
+    uint64_t fold_tag = 0;              // verify, Megatron TP: the MoE all-reduce's copy out, queued
+    const float* fold_add = nullptr;    // and the CPU experts' partial it adds (tiered_moe_cpu_rows)
     for (int i = pp_enabled() ? pp_begin : 0; i < (pp_enabled() ? pp_end : cfg.n_layers) && ok; ++i) {
         power_gov_tick();
         LayerDev& d = L[i];
@@ -19381,9 +19401,13 @@ bool Grimoire::prefill_qwen4_exp(const std::vector<int32_t>& tokens,
                 // verify: the shared expert is queued before the host blocks on the RAM experts, so
                 // the GPU runs it meanwhile, and lands before their partial -- a decode step's order
                 sh_done = vsm && d.sh_gu.w.N;
+                // verify under Megatron TP: the CPU experts' partial is added inside the MoE all-reduce
+                // (fold_tag / fold_add, used below) when the whole call is this one sub-chunk
+                const bool fold = verify && tp_mega && R0 == 0 && MR == M;
                 if (!tiered_moe_cpu_rows(d, BI, RX, RW, mh, PE, MR,
                                          sh_done ? std::function<void()>([&] { shared_add(d, BI, PE); })
-                                                 : std::function<void()>()))
+                                                 : std::function<void()>(),
+                                         fold ? &fold_tag : nullptr, fold ? &fold_add : nullptr))
                     { ok = false; break; }
             } else if (d.tiered) {
                 if (d.tm_ep) {
@@ -19425,9 +19449,11 @@ bool Grimoire::prefill_qwen4_exp(const std::vector<int32_t>& tokens,
                 }
             if (!ok) break;
         }
-        // Megatron TP: this rank's experts and half of the shared expert
+        // Megatron TP: this rank's experts and half of the shared expert (+ the CPU experts' partial when folded)
         q4xstart();
-        if (tp_mega && !tp_block_reduce(pend, size_t(M) * H)) { ok = false; break; }
+        if (tp_mega && !(fold_tag ? tp_small_allreduce(pend, size_t(M) * H, fold_tag, fold_add)
+                                  : tp_block_reduce(pend, size_t(M) * H))) { ok = false; break; }
+        fold_tag = 0; fold_add = nullptr;
         q4xlap(1);
         // the next layer's first RAM experts cross PCIe while its mixer runs
         if (moe_full && i + 1 < (pp_enabled() ? pp_end : cfg.n_layers))
