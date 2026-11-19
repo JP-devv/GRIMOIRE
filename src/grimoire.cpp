@@ -18494,11 +18494,6 @@ void Grimoire::tm_prefetch(const LayerDev& next, int M) {
     tm_pref_d = &next; tm_pref_n = P;
 }
 
-// Short prompts: the GPU runs the VRAM-resident experts for all M rows
-// (the GEMV path, which re-reads weights per row -- cheap from VRAM) and the
-// CPU runs the RAM-resident ones row by row at DRAM speed.  The GPU path
-// alone re-read every RAM expert over PCIe for EVERY row: 1.8 s of MoE for a
-// 21-token prompt.  out = routed sum (overwritten).
 // forward_qwen4_exp's CPU experts after the routes landed in cx_route / cx_wt / cx_x: the bookkeeping and the
 // RAM experts into cx_y; returns how many there were (the main thread, or the TP async helper).
 int Grimoire::cx_decode_host(void* layer) {
@@ -18532,6 +18527,11 @@ int Grimoire::cx_decode_host(void* layer) {
     return n;
 }
 
+// Short prompts: the GPU runs the VRAM-resident experts for all M rows
+// (the GEMV path, which re-reads weights per row -- cheap from VRAM) and the
+// CPU runs the RAM-resident ones row by row at DRAM speed.  The GPU path
+// alone re-read every RAM expert over PCIe for EVERY row: 1.8 s of MoE for a
+// 21-token prompt.  out = routed sum (overwritten).
 bool Grimoire::tiered_moe_cpu_rows(const LayerDev& d, const float* x, const int32_t* rex,
                                    const float* rwt, float* mh, float* out, int M,
                                    const std::function<void()>& gpu_more,
