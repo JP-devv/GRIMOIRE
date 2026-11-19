@@ -3022,6 +3022,46 @@ struct Grimoire {
     // ksend's converting twin for the bf16 small all-reduce: n floats -> n bf16 (round to nearest even)
     uint64_t ksend_bf16(const float* src, uint16_t* dst, size_t n);
     bool kwait(uint64_t tag, const char* what);
+    // ---- TP async (GRIMOIRE_TP_ASYNC=1, 11-19) ---------------------------------------------------------------
+    // Megatron TP on two cards: the small all-reduces' host part and the verify's CPU experts run on a helper
+    // thread, in the order they were queued; the compute queue waits on a host-signaled Level Zero event per
+    // all-reduce (a wait in the command stream, no spinning kernel -- tools/l0wait_probe.cpp), so the host
+    // queues a whole verify ahead instead of stopping at every exchange (11-19, Flash-Next two cards: ~3,000
+    // kernels a verify, the GPU busy ~29 of 43 ms a step).  After every wait the next command is a kernel.
+    struct TpaJob {
+        int kind = 0;                 // 0 the small all-reduce's host part, 1 the CPU experts of M rows (verify)
+        uint64_t s = 0, tag = 0; size_t elems = 0; bool b16 = false, peer16 = false;
+        const float* host_add = nullptr;
+        const void* d = nullptr; int M = 0; uint64_t rtag = 0;   // kind 1: the LayerDev, rows, routes' ksend tag
+        int ev = -1;
+    };
+    struct TpAsync {
+        bool tried = false, ready = false, scope = false;
+        void* lib = nullptr;
+        decltype(&zeEventPoolCreate) pool_create = nullptr;
+        decltype(&zeEventCreate) ev_create = nullptr;
+        decltype(&zeEventHostSignal) ev_signal = nullptr;
+        decltype(&zeEventHostReset) ev_reset = nullptr;
+        decltype(&zeCommandListAppendWaitOnEvents) append_wait = nullptr;
+        ze_command_list_handle_t cl = nullptr;
+        ze_event_pool_handle_t pool = nullptr;
+        std::vector<ze_event_handle_t> ev;
+        int used = 0;                 // events handed out since the last reset (main thread)
+        static constexpr int kRing = 1024;
+        TpaJob ring[kRing];
+        std::atomic<uint64_t> head{0}, tail{0};
+        std::thread th;
+        std::atomic<bool> stop{false}, err{false};
+    } tpa;
+    bool tpa_init();
+    bool tpa_begin();                 // a verify that may queue ahead; false = synchronous as before
+    bool tpa_end();                   // drain; false = a helper job failed during the scope
+    void tpa_drain();
+    int  tpa_post(const TpaJob& j, bool with_event);
+    void tpa_main();
+    bool tpa_wait_tag(uint64_t tag, const char* what);
+    bool tp_small_host(const TpaJob& j);
+    void cx_rows_host(const void* layer, int M, bool stats);
     // the same, M rows at a time (short-prompt prefill), grown on demand
     size_t    px_cap = 0;
     int32_t*  px_route = nullptr;  float* px_wt = nullptr;
@@ -6189,6 +6229,7 @@ bool Grimoire::tp_shm_allreduce(float* dev,size_t elems){
             (size_t(2*r)+size_t(s&1))*tshm.slot_elems*sizeof(float));
     };
     const size_t cpu_max=tshm.small_max;
+    if(tpa.scope&&!(tshm.sb_cpu&&elems<=cpu_max))tpa_drain();   // TP async: queued jobs first
     if(tshm.pipe_piece&&elems>cpu_max)return tp_pipe_allreduce(dev,elems);
     if(tshm.sb_cpu&&elems<=cpu_max)return tp_small_allreduce(dev,elems);
     // GRIMOIRE_TP_SMALL_AR_TIME=1 (diagnostic, adds two waits per call): where a
@@ -6417,6 +6458,39 @@ uint64_t Grimoire::tp_small_ar_send(float* dev, size_t elems) {
 
 bool Grimoire::tp_small_allreduce(float* dev,size_t elems,uint64_t pre_tag,const float* host_add){
     if(tp_peer_copy.active()) return tp_peer_copy.allreduce(q,dev,elems,tp_rank,false,host_add);
+    // TP async (11-19): queue the copy out, a wait on the job's event and the copy in; the helper thread does
+    // the host part below (tp_small_host) in job order and signals the event.  Same operations, same bits.
+    static const bool st_any=std::getenv("GRIMOIRE_TP_SMALL_AR_TIME")!=nullptr;
+    if(tpa.scope&&!st_any&&tshm.sp_piece&&elems<=tshm.sp_piece&&ksend_on()&&tpa.used<int(tpa.ev.size())){
+        TpaJob j; j.kind=0; j.s=++tshm.seq; j.elems=elems; j.host_add=host_add;
+        j.b16=tshm.small_bf16&&!host_add&&!pre_tag;
+        j.peer16=j.b16&&tshm.small_peer;
+        if(pre_tag) j.tag=pre_tag;
+        else if(j.b16) j.tag=ksend_bf16(dev,reinterpret_cast<uint16_t*>(tshm.stage),elems);
+        else{
+            const void* sp[1]={dev}; void* dp[1]={tshm.stage}; const size_t nb[1]={elems*sizeof(float)};
+            j.tag=ksend(1,sp,dp,nb);
+        }
+        const int ev=tpa_post(j,true);
+        // a failed append: let the helper finish the job (the BAR holds the result) before the copy in
+        if(tpa.append_wait(tpa.cl,1,&tpa.ev[size_t(ev)])!=ZE_RESULT_SUCCESS) tpa_drain();
+        const uint64_t s=j.s;
+        float* const d=dev;
+        if(j.peer16){
+            const uint16_t* const pd=reinterpret_cast<const uint16_t*>(tshm.sb_dev+size_t(s&1)*tshm.small_max);
+            q.parallel_for(sycl::range<1>(elems),[=](sycl::id<1> i){
+                const uint32_t u=sycl::bit_cast<uint32_t>(d[i]);
+                const uint32_t r=(u&0x7fffffffu)>0x7f800000u?((u>>16)|0x40u):((u+0x7fffu+((u>>16)&1u))>>16);
+                d[i]=sycl::bit_cast<float>(r<<16)+sycl::bit_cast<float>(uint32_t(pd[i])<<16);
+            });
+        }else{
+            // a kernel, not q.memcpy: a copy could go to another engine and not wait for the event
+            const float* const src=tshm.sb_dev+size_t(s&1)*tshm.small_max;
+            q.parallel_for(sycl::range<1>(elems),[=](sycl::id<1> i){ d[i]=src[i]; });
+        }
+        return true;
+    }
+    if(tpa.scope) tpa_drain();        // the synchronous way below must not overtake queued jobs
     const int peer=1-tp_rank;
     auto sflag=[&](int r){return reinterpret_cast<std::atomic<uint64_t>*>(tshm.base+1024+64*size_t(r));};
     const uint64_t s=++tshm.seq;
@@ -6557,6 +6631,185 @@ bool Grimoire::tp_small_allreduce(float* dev,size_t elems,uint64_t pre_tag,const
             std::fflush(stdout);
         }
     }
+    return true;
+}
+
+// ---- TP async (see the TpAsync member) ------------------------------------------------------------------------
+bool Grimoire::tpa_init() {
+    if (tpa.tried) return tpa.ready;
+    tpa.tried = true;
+    const char* e = std::getenv("GRIMOIRE_TP_ASYNC");
+    if (!(e && *e == '1')) return false;
+    auto no = [&](const char* why) { std::printf("  TP async: off -- %s\n", why); std::fflush(stdout); return false; };
+    if (!tp_mega || tp_world != 2 || !tshm.base || !tshm.sb_cpu || !tshm.sp_piece || tp_peer_copy.active())
+        return no("needs Megatron TP on two cards with the BAR small all-reduce");
+    if (!ksend_on()) return no("needs GRIMOIRE_KSEND");
+    if (q.get_backend() != sycl::backend::ext_oneapi_level_zero) return no("not a Level Zero queue");
+    tpa.lib = ::dlopen("libze_loader.so.1", RTLD_NOW | RTLD_LOCAL);
+    if (!tpa.lib) return no("libze_loader.so.1 not loaded");
+    tpa.pool_create = reinterpret_cast<decltype(tpa.pool_create)>(::dlsym(tpa.lib, "zeEventPoolCreate"));
+    tpa.ev_create = reinterpret_cast<decltype(tpa.ev_create)>(::dlsym(tpa.lib, "zeEventCreate"));
+    tpa.ev_signal = reinterpret_cast<decltype(tpa.ev_signal)>(::dlsym(tpa.lib, "zeEventHostSignal"));
+    tpa.ev_reset = reinterpret_cast<decltype(tpa.ev_reset)>(::dlsym(tpa.lib, "zeEventHostReset"));
+    tpa.append_wait = reinterpret_cast<decltype(tpa.append_wait)>(::dlsym(tpa.lib, "zeCommandListAppendWaitOnEvents"));
+    if (!tpa.pool_create || !tpa.ev_create || !tpa.ev_signal || !tpa.ev_reset || !tpa.append_wait)
+        return no("Level Zero entry points missing");
+    auto nq = sycl::get_native<sycl::backend::ext_oneapi_level_zero>(q);
+    if (auto* pcl = std::get_if<ze_command_list_handle_t>(&nq)) tpa.cl = *pcl;
+    if (!tpa.cl) return no("the queue is not an immediate command list");
+    ze_context_handle_t ctx = sycl::get_native<sycl::backend::ext_oneapi_level_zero>(q.get_context());
+    ze_device_handle_t zdev = sycl::get_native<sycl::backend::ext_oneapi_level_zero>(q.get_device());
+    constexpr uint32_t NE = 512;
+    ze_event_pool_desc_t pd{ZE_STRUCTURE_TYPE_EVENT_POOL_DESC, nullptr, ZE_EVENT_POOL_FLAG_HOST_VISIBLE, NE};
+    if (tpa.pool_create(ctx, &pd, 1, &zdev, &tpa.pool) != ZE_RESULT_SUCCESS) return no("event pool");
+    tpa.ev.resize(NE);
+    for (uint32_t i = 0; i < NE; ++i) {
+        ze_event_desc_t ed{ZE_STRUCTURE_TYPE_EVENT_DESC, nullptr, i, ZE_EVENT_SCOPE_FLAG_HOST, ZE_EVENT_SCOPE_FLAG_HOST};
+        if (tpa.ev_create(tpa.pool, &ed, &tpa.ev[i]) != ZE_RESULT_SUCCESS) { tpa.ev.resize(i); return no("events"); }
+    }
+    tpa.th = std::thread([this] { tpa_main(); });
+    std::printf("  TP async: on (GRIMOIRE_TP_ASYNC=1) -- the MTP verify is queued ahead; small all-reduces and its"
+                " CPU experts on a helper thread, the card waits on %u host-signaled events\n", NE);
+    std::fflush(stdout);
+    tpa.ready = true;
+    return true;
+}
+
+bool Grimoire::tpa_begin() {
+    static const bool q4t = std::getenv("GRIMOIRE_Q4_TIMING") != nullptr;
+    if (q4t || !tpa_init()) return false;
+    tpa_drain();
+    if (tpa.used > 0) {
+        q.wait();                     // every event handed out is behind us before it is reset
+        for (int i = 0; i < tpa.used; ++i) tpa.ev_reset(tpa.ev[size_t(i)]);
+        tpa.used = 0;
+    }
+    tpa.err.store(false);
+    tpa.scope = true;
+    return true;
+}
+
+bool Grimoire::tpa_end() {
+    tpa_drain();
+    tpa.scope = false;
+    return !tpa.err.load();
+}
+
+void Grimoire::tpa_drain() {
+    const uint64_t h = tpa.head.load(std::memory_order_relaxed);
+    const auto t0 = std::chrono::steady_clock::now();
+    bool told = false;
+    while (tpa.tail.load(std::memory_order_acquire) < h) {
+        _mm_pause();
+        if (!told && std::chrono::steady_clock::now() - t0 > std::chrono::seconds(10)) {
+            std::fprintf(stderr, "TP async: waiting more than 10 s for the helper (%llu of %llu jobs done)\n",
+                         (unsigned long long)tpa.tail.load(), (unsigned long long)h);
+            told = true;
+        }
+    }
+}
+
+int Grimoire::tpa_post(const TpaJob& j0, bool with_event) {
+    TpaJob j = j0;
+    j.ev = with_event ? tpa.used++ : -1;
+    const uint64_t h = tpa.head.load(std::memory_order_relaxed);
+    while (h - tpa.tail.load(std::memory_order_acquire) >= uint64_t(TpAsync::kRing)) _mm_pause();
+    tpa.ring[h % TpAsync::kRing] = j;
+    tpa.head.store(h + 1, std::memory_order_release);
+    return j.ev;
+}
+
+// The helper: jobs in order.  It signals every event it owes -- after a failure too (the rest of the scope then
+// only signals) -- so the card never waits on an event nobody will set.
+void Grimoire::tpa_main() {
+    uint64_t t = 0;
+    long idle = 0;
+    while (!tpa.stop.load(std::memory_order_acquire)) {
+        if (t == tpa.head.load(std::memory_order_acquire)) {
+            if (++idle > 200000) std::this_thread::sleep_for(std::chrono::microseconds(20));
+            else _mm_pause();
+            continue;
+        }
+        idle = 0;
+        const TpaJob j = tpa.ring[t % TpAsync::kRing];
+        if (!tpa.err.load(std::memory_order_relaxed)) {
+            bool ok = false;
+            try {
+                if (j.kind == 0) ok = tp_small_host(j);
+                else if (tpa_wait_tag(j.rtag, "TP async: small-M rows' routes")) { cx_rows_host(j.d, j.M, false); ok = true; }
+            } catch (...) { ok = false; }
+            if (!ok) {
+                tpa.err.store(true);
+                std::fprintf(stderr, "TP async: helper job %llu (kind %d) failed -- the rest of this call only signals\n",
+                             (unsigned long long)t, j.kind);
+            }
+        }
+        if (j.ev >= 0) tpa.ev_signal(tpa.ev[size_t(j.ev)]);
+        tpa.tail.store(++t, std::memory_order_release);
+    }
+}
+
+bool Grimoire::tpa_wait_tag(uint64_t tag, const char* what) {
+    const volatile uint64_t* f = kflag;
+    uint64_t spins = 0;
+    const auto t0 = std::chrono::steady_clock::now();
+    while (*f < tag) {
+        _mm_pause();
+        if ((++spins & 0xFFFFF) == 0 && std::chrono::steady_clock::now() - t0 > std::chrono::seconds(30)) {
+            std::fprintf(stderr, "%s: the device copy did not land in 30 s\n", what);
+            return false;
+        }
+    }
+    std::atomic_thread_fence(std::memory_order_acquire);
+    return true;
+}
+
+// tp_small_allreduce's host part for one piece (np == 1), the synchronous code's operations in its order.
+bool Grimoire::tp_small_host(const TpaJob& j) {
+    const int peer = 1 - tp_rank;
+    const uint64_t s = j.s;
+    const size_t n = j.elems;
+    auto sflag = [&](int r) { return reinterpret_cast<std::atomic<uint64_t>*>(tshm.base + 1024 + 64 * size_t(r)); };
+    auto slot = [&](int r) { return reinterpret_cast<float*>(tshm.base + kTpShmHeader +
+        (size_t(2 * r) + size_t(s & 1)) * tshm.slot_elems * sizeof(float)); };
+    float* const bar = reinterpret_cast<float*>(tshm.sb_cpu) + size_t(s & 1) * tshm.small_max;
+    if (!tpa_wait_tag(j.tag, "TP async: small all-reduce")) return false;
+    auto peer_wait = [&](uint64_t c) {
+        auto* f = sflag(peer); uint64_t spins = 0; const auto tw = std::chrono::steady_clock::now();
+        while (f->load(std::memory_order_acquire) < c) {
+            _mm_pause();
+            if ((++spins & 0xFFFFF) == 0 && std::chrono::steady_clock::now() - tw > std::chrono::seconds(30)) {
+                std::fprintf(stderr, "TP rank %d: async small all-reduce waited 30 s for rank %d -- giving up\n", tp_rank, peer);
+                return false;
+            }
+        }
+        return true;
+    };
+    if (j.b16) {
+        const uint16_t* const st16 = reinterpret_cast<const uint16_t*>(tshm.stage);
+        uint16_t* const mine16 = reinterpret_cast<uint16_t*>(slot(tp_rank));
+        const uint16_t* const a16 = reinterpret_cast<const uint16_t*>(slot(0));
+        const uint16_t* const b16 = reinterpret_cast<const uint16_t*>(slot(1));
+        const uint16_t* const p16 = reinterpret_cast<const uint16_t*>(slot(peer));
+        uint16_t* const bar16 = reinterpret_cast<uint16_t*>(bar);
+        std::memcpy(mine16, st16, n * sizeof(uint16_t));
+        const uint64_t c = ++tshm.sp_cnt;
+        sflag(tp_rank)->store(c, std::memory_order_release);
+        if (!peer_wait(c)) return false;
+        if (j.peer16) tp_bar_copy16(bar16, p16, n);
+        else tp_bar_sum_bf16(bar, a16, b16, n);
+    } else {
+        float* const mine = slot(tp_rank);
+        if (j.host_add) for (size_t i = 0; i < n; ++i) mine[i] = tshm.stage[i] + j.host_add[i];
+        else std::memcpy(mine, tshm.stage, n * sizeof(float));
+        const uint64_t c = ++tshm.sp_cnt;
+        sflag(tp_rank)->store(c, std::memory_order_release);
+        if (!peer_wait(c)) return false;
+        tp_bar_sum(bar, slot(0), slot(1), n);
+    }
+    _mm_sfence();
+    if (j.peer16) (void)*reinterpret_cast<volatile const uint16_t*>(reinterpret_cast<uint16_t*>(bar) + n - 1);
+    else (void)*reinterpret_cast<volatile const float*>(bar + n - 1);   // the posted writes landed
     return true;
 }
 
@@ -12072,6 +12325,7 @@ void Grimoire::release() {
     }
     if (tp_scratch) { sycl::free(tp_scratch, q); tp_scratch = nullptr; tp_scratch_elems = 0; }
     if (tshm.stage) { sycl::free(tshm.stage, q); tshm.stage = nullptr; }
+    if (tpa.th.joinable()) { tpa_drain(); tpa.stop.store(true); tpa.th.join(); }
     if (kflag) { q.wait(); sycl::free(kflag, q); kflag = nullptr; kflag_tag = 0; }
     if (tshm.res) { sycl::free(tshm.res, q); tshm.res = nullptr; }
     if (tshm.peer) { sycl::free(tshm.peer, q); tshm.peer = nullptr; }
@@ -18225,6 +18479,7 @@ bool Grimoire::tiered_moe_cpu_rows(const LayerDev& d, const float* x, const int3
     const int H = cfg.hidden, K = cfg.top_k;
     const size_t R = size_t(M) * K;
     if (size_t(M) > px_cap) {
+        if (tpa.scope) tpa_drain();    // a helper job may still read the old buffers
         q.wait();
         for (void* p : {(void*)px_route, (void*)px_wt, (void*)px_x, (void*)px_y,
                         (void*)px_dy, (void*)px_vexp})
@@ -18287,11 +18542,42 @@ bool Grimoire::tiered_moe_cpu_rows(const LayerDev& d, const float* x, const int3
     if (fold_tag) *fold_tag = ftag;
     if (fold_add) *fold_add = nullptr;
     rx_lap(1);
+    // TP async: the helper waits for the routes, runs the RAM experts into px_y and the all-reduce adds them
+    if (ftag && rtag && tpa.scope && !rxt) {
+        TpaJob j; j.kind = 1; j.d = &d; j.M = M; j.rtag = rtag;
+        tpa_post(j, false);
+        *fold_add = px_y;
+        return true;
+    }
     if (rtag) { if (!kwait(rtag, "small-M rows' routes")) return false; }
     else ready.wait();
+    cx_rows_host(&d, M, rxt);
+    rx_lap(3);
+    if (ftag) {
+        // the host adds px_y to this rank's partial inside the all-reduce; rows with no RAM expert hold
+        // zeros (ffn_rows / ffn write every row they are given), so the add is always whole
+        *fold_add = px_y;
+        rx_lap(4);
+        return true;
+    }
+    if (tm_heat_moves > 0) {
+        launch_add(q, out, px_y, int(size_t(M) * H), {});    // heat engine: no copy behind its expert copies
+    } else {
+        q.memcpy(px_dy, px_y, size_t(M) * H * sizeof(float));
+        launch_add(q, out, px_dy, int(size_t(M) * H), {});
+    }
+    rx_lap(4);
+    return true;
+}
+
+// tiered_moe_cpu_rows' host part, after the routes landed in px_route / px_wt / px_x: the bookkeeping and the
+// RAM experts of M rows into px_y (the main thread, or the TP async helper).  stats: GRIMOIRE_Q4_TIMING's count.
+void Grimoire::cx_rows_host(const void* layer, int M, bool rxt) {
+    const LayerDev& d = *static_cast<const LayerDev*>(layer);
+    const int H = cfg.hidden, K = cfg.top_k;
+    const size_t R = size_t(M) * K;
     route_trace(d, 1, px_route, M);
     tm_heat_credit(d, px_route, R);
-    rx_lap(2);
     const auto t0 = std::chrono::steady_clock::now();
     // 11-06: every row's RAM experts in ONE pool call (CpuExperts::ffn_rows, the same sums
     // bit for bit; an expert two rows share is read once).  GRIMOIRE_CX_ROWS=0 = a call per row.
@@ -18332,22 +18618,6 @@ bool Grimoire::tiered_moe_cpu_rows(const LayerDev& d, const float* x, const int3
     }
     cx_ms += std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
     cx_calls += M;
-    rx_lap(3);
-    if (ftag) {
-        // the host adds px_y to this rank's partial inside the all-reduce; rows with no RAM expert hold
-        // zeros (ffn_rows / ffn write every row they are given), so the add is always whole
-        *fold_add = px_y;
-        rx_lap(4);
-        return true;
-    }
-    if (tm_heat_moves > 0) {
-        launch_add(q, out, px_y, int(size_t(M) * H), {});    // heat engine: no copy behind its expert copies
-    } else {
-        q.memcpy(px_dy, px_y, size_t(M) * H * sizeof(float));
-        launch_add(q, out, px_dy, int(size_t(M) * H), {});
-    }
-    rx_lap(4);
-    return true;
 }
 
 // ---- the heat engine: Radiance's runtime expert placement (core/place/heat.h + mover.cpp) ----------------
@@ -18819,6 +19089,9 @@ bool Grimoire::prefill_qwen4_exp(const std::vector<int32_t>& tokens,
         return !(e && *e == '0'); }();
     const bool vsm = verify && vsm_env && !noxmx && M <= 16;
     const bool vexact = vsm && std::getenv("GRIMOIRE_MTP_EXACT_VERIFY") != nullptr;
+    // TP async (GRIMOIRE_TP_ASYNC=1): this verify is queued ahead; every exit drains the helper
+    const bool tpa_on = vsm && tp_mega && tpa_begin();
+    struct TpaScopeEnd { Grimoire* g; bool on; ~TpaScopeEnd() { if (on) g->tpa_end(); } } tpa_scope_end{this, tpa_on};
     uint32_t* vqb = nullptr;    // verify: the QSA layers' block bitmap (freed with mem)
 
     Xe2DenseMXFP4 q4_dense_f32 = load_xe2_dense_mxfp4_f32();
@@ -19559,6 +19832,13 @@ bool Grimoire::prefill_qwen4_exp(const std::vector<int32_t>& tokens,
             if(tp_head_split)q.memcpy(hv.data()+r,s.d_val,sizeof(float));
         }
         q.wait_and_throw();
+        if(tpa_on){
+            tpa_scope_end.on=false;
+            if(!tpa_end()){
+                std::fprintf(stderr,"TP async: a helper job failed in this verify\n");
+                cleanup(); return false;
+            }
+        }
         if(tp_head_split&&!tp_head_pick(hv.data(),next_tokens->data(),M,next_tokens->data())){
             std::fprintf(stderr,"TP: split-head token exchange failed\n");
             cleanup(); return false;
