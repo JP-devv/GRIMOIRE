@@ -2716,8 +2716,7 @@ struct Grimoire {
     bool tp_shm_allreduce(float* dev, size_t elems);
     // pre_tag: the copy out already queued (tp_small_ar_send); host_add: a partial in host
     // memory the CPU adds to this rank's before the exchange, or null
-    bool tp_small_allreduce(float* dev, size_t elems, uint64_t pre_tag = 0,
-                            const float* host_add = nullptr, const float** result_view = nullptr);
+    bool tp_small_allreduce(float* dev, size_t elems, uint64_t pre_tag = 0, const float* host_add = nullptr);
     uint64_t tp_small_ar_send(float* dev, size_t elems);
     bool tp_pipe_allreduce(float* dev, size_t elems);
     bool tp_stream_reserve(size_t rows);
@@ -2759,19 +2758,6 @@ struct Grimoire {
         if (!tp_mega) return true;
         if(tp_peer_copy.active()) return tp_peer_copy.allreduce(q,dev,elems,tp_rank,false);
         return tshm.base ? tp_shm_allreduce(dev, elems) : tp_allreduce_sum(dev, int(elems));
-    }
-    bool tp_reduce_for_consumer(float* dev, size_t elems, const float*& result,
-                                uint64_t pre_tag = 0, const float* host_add = nullptr) {
-        result = dev;
-        static const bool bar_view = [] {
-            const char* val = std::getenv("GRIMOIRE_TP_BAR_VIEW");
-            return val && *val == '1';
-        }();
-        if (bar_view && tp_mega && !tpa.scope && !tp_peer_copy.active() &&
-            tshm.base && tshm.sb_dev && elems <= tshm.small_max)
-            return tp_small_allreduce(dev, elems, pre_tag, host_add, &result);
-        return pre_tag ? tp_small_allreduce(dev, elems, pre_tag, host_add)
-                       : tp_block_reduce(dev, elems);
     }
     int  tp_sync_token(int token);
     bool tp_sync_tokens(std::vector<int32_t>& toks);
@@ -6488,8 +6474,7 @@ uint64_t Grimoire::tp_small_ar_send(float* dev, size_t elems) {
     return ksend(1, sp, dp, nb);
 }
 
-bool Grimoire::tp_small_allreduce(float* dev,size_t elems,uint64_t pre_tag,const float* host_add,
-                                 const float** result_view){
+bool Grimoire::tp_small_allreduce(float* dev,size_t elems,uint64_t pre_tag,const float* host_add){
     if(tp_peer_copy.active()) return tp_peer_copy.allreduce(q,dev,elems,tp_rank,false,host_add);
     // TP async (11-19): queue the copy out, a wait on the job's event and the copy in; the helper thread does
     // the host part below (tp_small_host) in job order and signals the event.  Same operations, same bits.
@@ -6549,7 +6534,7 @@ bool Grimoire::tp_small_allreduce(float* dev,size_t elems,uint64_t pre_tag,const
     // bf16 partials (GRIMOIRE_TP_SMALL_BF16=1): one converting copy out, then the same pieces, flags and
     // rank-order sum as the fp32 path below.  The CPU-expert fold (host_add / pre_tag) stays fp32.
     if(tshm.small_bf16&&!host_add&&!pre_tag&&ksend_on()){
-        peer16=tshm.small_peer&&!result_view;
+        peer16=tshm.small_peer;
         uint16_t* const st16=reinterpret_cast<uint16_t*>(tshm.stage);
         uint16_t* const mine16=reinterpret_cast<uint16_t*>(slot(tp_rank));
         const uint16_t* const a16=reinterpret_cast<const uint16_t*>(slot(0));
@@ -6636,12 +6621,7 @@ bool Grimoire::tp_small_allreduce(float* dev,size_t elems,uint64_t pre_tag,const
     if(peer16)(void)*reinterpret_cast<volatile const uint16_t*>(reinterpret_cast<uint16_t*>(bar)+elems-1);
     else (void)*reinterpret_cast<volatile const float*>(bar+elems-1);   // the posted writes landed
     if(st)ta=clk::now();
-    if(result_view){
-        // The next kernel reads the already-written sum directly. This queue
-        // consumes the view before the next reduction reaches its copy-out
-        // wait, so the parity buffer cannot be overwritten while being read.
-        *result_view=tshm.sb_dev+size_t(s&1)*tshm.small_max;
-    }else if(peer16){
+    if(peer16){
         // own partial rounded as ksend_bf16 rounded it for the peer, plus the peer's: the same two fp32
         // operands on both ranks (fp32 a + b == b + a), so both cards get the same bits ("copy in" in the timer)
         float* const d=dev;
@@ -14382,7 +14362,7 @@ const float* Grimoire::forward_qwen4_exp(int token) {
         q.memcpy(q4_hyper + size_t(c) * H, s.h, size_t(H) * sizeof(float));
     }
 
-    const float* pending = nullptr;   // deferred combine input for the next layer
+    bool pending = false;          // is a deferred combine outstanding?
     static const bool q4t = std::getenv("GRIMOIRE_Q4_TIMING") != nullptr;
     auto q4clk = std::chrono::steady_clock::now();
     auto q4lap = [&](int k) {
@@ -14518,9 +14498,9 @@ const float* Grimoire::forward_qwen4_exp(int token) {
             // has to land first or it would be added to a state that the
             // combine then overwrites.
             if (pending) {
-                launch_hc_combine(q, q4_hyper, q4_pinj, pending, q4_hyper,
+                launch_hc_combine(q, q4_hyper, q4_pinj, q4_pend, q4_hyper,
                                   1, HC, H, none);
-                pending = nullptr;
+                pending = false;
             }
             const int NH = (cfg.ngram_size - 1) * cfg.heads_per_ngram;
             const int HD = cfg.ple_embed_dim / NH;
@@ -14576,9 +14556,9 @@ const float* Grimoire::forward_qwen4_exp(int token) {
         tlm(i, "ple");
         tl_cur = i;
         // ---- attention hyper-connection -------------------------------
-        hc_mix(d.hc_attn, pending,
+        hc_mix(d.hc_attn, pending ? q4_pend : nullptr,
                pending ? q4_pinj : nullptr, q4_inj, s.h2);
-        pending = nullptr;
+        pending = false;
         q4lap(1);
         tlm(i, "hc-attn");
 
@@ -14777,8 +14757,7 @@ const float* Grimoire::forward_qwen4_exp(int token) {
             tld(i, ".o");
         }
         // Megatron TP: out_proj / o_proj ran on this rank's heads only
-        const float* mixer_out;
-        if (!tp_reduce_for_consumer(s.moe_y, size_t(H), mixer_out)) {
+        if (tp_mega && !tp_block_reduce(s.moe_y, size_t(H))) {
             std::fprintf(stderr, "TP: mixer all-reduce failed\n");
             return nullptr;
         }
@@ -14788,7 +14767,7 @@ const float* Grimoire::forward_qwen4_exp(int token) {
         // ---- FFN hyper-connection -------------------------------------
         // combine_and_mix: this layer's attention output and the
         // injection its own mix produced, then the next block input.
-        hc_mix(d.hc_mlp, mixer_out, q4_inj, q4_pinj, s.h2);
+        hc_mix(d.hc_mlp, s.moe_y, q4_inj, q4_pinj, s.h2);
         q4lap(1);
         tlm(i, "hc-mlp");
 
@@ -14913,10 +14892,12 @@ const float* Grimoire::forward_qwen4_exp(int token) {
         }
         // Megatron TP: this rank's experts and half of the shared expert
         tpa.next_add_if_cx = ar_add_if_cx;
-        if (!tp_reduce_for_consumer(q4_pend, size_t(H), pending, ar_tag, ar_add)) {
+        if (tp_mega && !(ar_tag ? tp_small_allreduce(q4_pend, size_t(H), ar_tag, ar_add)
+                                : tp_block_reduce(q4_pend, size_t(H)))) {
             std::fprintf(stderr, "TP: MoE all-reduce failed\n");
             return nullptr;
         }
+        pending = true;    // (q4_pend, q4_pinj) travel to the next layer
         q4lap(4);
         tlm(i, "moe");
     }
@@ -14926,7 +14907,7 @@ const float* Grimoire::forward_qwen4_exp(int token) {
     // residual; the next stage starts with nothing pending.
     if (!pp_last) {
         if (pending)
-            launch_hc_combine(q, q4_hyper, q4_pinj, pending, q4_hyper, 1, HC, H, none);
+            launch_hc_combine(q, q4_hyper, q4_pinj, q4_pend, q4_hyper, 1, HC, H, none);
         if (!pp_send_hidden(q4_hyper, size_t(WIDE))) {
             std::fprintf(stderr, "PP rank %d: multi-stream residual send failed\n", pp_rank);
             return nullptr;
@@ -14948,7 +14929,7 @@ const float* Grimoire::forward_qwen4_exp(int token) {
     // It consumes whatever combine is still pending and produces the
     // single stream the head reads.  use_combine is false here, so it
     // emits no injection -- and there is no model.norm after it.
-    hc_mix(hc_final, pending,
+    hc_mix(hc_final, pending ? q4_pend : nullptr,
            pending ? q4_pinj : nullptr, nullptr, s.h2);
     // the multi-stream state after the last combine: the MTP head's backbone input
     if (mtp4.ok) q.memcpy(mtp4.back, q4_hyper, size_t(WIDE) * sizeof(float));
