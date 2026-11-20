@@ -132,13 +132,15 @@ int main(int argc, char** argv) {
             return 0;
         }
         const std::string mode = argc == 4 ? argv[1] : "";
-        if (argc != 3 && mode != "--tp4" && mode != "--grouped")
-            throw std::runtime_error("usage: qfn_parity_receipt [--tp4|--grouped] RUN_DIR 1|32");
+        if (argc != 3 && mode != "--tp4" && mode != "--grouped" && mode != "--hc")
+            throw std::runtime_error("usage: qfn_parity_receipt [--tp4|--grouped|--hc] RUN_DIR 1|32");
         const std::string len = argv[argc == 4 ? 3 : 2];
         if (len != "1" && len != "32") throw std::runtime_error("expected output length 1 or 32");
         const auto root = argv[argc == 4 ? 2 : 1];
-        const std::string left_name = mode == "--tp4" ? "host" : mode == "--grouped" ? "dense" : "pp4";
-        const std::string right_name = mode == "--tp4" ? "peer" : mode == "--grouped" ? "grouped" : "tp4";
+        std::string left_name = "pp4", right_name = "tp4";
+        if (mode == "--tp4") { left_name = "host"; right_name = "peer"; }
+        if (mode == "--grouped") { left_name = "dense"; right_name = "grouped"; }
+        if (mode == "--hc") { left_name = "unfused"; right_name = "fused"; }
         const auto left = layout(root, left_name, std::stoi(len));
         const auto right = layout(root, right_name, std::stoi(len));
         const auto mismatch = std::mismatch(left.begin(), left.end(), right.begin());

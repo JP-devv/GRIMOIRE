@@ -19217,6 +19217,9 @@ bool Grimoire::prefill_qwen4_exp(const std::vector<int32_t>& tokens,
     // GRIMOIRE_HC_TIMING=1: wait after every step of the mix and total them
     // (diagnosis only).
     const bool hct = std::getenv("GRIMOIRE_HC_TIMING") != nullptr;
+    const char* hf = std::getenv("GRIMOIRE_QFN_HC_FUSED_PREFILL");
+    const bool fuse_prefill_hc = hf && std::strcmp(hf, "1") == 0 && qfn_ranked_xmx && qfn_xmx;
+    size_t hc_fused_calls = 0;
     double hcms[7] = {0, 0, 0, 0, 0, 0, 0};   // combine norm down silu up mean inject
     auto hclap = [&](int k, std::chrono::steady_clock::time_point& t) {
         if (!hct) return;
@@ -19267,10 +19270,20 @@ bool Grimoire::prefill_qwen4_exp(const std::vector<int32_t>& tokens,
         }
         if (hct) q.wait();
         auto ht = std::chrono::steady_clock::now();
-        if (pblk) traced("hc.combine", [&] { launch_hc_combine(q, HY, pin, pblk, HY, MR, HC, H, none); });
-        hclap(0, ht);
-        traced("hc.norm", [&] { launch_hc_norm(q, HY, hc.norm, normed, MR, HC, H, eps, none); });
-        hclap(1, ht);
+        if (fuse_prefill_hc && pblk && MR >= 32) {
+            // Apply the pending residual and RMSNorm in one pass; preserve
+            // the in-place hyper update needed by the following HC block.
+            traced("hc.combine_norm", [&] {
+                launch_hc_combine_norm_rows(q, HY, pblk, pin, hc.norm, normed, MR, HC, H, eps, none);
+            });
+            ++hc_fused_calls;
+            hclap(1, ht);
+        } else {
+            if (pblk) traced("hc.combine", [&] { launch_hc_combine(q, HY, pin, pblk, HY, MR, HC, H, none); });
+            hclap(0, ht);
+            traced("hc.norm", [&] { launch_hc_norm(q, HY, hc.norm, normed, MR, HC, H, eps, none); });
+            hclap(1, ht);
+        }
         mm(hc.down, normed, lora);
         hclap(2, ht);
         traced("hc.silu", [&] { launch_hc_silu(q, lora, MR * LR, HC, none); });
@@ -19307,6 +19320,35 @@ bool Grimoire::prefill_qwen4_exp(const std::vector<int32_t>& tokens,
         }
         traced("moe.shared_add", [&] { launch_add(q, pe, shout, int(size_t(MR) * H), none); });
     };
+
+    // Fenced TP4 profile: measure at the common call site so host and peer
+    // transports both count. Drain preceding compute before starting the
+    // collective clock; include the collective's queued work before stopping.
+    const char* reduce_env = std::getenv("GRIMOIRE_QFN_TP_PREFILL_REDUCE_TIMING");
+    const bool profile = reduce_env && std::strcmp(reduce_env, "1") == 0 && tp_mega && !verify && !seqb;
+    using ProfileClock = std::chrono::steady_clock;
+    struct ReduceBucket { size_t calls = 0; double drain = 0, ms = 0; };
+    enum ReduceKind { PLE, DELTANET, ATTENTION, MOE };
+    std::map<std::pair<ReduceKind, size_t>, ReduceBucket> profile_reduce;
+    const auto elapsed = [](auto from, auto to) {
+        return std::chrono::duration<double, std::milli>(to - from).count();
+    };
+    auto profiled_reduce = [&](float* dev, size_t elems, ReduceKind kind) {
+        if (!profile) return tp_block_reduce(dev, elems);
+        const auto enter = ProfileClock::now();
+        q.wait_and_throw();
+        const auto start = ProfileClock::now();
+        const bool success = tp_block_reduce(dev, elems);
+        q.wait_and_throw();
+        auto& bucket = profile_reduce[{kind, elems}];
+        ++bucket.calls;
+        bucket.drain += elapsed(enter, start);
+        bucket.ms += elapsed(start, ProfileClock::now());
+        return success;
+    };
+    double route_plan_ms = 0, routed_device_ms = 0;
+    if (profile) q.wait_and_throw();
+    const auto profile_start = profile ? ProfileClock::now() : ProfileClock::time_point{};
 
     // GRIMOIRE_Q4_TIMING=1: wait between stages and total them per kind.
     // Perturbs the pipeline -- diagnosis only.
@@ -19421,7 +19463,7 @@ bool Grimoire::prefill_qwen4_exp(const std::vector<int32_t>& tokens,
                 });
             }
             mark("enter", "ple.host_reduce");
-            if (tp_mega && !tp_block_reduce(pemb, size_t(MR) * NH * PHD)) { ok = false; break; }
+            if (tp_mega && !profiled_reduce(pemb, size_t(MR) * NH * PHD, PLE)) { ok = false; break; }
             fence("ple.host_reduce");
             if (act_layer >= 0) act_dump(ActTap::ple_table, i, R0, MR, NH * PHD, pemb);
             mm(d.ple_key,   pemb, pkey);
@@ -19726,7 +19768,10 @@ bool Grimoire::prefill_qwen4_exp(const std::vector<int32_t>& tokens,
         q4xstart();
         mark("enter", "mixer.host_reduce");
         if (override_entry && probe_row >= 0) moe_row_write("dn-projection-local", PE + hx, H);
-        if (tp_mega && !tp_block_reduce(PE, size_t(MR) * H)) { ok = false; break; }
+        if (tp_mega && !profiled_reduce(PE, size_t(MR) * H,
+                                       d.kind == LayerKind::LINEAR_ATTN ? DELTANET : ATTENTION)) {
+            ok = false; break;
+        }
         fence("mixer.host_reduce");
         // Keep the native recurrent state and collective; replace only this
         // projection's contribution to the residual and the following MoE.
@@ -19812,6 +19857,8 @@ bool Grimoire::prefill_qwen4_exp(const std::vector<int32_t>& tokens,
                        d.moe.gate_up.fmt == Fmt::INT4 && d.moe.down.fmt == Fmt::INT4 &&
                        d.moe.gate_up.N == xmx_experts * 2 * MI && d.moe.gate_up.K == H &&
                        d.moe.down.N == xmx_experts * H && d.moe.down.K == MI) {
+                if (profile) q.wait_and_throw();
+                const auto route_start = profile ? ProfileClock::now() : ProfileClock::time_point{};
                 const size_t slots = size_t(MR) * TK;
                 q.memcpy(xmx_ids.data(), RX, slots * sizeof(int32_t)).wait_and_throw();
                 const auto plan = make_qfn_moe_route_plan(xmx_ids.data(), slots, MR, TK, E,
@@ -19822,6 +19869,8 @@ bool Grimoire::prefill_qwen4_exp(const std::vector<int32_t>& tokens,
                 if (rows) q.memcpy(xmx_pt, plan.perm_token.data(), size_t(rows) * sizeof(int32_t));
                 if (!tiles.empty()) q.memcpy(xmx_tiles, tiles.data(), tiles.size() * sizeof(QfnMoeTile));
                 q.wait_and_throw();   // descriptors must outlive the host-to-device copies
+                const auto expert_start = profile ? ProfileClock::now() : ProfileClock::time_point{};
+                if (profile) route_plan_ms += elapsed(route_start, expert_start);
                 ++xmx_batches;
                 if (rows) {
                     launch_permute_rows_bf16(q, BI, xmx_pt, xmx_x, rows, H);
@@ -19847,6 +19896,10 @@ bool Grimoire::prefill_qwen4_exp(const std::vector<int32_t>& tokens,
                     }
                 }
                 launch_moe_unpermute(q, xmx_y, xmx_inv, RW, PE, MR, TK, H);
+                if (profile) {
+                    q.wait_and_throw();
+                    routed_device_ms += elapsed(expert_start, ProfileClock::now());
+                }
             } else {
                 if (moe_routes_need_remap(d.expert_count, cfg.n_experts)) {
                     const int begin = d.expert_begin, end = begin + d.expert_count;
@@ -19918,7 +19971,7 @@ bool Grimoire::prefill_qwen4_exp(const std::vector<int32_t>& tokens,
         // Megatron TP: this rank's experts and half of the shared expert
         q4xstart();
         mark("enter", "moe.host_reduce");
-        if (tp_mega && !tp_block_reduce(pend, size_t(M) * H)) { ok = false; break; }
+        if (tp_mega && !profiled_reduce(pend, size_t(M) * H, MOE)) { ok = false; break; }
         fence("moe.host_reduce");
         if (act_layer >= 0) act_dump(ActTap::moe, i, 0, M, H, pend);
         if (i == moe_layer && moe_pos >= start_pos && moe_pos < start_pos + M)
@@ -19931,11 +19984,32 @@ bool Grimoire::prefill_qwen4_exp(const std::vector<int32_t>& tokens,
         pending = true;
         q4lap(4);
     }
+    if (profile) {
+        q.wait_and_throw();
+        const double span = elapsed(profile_start, ProfileClock::now());
+        double comm = 0;
+        size_t calls = 0;
+        const char* const names[] = {"ple", "deltanet", "attention", "moe"};
+        for (const auto& [key, bucket] : profile_reduce) {
+            const auto [kind, elems] = key;
+            calls += bucket.calls;
+            comm += bucket.ms;
+            std::fprintf(stderr, "QFN TP prefill reduce rank=%d pos=%d rows=%d kind=%s elems=%zu calls=%zu comm_ms=%.3f drain_ms=%.3f\n",
+                         tp_rank, start_pos, M, names[kind], elems, bucket.calls, bucket.ms, bucket.drain);
+        }
+        std::fprintf(stderr, "QFN TP prefill profile rank=%d pos=%d rows=%d calls=%zu grouped=%zu span_ms=%.3f communication_ms=%.3f "
+                     "routed_plan_ms=%.3f routed_device_ms=%.3f rest_ms=%.3f\n",
+                     tp_rank, start_pos, M, calls, qfn_grouped ? xmx_batches : size_t{0}, span, comm,
+                     route_plan_ms, routed_device_ms, span - comm - route_plan_ms - routed_device_ms);
+    }
     if (act.is_open()) {
         act.close();
         if (!act) throw std::runtime_error("close of QFN activation capture failed");
     }
     R0 = 0; MR = M; HY = hyper;             // the whole call again (seqb tail)
+    if (fuse_prefill_hc && std::getenv("GRIMOIRE_BUDGET_DEBUG"))
+        std::fprintf(stderr, "QFN HC prefill fused rank=%d pos=%d rows=%d calls=%zu\n",
+                     tp_rank, start_pos, M, hc_fused_calls);
     if (xmx_batches && std::getenv("GRIMOIRE_QFN_MOE_TRACE"))
         std::fprintf(stderr, "  QFN MoE XMX mode=%d prefill_rows=%d dispatches=%zu gemm_launches=%zu\n",
                      qfn_grouped ? 2 : 1, M, xmx_batches, xmx_launches);

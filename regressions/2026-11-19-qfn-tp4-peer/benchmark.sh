@@ -84,6 +84,56 @@ case $mode in
         "$root/bin/qfn_parity_receipt" --tp4 "$out" 32 | tee "$out/parity.log"
         arms=(1-host 1-peer 2-peer 2-host)
         ;;
+    mtp-preflight)
+        rc=0
+        run mtp-load 0 GRIMOIRE_MTP=1 GRIMOIRE_MTP_K=3 || rc=$?
+        stage=mtp-unsupported
+        (( rc != 0 )) || exit 2
+        for rank in 0 1 2 3; do
+            grep -F 'GRIMOIRE_QFN_TP4 needs four TP ranks, dense safetensors, --proj bf16, and speculation off' \
+                "$out/mtp-load/matched-r$rank.log"
+        done
+        if [[ -e $out/serving.sha256 ]]; then sha256sum -c "$out/serving.sha256"; fi
+        exit 0
+        ;;
+    hc)
+        export GRIMOIRE_QFN_PREFILL_GEMV=0 GRIMOIRE_QFN_MOE_XMX=2
+        run unfused-gate 1 "${gate[@]}"
+        run fused-gate 1 "${gate[@]}" GRIMOIRE_QFN_HC_FUSED_PREFILL=1
+        for rank in 0 1 2 3; do
+            [[ $(grep -c '^QFN HC prefill fused .*calls=[1-9]' "$out/fused-gate/matched-r$rank.log") == 6 ]]
+        done
+        stage=parity
+        "$root/bin/qfn_parity_receipt" --hc "$out" 32 | tee "$out/parity.log"
+        arms=(1-unfused 1-fused 2-fused 2-unfused)
+        ;;
+    profile)
+        export GRIMOIRE_QFN_PREFILL_GEMV=0
+        detail=()
+        if [[ ${QFN_PROFILE_DETAIL:-0} == 1 ]]; then detail=(GRIMOIRE_Q4_TIMING=1); fi
+        run grouped-profile 1 GRIMOIRE_QFN_MOE_XMX=2 GRIMOIRE_QFN_TP_PREFILL_REDUCE_TIMING=1 GRIMOIRE_GENERATION_PHASES=1 "${detail[@]}"
+        stage=profile
+        awk '
+            BEGIN { OFS="\t"; print "rank", "calls", "span_ms", "communication_ms", "routed_plan_ms", "routed_device_ms", "rest_ms" }
+            /^QFN TP prefill profile / {
+                split($5, a, "="); r=a[2]; ++chunks[r]
+                for (i=4; i<=10; ++i) { split($(i+4), a, "="); v[i]=a[2]+0 }
+                if (v[5]!=48 || v[4]!=97 || v[10]<0) bad=1
+                for (i=4; i<=10; ++i) sums[r,i]+=v[i]
+            }
+            END {
+                for (r=0; r<4; ++r) {
+                    if (chunks[r]!=6) bad=1
+                    print r, sums[r,4], sums[r,6], sums[r,7], sums[r,8], sums[r,9], sums[r,10]
+                }
+                if (bad) exit 1
+            }
+        ' "$out/grouped-profile"/matched-r*.log | tee "$out/profile.tsv"
+        stage=verify
+        sha256sum -c "$out/inputs.sha256"
+        if [[ -e $out/serving.sha256 ]]; then sha256sum -c "$out/serving.sha256"; fi
+        exit 0
+        ;;
     grouped)
         export GRIMOIRE_QFN_PREFILL_GEMV=0
         run dense-gate 1 "${gate[@]}"
@@ -102,8 +152,10 @@ printf 'pair\tarm\tprefill_ms\tdecode_ms\tprefill_tok_s\tdecode_tok_s\n' > "$out
 for arm in "${arms[@]}"; do
     kind=${arm#*-}
     peer=1; [[ $kind != host ]] || peer=0
-    xmx=0; [[ $kind != grouped ]] || xmx=2
-    run "$arm" "$peer" GRIMOIRE_GENERATION_PHASES=1 GRIMOIRE_QFN_MOE_XMX="$xmx"
+    xmx=0; hc=0
+    if [[ $kind == grouped || $mode == hc ]]; then xmx=2; fi
+    if [[ $kind == fused ]]; then hc=1; fi
+    run "$arm" "$peer" GRIMOIRE_GENERATION_PHASES=1 GRIMOIRE_QFN_MOE_XMX="$xmx" GRIMOIRE_QFN_HC_FUSED_PREFILL="$hc"
     for rank in 0 1 2 3; do
         cmp "$out/$kind-gate/matched-r$rank.ids" "$out/$arm/matched-r$rank.ids"
     done

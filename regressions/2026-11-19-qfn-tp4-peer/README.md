@@ -57,3 +57,17 @@ XMX + routed GEMV (`dense`) against dense XMX + routed grouped XMX (`grouped`).
 The grouped gate checks that every rank used the grouped kernel in every
 chunk, and compares all 32 greedy IDs before timing. Use `QFN_BENCH_PAIRS=1`
 for an initial screening pair; the default uses both execution orders.
+
+Set `QFN_BENCH_MODE=profile` for fenced grouped-TP4 diagnostics. `profile.tsv`
+separates collective calls (including peer waits but excluding the preceding
+queue drain), route-plan and routed-device time, and the remaining layer-loop
+work. `QFN_PROFILE_DETAIL=1` adds the existing Q4 stage breakdown. None of
+these diagnostic samples are throughput measurements. `QFN_BENCH_MODE=hc`
+compares unfused vs. fused residual-add/RMSNorm with grouped experts and
+peer-push fixed; it verifies the fused path ran and all 32 IDs match before
+running a trace-off pair.
+
+`QFN_BENCH_MODE=mtp-preflight` is currently a **negative** qualification
+check for `GRIMOIRE_MTP=1 GRIMOIRE_MTP_K=3` under host-staged TP4. It passes
+only when every rank reports the speculation-off loader refusal. No tokens
+or timings from this mode count as an MTP result.
