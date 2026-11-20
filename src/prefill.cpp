@@ -2462,11 +2462,10 @@ sycl::event launch_swiglu_batched(sycl::queue& q, const float* gu, float* out,
 // that only feeds the down projection: out = bf16(silu(gate) * up), the same values
 // without the fp32 [tokens][inter] round trip.
 sycl::event launch_swiglu_bf16_out(sycl::queue& q, const float* gu, sycl_bf16* out,
-    int tokens, int inter, const std::vector<sycl::event>& deps, const int32_t* live_rows) {
+    int tokens, int inter, const std::vector<sycl::event>& deps) {
     return q.submit([&](sycl::handler& h) { h.depends_on(deps);
         h.parallel_for(sycl::range<1>(size_t(tokens) * inter), [=](sycl::id<1> id) {
             const int t = int(id[0] / inter), d = int(id[0] % inter);
-            if (live_rows && t >= *live_rows) return;
             const int64_t z = int64_t(t) * inter + d;
             const float g = gu[int64_t(t) * 2 * inter + d];
             out[z] = sycl_bf16((g / (1.0f + sycl::exp(-g))) * gu[int64_t(t) * 2 * inter + inter + d]);
@@ -2647,11 +2646,10 @@ sycl::event launch_gate_sigmoid_mul_batched(sycl::queue& q, float* x,
 
 sycl::event launch_permute_rows_bf16(sycl::queue& q, const float* src,
     const int32_t* perm_token, sycl_bf16* dst, int rows, int width,
-    const std::vector<sycl::event>& deps, const int32_t* live_rows) {
+    const std::vector<sycl::event>& deps) {
     return q.submit([&](sycl::handler& h){h.depends_on(deps);
         h.parallel_for(sycl::range<2>(size_t(rows),size_t(width)),[=](sycl::id<2> id){
             const int r=int(id[0]), d=int(id[1]);
-            if (live_rows && r >= *live_rows) return;
             dst[int64_t(r)*width+d]=sycl_bf16(src[int64_t(perm_token[r])*width+d]);
         });});
 }

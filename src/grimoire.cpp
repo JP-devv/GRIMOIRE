@@ -52,7 +52,6 @@
 #include "b70/gguf_qwen35.hpp"
 #include "b70/dflash_config.hpp"
 #include "b70/qwen4_exp.hpp"
-#include "qfn_device_routes.hpp"
 #include "b70/qgate_layout.hpp"
 #include "b70/moe_route_remap.hpp"
 #include "b70/qfn_shard_plan.hpp"
@@ -2313,7 +2312,7 @@ struct Grimoire {
     // property is only requested when the timeline is asked for.
     static sycl::property_list queue_props() {
         if (std::getenv("GRIMOIRE_TIMELINE") ||
-            std::getenv("GRIMOIRE_PROFILE_PREFILL") || std::getenv("GRIMOIRE_QFN_GROUPED_PROFILE"))
+            std::getenv("GRIMOIRE_PROFILE_PREFILL"))
             return {sycl::property::queue::in_order(),
                     sycl::property::queue::enable_profiling()};
         return {sycl::property::queue::in_order()};
@@ -19669,77 +19668,6 @@ bool Grimoire::prefill_qwen4_exp(const std::vector<int32_t>& tokens,
     const char* qfn_prefill_gemv = std::getenv("GRIMOIRE_QFN_PREFILL_GEMV");
     const bool noxmx = tp_trace || (qfn_prefill_gemv && std::strcmp(qfn_prefill_gemv, "1") == 0) ||
                        (std::getenv("GRIMOIRE_BATCHED_PREFILL_NOXMX") != nullptr && !device_can_matrix(q));
-    // Opt-in: 1 = per-expert XMX control; 2 = a grouped launch per projection.
-    // Both consume the resident INT4 bytes, scales and zero points untouched.
-    const char* qfn_xmx_env = std::getenv("GRIMOIRE_QFN_MOE_XMX");
-    const bool qfn_grouped = qfn_xmx_env && std::strcmp(qfn_xmx_env, "2") == 0;
-    const bool qfn_ranked_xmx = tp_mega && tp_world == 4 && qfn_grouped;
-    const char* wide_n_env = std::getenv("GRIMOIRE_QFN_GROUPED_WIDE_N");
-    const bool qfn_wide_n = qfn_ranked_xmx && wide_n_env && std::strcmp(wide_n_env, "1") == 0;
-    const bool qfn_grouped_profile = qfn_grouped && std::getenv("GRIMOIRE_QFN_GROUPED_PROFILE");
-    const char* prefetch_env = std::getenv("GRIMOIRE_QFN_GROUPED_K_PREFETCH");
-    const bool qfn_k_prefetch = qfn_ranked_xmx && prefetch_env && std::strcmp(prefetch_env, "1") == 0;
-    unsigned prefetched_gate_up_calls = 0, offset_gate_up_calls = 0;
-    std::array<uint64_t, 2> grouped_ns{};
-    std::array<unsigned, 2> grouped_calls{};
-    const auto grouped_gemm = [&](bool down, const QuantWeight& w, int width, const sycl_bf16* x,
-                                  float* y, const QfnMoeTile* tiles, int count, const int32_t* live = nullptr,
-                                  const int32_t* offsets = nullptr, int workers = 0) {
-        const bool prefetch = qfn_k_prefetch && !down; // measured slower projection
-        auto event = offsets ? launch_qfn_int4_offset_grouped(q, w, width, x, y, offsets, workers)
-                             : launch_qfn_int4_grouped(q, w, width, x, y, tiles, count, {}, qfn_wide_n, live, prefetch);
-        if (offsets) ++offset_gate_up_calls;
-        if (prefetch && count > 0) ++prefetched_gate_up_calls;
-        if (qfn_grouped_profile && count > 0) {
-            using namespace sycl::info::event_profiling;
-            const uint64_t start = event.get_profiling_info<command_start>();
-            const uint64_t end = event.get_profiling_info<command_end>();
-            if (end <= start) throw std::runtime_error("invalid grouped MoE device timestamps");
-            grouped_ns[down] += end - start;
-            ++grouped_calls[down];
-        }
-    };
-    const int xmx_experts = qfn_ranked_xmx ? E / 4 : E;
-    const bool qfn_xmx = qfn_xmx_env && (qfn_grouped || std::strcmp(qfn_xmx_env, "1") == 0) &&
-        !noxmx && !verify && !seqb && (!tp_ranked() || qfn_ranked_xmx) && !ck.gguf_file && SUB >= 32 &&
-        E == 512 && TK == 10 && H == 2560 && MI == 640 && q.is_in_order();
-    const size_t route_capacity = qfn_xmx ? size_t(SUB) * TK : 0;
-    const char* device_routes_env = std::getenv("GRIMOIRE_QFN_DEVICE_ROUTES");
-    const bool qfn_device_routes = qfn_xmx && qfn_ranked_xmx && device_routes_env &&
-        std::strcmp(device_routes_env, "1") == 0;
-    const char* offset_env = std::getenv("GRIMOIRE_QFN_GROUPED_OFFSET_SCHED");
-    const bool qfn_offset_sched = qfn_device_routes && !qfn_wide_n && !qfn_k_prefetch &&
-                                  offset_env && std::strcmp(offset_env, "1") == 0;
-    const int offset_workers = qfn_offset_sched ? int(q.get_device().get_info<sycl::info::device::max_compute_units>()) : 0;
-    int32_t* xmx_pt = nullptr;
-    int32_t* xmx_inv = nullptr;
-    int32_t* xmx_counts = nullptr;
-    int32_t* xmx_offsets = nullptr;
-    int32_t* xmx_live_tiles = nullptr;
-    sycl_bf16* xmx_x = nullptr;
-    float* xmx_gu = nullptr;
-    float* xmx_y = nullptr;
-    QfnMoeTile* xmx_tiles = nullptr;
-    size_t xmx_batches = 0, xmx_launches = 0;
-    std::vector<int32_t> xmx_ids(qfn_device_routes ? 0 : route_capacity);
-    if (qfn_xmx) {
-        xmx_pt = sycl::malloc_device<int32_t>(route_capacity, q);
-        xmx_inv = sycl::malloc_device<int32_t>(route_capacity, q);
-        xmx_x = sycl::malloc_device<sycl_bf16>(route_capacity * H, q);
-        xmx_gu = df(route_capacity * 2 * MI);
-        xmx_y = df(route_capacity * H);
-        mem.insert(mem.end(), {xmx_pt, xmx_inv, xmx_x, xmx_gu, xmx_y});
-        if (qfn_grouped) {
-            xmx_tiles = sycl::malloc_device<QfnMoeTile>(xmx_experts + route_capacity / qfn_moe_tile_rows, q);
-            mem.push_back(xmx_tiles);
-        }
-        if (qfn_device_routes) {
-            xmx_counts = sycl::malloc_device<int32_t>(xmx_experts, q);
-            xmx_offsets = sycl::malloc_device<int32_t>(xmx_experts + 1, q);
-            xmx_live_tiles = sycl::malloc_device<int32_t>(1, q);
-            mem.insert(mem.end(), {xmx_counts, xmx_offsets, xmx_live_tiles});
-        }
-    }
     auto cleanup = [&]() {
         for (void* p : mem)
             if (p && !(vcache && std::find(vcached.begin(), vcached.end(), p) != vcached.end())) sycl::free(p, q);
@@ -19890,11 +19818,6 @@ bool Grimoire::prefill_qwen4_exp(const std::vector<int32_t>& tokens,
     // GRIMOIRE_HC_TIMING=1: wait after every step of the mix and total them
     // (diagnosis only).
     const bool hct = std::getenv("GRIMOIRE_HC_TIMING") != nullptr;
-    const char* hf = std::getenv("GRIMOIRE_QFN_HC_FUSED_PREFILL");
-    const bool fuse_prefill_hc = hf && std::strcmp(hf, "1") == 0 && qfn_ranked_xmx && qfn_xmx;
-    const char* tile_hc = std::getenv("GRIMOIRE_QFN_HC_DOWN_TILED");
-    const bool tiled_prefill_hc = tile_hc && std::strcmp(tile_hc, "1") == 0 && qfn_ranked_xmx && qfn_xmx;
-    size_t hc_fused_calls = 0, hc_tiled_calls = 0;
     double hcms[7] = {0, 0, 0, 0, 0, 0, 0};   // combine norm down silu up mean inject
     auto hclap = [&](int k, std::chrono::steady_clock::time_point& t) {
         if (!hct) return;
@@ -19945,30 +19868,11 @@ bool Grimoire::prefill_qwen4_exp(const std::vector<int32_t>& tokens,
         }
         if (hct) q.wait();
         auto ht = std::chrono::steady_clock::now();
-        if (fuse_prefill_hc && pblk && MR >= 32) {
-            // Apply the pending residual and RMSNorm in one pass; preserve
-            // the in-place hyper update needed by the following HC block.
-            traced("hc.combine_norm", [&] {
-                launch_hc_combine_norm_rows(q, HY, pblk, pin, hc.norm, normed, MR, HC, H, eps, none);
-            });
-            ++hc_fused_calls;
-            hclap(1, ht);
-        } else {
-            if (pblk) traced("hc.combine", [&] { launch_hc_combine(q, HY, pin, pblk, HY, MR, HC, H, none); });
-            hclap(0, ht);
-            traced("hc.norm", [&] { launch_hc_norm(q, HY, hc.norm, normed, MR, HC, H, eps, none); });
-            hclap(1, ht);
-        }
-        if (tiled_prefill_hc && MR >= 32 && hc.down.w.fmt == Fmt::BF16 &&
-            hc.down.w.N == 320 && hc.down.w.K == 10240 && gemm_fast_shape_ok(hc.down.w, MR)) {
-            traced("hc.down.activation_bf16", [&] {
-                launch_f32_to_bf16(q, normed, xb, size_t(MR) * WIDE, none);
-            });
-            traced("hc.down.tiled", [&] { launch_qfn_hc_down_tiled(q, hc.down.w, xb, lora, MR, none); });
-            ++hc_tiled_calls;
-        } else {
-            mm(hc.down, normed, lora);
-        }
+        if (pblk) traced("hc.combine", [&] { launch_hc_combine(q, HY, pin, pblk, HY, MR, HC, H, none); });
+        hclap(0, ht);
+        traced("hc.norm", [&] { launch_hc_norm(q, HY, hc.norm, normed, MR, HC, H, eps, none); });
+        hclap(1, ht);
+        mm(hc.down, normed, lora);
         hclap(2, ht);
         traced("hc.silu", [&] { launch_hc_silu(q, lora, MR * LR, HC, none); });
         hclap(3, ht);
@@ -20034,7 +19938,6 @@ bool Grimoire::prefill_qwen4_exp(const std::vector<int32_t>& tokens,
         bucket.ms += elapsed(start, ProfileClock::now());
         return success;
     };
-    double route_plan_ms = 0, routed_device_ms = 0;
     if (profile) q.wait_and_throw();
     const auto profile_start = profile ? ProfileClock::now() : ProfileClock::time_point{};
 
@@ -20451,10 +20354,6 @@ bool Grimoire::prefill_qwen4_exp(const std::vector<int32_t>& tokens,
             });
             q4xlap(2);
             bool sh_done = false;           // the shared expert already added (verify, below)
-            const bool packed_xmx = qfn_xmx && MR >= 32 && d.expert_count == xmx_experts &&
-                d.moe.gate_up.fmt == Fmt::INT4 && d.moe.down.fmt == Fmt::INT4 &&
-                d.moe.gate_up.N == xmx_experts * 2 * MI && d.moe.gate_up.K == H &&
-                d.moe.down.N == xmx_experts * H && d.moe.down.K == MI;
             if (moe_full) {
                 // the routed experts run below, once over every row
             } else if (moe_cpu) {           // M <= cpu_rows_max: one sub-chunk
@@ -20480,74 +20379,6 @@ bool Grimoire::prefill_qwen4_exp(const std::vector<int32_t>& tokens,
                 }
                 launch_tmoe_gate_up(q, tm_view(d), RX, BI, mh, MR, none);
                 launch_tmoe_down(q, tm_view(d), RX, RW, mh, PE, MR, none);
-            } else if (packed_xmx && qfn_device_routes) {
-                const int slots = MR * TK;
-                const int max_tiles = xmx_experts + slots / qfn_moe_tile_rows;
-                if (profile) q.wait_and_throw();
-                const auto route_start = profile ? ProfileClock::now() : ProfileClock::time_point{};
-                launch_qfn_device_routes(q, RX, slots, TK, d.expert_begin, xmx_experts,
-                                         xmx_counts, xmx_offsets, xmx_inv, xmx_pt,
-                                         xmx_live_tiles, xmx_tiles);
-                if (profile) q.wait_and_throw();
-                const auto expert_start = profile ? ProfileClock::now() : ProfileClock::time_point{};
-                if (profile) route_plan_ms += elapsed(route_start, expert_start);
-                // The in-order queue carries the device-produced live sizes.
-                // No readback is needed, even when this rank owns no routes.
-                const auto* const live_rows = xmx_offsets + xmx_experts;
-                launch_permute_rows_bf16(q, BI, xmx_pt, xmx_x, slots, H, none, live_rows);
-                grouped_gemm(false, d.moe.gate_up, 2 * MI, xmx_x, xmx_gu, xmx_tiles, max_tiles, xmx_live_tiles,
-                             qfn_offset_sched ? xmx_offsets : nullptr, offset_workers);
-                launch_swiglu_bf16_out(q, xmx_gu, xmx_x, slots, MI, none, live_rows);
-                grouped_gemm(true, d.moe.down, H, xmx_x, xmx_y, xmx_tiles, max_tiles, xmx_live_tiles);
-                launch_moe_unpermute(q, xmx_y, xmx_inv, RW, PE, MR, TK, H);
-                ++xmx_batches;
-                xmx_launches += 2;
-                if (profile) {
-                    q.wait_and_throw();
-                    routed_device_ms += elapsed(expert_start, ProfileClock::now());
-                }
-            } else if (packed_xmx) {
-                if (profile) q.wait_and_throw();
-                const auto route_start = profile ? ProfileClock::now() : ProfileClock::time_point{};
-                const size_t slots = size_t(MR) * TK;
-                q.memcpy(xmx_ids.data(), RX, slots * sizeof(int32_t)).wait_and_throw();
-                const auto plan = make_qfn_moe_route_plan(xmx_ids.data(), slots, MR, TK, E,
-                                                         d.expert_begin, xmx_experts);
-                const int rows = plan.offsets.back();
-                const auto tiles = qfn_grouped ? make_qfn_moe_tiles(plan) : std::vector<QfnMoeTile>{};
-                q.memcpy(xmx_inv, plan.inverse.data(), slots * sizeof(int32_t));
-                if (rows) q.memcpy(xmx_pt, plan.perm_token.data(), size_t(rows) * sizeof(int32_t));
-                if (!tiles.empty()) q.memcpy(xmx_tiles, tiles.data(), tiles.size() * sizeof(QfnMoeTile));
-                q.wait_and_throw();   // descriptors must outlive the host-to-device copies
-                const auto expert_start = profile ? ProfileClock::now() : ProfileClock::time_point{};
-                if (profile) route_plan_ms += elapsed(route_start, expert_start);
-                ++xmx_batches;
-                if (rows) {
-                    launch_permute_rows_bf16(q, BI, xmx_pt, xmx_x, rows, H);
-                    if (qfn_grouped) {
-                        grouped_gemm(false, d.moe.gate_up, 2 * MI, xmx_x, xmx_gu, xmx_tiles, int(tiles.size()));
-                        xmx_launches += 2;
-                    } else for (int e = 0; e < E; ++e) if (plan.counts[e]) {
-                        const size_t off = size_t(plan.offsets[e]);
-                        const auto w = slice_quant_rows(d.moe.gate_up, e * 2 * MI, 2 * MI);
-                        launch_gemm_xmx(q, w, xmx_x + off * H, xmx_gu + off * 2 * MI,
-                                        plan.counts[e]);
-                        xmx_launches += 2;
-                    }
-                    launch_swiglu_bf16_out(q, xmx_gu, xmx_x, rows, MI);
-                    if (qfn_grouped)
-                        grouped_gemm(true, d.moe.down, H, xmx_x, xmx_y, xmx_tiles, int(tiles.size()));
-                    else for (int e = 0; e < E; ++e) if (plan.counts[e]) {
-                        const size_t off = size_t(plan.offsets[e]);
-                        const auto w = slice_quant_rows(d.moe.down, e * H, H);
-                        launch_gemm_xmx(q, w, xmx_x + off * MI, xmx_y + off * H, plan.counts[e]);
-                    }
-                }
-                launch_moe_unpermute(q, xmx_y, xmx_inv, RW, PE, MR, TK, H);
-                if (profile) {
-                    q.wait_and_throw();
-                    routed_device_ms += elapsed(expert_start, ProfileClock::now());
-                }
             } else {
                 if (moe_routes_need_remap(d.expert_count, cfg.n_experts)) {
                     const int begin = d.expert_begin, end = begin + d.expert_count;
@@ -20627,32 +20458,10 @@ bool Grimoire::prefill_qwen4_exp(const std::vector<int32_t>& tokens,
                          bucket.t.copy_ms, bucket.t.ready_ms, bucket.t.sum_ms, bucket.t.reuse_ms,
                          bucket.t.gather_ms, bucket.t.peer_bytes);
         }
-        std::fprintf(stderr, "QFN TP prefill profile rank=%d pos=%d rows=%d calls=%zu grouped=%zu span_ms=%.3f communication_ms=%.3f "
-                     "routed_plan_ms=%.3f routed_device_ms=%.3f rest_ms=%.3f\n",
-                     tp_rank, start_pos, M, calls, qfn_grouped ? xmx_batches : size_t{0}, span, comm,
-                     route_plan_ms, routed_device_ms, span - comm - route_plan_ms - routed_device_ms);
+        std::fprintf(stderr, "QFN TP prefill profile rank=%d pos=%d rows=%d calls=%zu span_ms=%.3f communication_ms=%.3f\n",
+                     tp_rank, start_pos, M, calls, span, comm);
     }
     R0 = 0; MR = M; HY = hyper;             // the whole call again (seqb tail)
-    if (tiled_prefill_hc && std::getenv("GRIMOIRE_BUDGET_DEBUG"))
-        std::fprintf(stderr, "QFN HC prefill tiled rank=%d pos=%d rows=%d calls=%zu\n",
-                     tp_rank, start_pos, M, hc_tiled_calls);
-    if (fuse_prefill_hc && std::getenv("GRIMOIRE_BUDGET_DEBUG"))
-        std::fprintf(stderr, "QFN HC prefill fused rank=%d pos=%d rows=%d calls=%zu\n",
-                     tp_rank, start_pos, M, hc_fused_calls);
-    if (qfn_grouped_profile && xmx_batches)
-        std::fprintf(stderr, "QFN grouped projection: rank=%d rows=%d gu_calls=%u gu_ms=%.3f down_calls=%u down_ms=%.3f\n",
-                     tp_rank, M, grouped_calls[0], double(grouped_ns[0]) / 1e6,
-                     grouped_calls[1], double(grouped_ns[1]) / 1e6);
-    if (xmx_batches && std::getenv("GRIMOIRE_QFN_MOE_TRACE")) {
-        std::fprintf(stderr, "  QFN MoE XMX mode=%d prefill_rows=%d dispatches=%zu gemm_launches=%zu device_routes=%d wide_n=%d\n",
-                     qfn_grouped ? 2 : 1, M, xmx_batches, xmx_launches, int(qfn_device_routes), int(qfn_wide_n));
-        if (prefetched_gate_up_calls)
-            std::fprintf(stderr, "QFN grouped K prefetch: projection=gate_up rows=%d calls=%u\n",
-                         M, prefetched_gate_up_calls);
-        if (offset_gate_up_calls)
-            std::fprintf(stderr, "QFN grouped offset scheduler: projection=gate_up rows=%d calls=%u workers=%d\n",
-                         M, offset_gate_up_calls, offset_workers);
-    }
     if (q4t) {
         std::fprintf(stderr, "  qwen4_exp prefill M=%d (sub-chunks of %d): PLE %.1f  HC %.1f  DeltaNet %.1f  "
                      "full-attn %.1f  MoE %.1f ms  (PLE rows read %ld in %.1f ms)\n",

@@ -18,7 +18,7 @@ bin/test_http: tests/test_http.cpp include/b70/http_request.hpp include/b70/json
 	@mkdir -p bin
 	$(CXX) $(CXXFLAGS) $< -o $@
 
-QFN_TP_TESTS = bin/test_qfn_shard_plan bin/test_qfn_moe_routes bin/test_qfn_offset_scheduler
+QFN_TP_TESTS = bin/test_qfn_shard_plan
 
 $(QFN_TP_TESTS): bin/%: tests/%.cpp $(wildcard include/b70/qfn_*.hpp)
 	@mkdir -p bin
@@ -231,6 +231,7 @@ SYCL_CXX ?= icpx
 SYCL_TARGET ?= intel_gpu_bmg_g31,intel_gpu_bmg_g21
 COMMA := ,
 NATIVE_DIR = bin/native-$(subst $(COMMA),+,$(SYCL_TARGET))
+NATIVE_DEVICE_SPLIT ?= $(if $(filter spir64,$(SYCL_TARGET)),per_kernel,auto)
 NATIVE_FLAGS = -fsycl -fsycl-targets=$(SYCL_TARGET) -O2 -std=c++20 \
  -fno-fast-math -ffp-contract=fast -fno-math-errno -DGRIMOIRE_NATIVE_ONLY -Iinclude -Isrc
 NATIVE_SRC = grimoire qwen35_loader native_model safetensors gguf gguf_decode gguf_qwen35 quantize gptq \
@@ -254,9 +255,9 @@ $(NATIVE_DIR)/server.o: tools/grimoire_server.cpp
 	$(SYCL_CXX) $(NATIVE_FLAGS) -MMD -MP -c $< -o $@
 
 $(NATIVE_DIR)/grimoire: $(NATIVE_OBJ) $(NATIVE_DIR)/cli.o
-	$(SYCL_CXX) $(NATIVE_FLAGS) $^ -ldl -lpthread -o $@
+	$(SYCL_CXX) $(NATIVE_FLAGS) -fsycl-device-code-split=$(NATIVE_DEVICE_SPLIT) $^ -ldl -lpthread -o $@
 
 $(NATIVE_DIR)/grimoire-server: $(NATIVE_OBJ) $(NATIVE_DIR)/server.o
-	$(SYCL_CXX) $(NATIVE_FLAGS) $^ -ldl -lpthread -o $@
+	$(SYCL_CXX) $(NATIVE_FLAGS) -fsycl-device-code-split=$(NATIVE_DEVICE_SPLIT) $^ -ldl -lpthread -o $@
 
 -include $(wildcard $(NATIVE_DIR)/*.d)
