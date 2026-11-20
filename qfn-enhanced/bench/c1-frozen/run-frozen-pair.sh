@@ -139,6 +139,22 @@ native() (
                 export GRIMOIRE_QFN_TP_PREFILL_REDUCE_TIMING=1
             fi
             ;;
+        prefill-combined-off|prefill-combined-on|prefill-combined-profile)
+            [[ $fixture == frozen && ${PAIR_ORDER:-} == native-only ]]
+            build="$Q/../receipts/prefill-combined-build"
+            [[ $(< "$build/build-prefill-combined.exit") == 0 ]]
+            (cd "$build"; sha256sum -c prefill-combined.sha256)
+            NATIVE_BIN=$build/qfn-combined
+            export GRIMOIRE_QFN_PREFILL_RSAG=1 GRIMOIRE_QFN_MOE_TRACE=1
+            export GRIMOIRE_QFN_HC_FUSED_UP=0 GRIMOIRE_QFN_PREFILL_CAUSAL_TILES=0
+            if [[ $NATIVE_MODE != prefill-combined-off ]]; then
+                export GRIMOIRE_QFN_HC_FUSED_UP=1 GRIMOIRE_QFN_PREFILL_CAUSAL_TILES=1
+            fi
+            if [[ $NATIVE_MODE == prefill-combined-profile ]]; then
+                export GRIMOIRE_Q4_TIMING=1 GRIMOIRE_HC_TIMING=1 GRIMOIRE_QFN_DN_PROFILE=1
+                export GRIMOIRE_QFN_TP_PREFILL_REDUCE_TIMING=1
+            fi
+            ;;
         hc-up-off|hc-up-on)
             [[ $fixture == frozen && ${PAIR_ORDER:-} == native-only ]]
             build="$Q/../receipts/hc-up-mean-build"
@@ -214,19 +230,20 @@ native() (
                 grep -Eq "^QFN HC fused BF16 rank=$rank rows=2048 calls=[1-9][0-9]*$" "$D/native/r$rank.log"
             done
         fi
-        if [[ ${NATIVE_MODE:-} == rsag-* || ${NATIVE_MODE:-} == integrated-* || ${NATIVE_MODE:-} == causal-* || ${NATIVE_MODE:-} == hc-up-* ]]; then
+        if [[ ${NATIVE_MODE:-} == rsag-* || ${NATIVE_MODE:-} == integrated-* || ${NATIVE_MODE:-} == causal-* || ${NATIVE_MODE:-} == hc-up-* || ${NATIVE_MODE:-} == prefill-combined-* ]]; then
             for rank in 0 1 2 3; do
                 grep -Eq "^QFN Xe2 gate/up: rank=$rank rows=2048 calls=48 output=fp32$" "$D/native/r$rank.log"
                 grep -Eq "^QFN Xe2 down: rank=$rank rows=2048 calls=48 output=fp32$" "$D/native/r$rank.log"
                 if [[ $NATIVE_MODE != rsag-off ]]; then
                     grep -Fxq "QFN prefill RSAG rank=$rank rows=2048 calls=97" "$D/native/r$rank.log"
                 fi
-                if [[ $NATIVE_MODE == causal-on || $NATIVE_MODE == causal-profile ]]; then
+                if [[ $NATIVE_MODE == causal-on || $NATIVE_MODE == causal-profile ||
+                      $NATIVE_MODE == prefill-combined-on || $NATIVE_MODE == prefill-combined-profile ]]; then
                     for rows in 2048 658; do
                         grep -Fxq "QFN prefill causal tiles rank=$rank rows=$rows layers=12" "$D/native/r$rank.log"
                     done
                 fi
-                if [[ $NATIVE_MODE == hc-up-on ]]; then
+                if [[ $NATIVE_MODE == hc-up-on || $NATIVE_MODE == prefill-combined-on || $NATIVE_MODE == prefill-combined-profile ]]; then
                     grep -Fxq "QFN HC up mean rank=$rank rows=2048 calls=96" "$D/native/r$rank.log"
                 fi
             done
@@ -242,7 +259,7 @@ native() (
                 fi
             done
         fi
-        if [[ ${NATIVE_MODE:-} == integrated-profile || ${NATIVE_MODE:-} == causal-profile ]]; then
+        if [[ ${NATIVE_MODE:-} == integrated-profile || ${NATIVE_MODE:-} == causal-profile || ${NATIVE_MODE:-} == prefill-combined-profile ]]; then
             python3 "$B/c1.py" native "$D/native"/r{0,1,2,3}.log > /dev/null
             grep -hE '^(QFN TP prefill |QFN .*verify |QFN DN |HC prefill |Q4 profile )' "$D/native"/r?.log > "$D/instrumented-stages.txt"
         else
@@ -375,7 +392,7 @@ if [[ ${PAIR_ORDER:-} == native-only ]]; then
     fi
     case "${NATIVE_MODE:-}" in
         replay) [[ -s $D/row-replay.txt ]] ;;
-        integrated-profile|causal-profile) [[ -s $D/instrumented-stages.txt ]] ;;
+        integrated-profile|causal-profile|prefill-combined-profile) [[ -s $D/instrumented-stages.txt ]] ;;
         *) [[ -s $D/native-phase.json ]] ;;
     esac
     exit

@@ -23,6 +23,7 @@ case $variant in
     causal-tiles) patches=(qfn-prefill-rsag.patch qfn-prefill-rsag-probe.patch qfn-prefill-rsag-receipt.patch qfn-prefill-causal-tiles.patch) ;;
     hc-up-mean) patches=(qfn-prefill-rsag.patch qfn-prefill-rsag-probe.patch qfn-prefill-rsag-receipt.patch qfn-hc-up-mean.patch) ;;
     verifier-scratch) patches=(qfn-prefill-rsag.patch qfn-prefill-rsag-probe.patch qfn-prefill-rsag-receipt.patch qfn-integrated-split-receipt.patch qfn-verify-reuse-scratch.patch) ;;
+    prefill-combined) patches=(qfn-prefill-rsag.patch qfn-prefill-rsag-probe.patch qfn-prefill-rsag-receipt.patch qfn-hc-up-mean.patch qfn-causal-with-hc-up.patch) ;;
     prefill-rsag) patches=(qfn-prefill-rsag.patch qfn-prefill-rsag-probe.patch qfn-prefill-rsag-receipt.patch) ;;
     *) echo "Unknown variant: $variant" >&2; exit 2 ;;
 esac

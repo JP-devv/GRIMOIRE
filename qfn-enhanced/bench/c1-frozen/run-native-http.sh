@@ -10,6 +10,7 @@ case "$variant" in
     baseline) S=$ROOT/qfn-enhanced/build-inputs/combined-c1; manifest=rebuilt.sha256 ;;
     rsag) S=$ROOT/receipts/prefill-rsag-build; manifest=rsag.sha256 ;;
     causal) S=$ROOT/receipts/causal-tiles-build; manifest=causal-tiles.sha256 ;;
+    prefill-combined) S=$ROOT/receipts/prefill-combined-build; manifest=prefill-combined.sha256 ;;
     hc-up) S=$ROOT/receipts/hc-up-mean-build; manifest=hc-up-mean.sha256 ;;
     *) echo "Unknown native serving variant: $variant" >&2; exit 2 ;;
 esac
@@ -72,8 +73,8 @@ export GRIMOIRE_QFN_GROUPED_K_PREFETCH=0 GRIMOIRE_QFN_GROUPED_LIVE_TILES=1
 export GRIMOIRE_QFN_XE2_GATE_UP=fp32 GRIMOIRE_QFN_XE2_DOWN=1
 export GRIMOIRE_QFN_HC_DOWN_TILED=1 GRIMOIRE_QFN_HC_FUSED_PREFILL=1
 if [[ $variant != baseline ]]; then export GRIMOIRE_QFN_PREFILL_RSAG=1; fi
-if [[ $variant == causal ]]; then export GRIMOIRE_QFN_PREFILL_CAUSAL_TILES=1; fi
-if [[ $variant == hc-up ]]; then export GRIMOIRE_QFN_HC_FUSED_UP=1; fi
+if [[ $variant == causal || $variant == prefill-combined ]]; then export GRIMOIRE_QFN_PREFILL_CAUSAL_TILES=1; fi
+if [[ $variant == hc-up || $variant == prefill-combined ]]; then export GRIMOIRE_QFN_HC_FUSED_UP=1; fi
 compgen -e GRIMOIRE_ | sort | while IFS= read -r key; do printf '%s=%s\n' "$key" "${!key}"; done > "$D/options.env"
 cap=$((APPROVED_DEADLINE_EPOCH - $(date +%s) - 20))
 (( cap >= 120 ))
