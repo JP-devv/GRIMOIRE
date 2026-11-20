@@ -18,10 +18,17 @@ restore() {
         tmux send-keys -t "$pane" -l nvtop
         tmux send-keys -t "$pane" Enter
         for attempt in {1..30}; do
-            [[ $(tmux display-message -p -t "$pane" '#{pane_current_command}') == nvtop ]] && exit "$rc"
+            if [[ $(tmux display-message -p -t "$pane" '#{pane_current_command}') == nvtop ]]; then
+                echo "Restored nvtop in $pane"
+                exit "$rc"
+            fi
             sleep 0.1
         done
         echo "Unable to verify nvtop restoration in $pane" >&2
+        exit 1
+    fi
+    if [[ $(tmux display-message -p -t "$pane" '#{pane_current_command}') != nvtop ]]; then
+        echo "Monitor pane changed before restoration: $pane" >&2
         exit 1
     fi
     exit "$rc"
