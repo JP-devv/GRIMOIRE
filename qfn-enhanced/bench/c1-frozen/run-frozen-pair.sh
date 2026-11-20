@@ -98,7 +98,7 @@ vllm() (
     NAME=qfn-c1-$(basename "$D")
     URL=http://127.0.0.1:$BENCH_PORT
     mkdir -p "$D/vllm-work/cache/"{tmp,hf,triton,vllm,xdg}
-    local -a profiler_args=() reference_args=()
+    local -a profiler_args=() profile_cli=() reference_args=()
     case "${REFERENCE_MODE:-graph-off}" in
         graph-off) ;;
         eager-off) reference_args=(--enforce-eager) ;;
@@ -116,13 +116,14 @@ vllm() (
             --mount "type=bind,src=$D/vllm-work,dst=/work" \
             --entrypoint /opt/venv/bin/python "$IMAGE" /probe.py > "$D/probe.log" 2>&1
         idle
-        profiler_args=(--profiler-config '{"profiler":"torch","torch_profiler_dir":"/work/traces"}')
+        profiler_args=(--mount "type=bind,src=$B/qfn_profile_worker.py,dst=/work/qfn_profile_worker.py,readonly")
+        profile_cli=(--worker-cls qfn_profile_worker.QFNProfileWorker --profiler-config '{"profiler":"torch","torch_profiler_dir":"/work/traces"}')
         CAP=$(remaining 360); (( CAP <= 360 )) || CAP=360
     fi
     CID=$(docker run --pull=never --detach --name "$NAME" --network host --ipc host \
         --device /dev/dri:/dev/dri --mount type=bind,src=/dev/dri/by-path,dst=/dev/dri/by-path,readonly --group-add render --group-add video \
         --ulimit memlock=-1:-1 --ulimit stack=67108864:67108864 \
-        --env-file "$B/vllm-c1.env" --mount type=bind,src=/home/haxor/models,dst=/models,readonly \
+        --env-file "$B/vllm-c1.env" "${profiler_args[@]}" -e PYTHONPATH=/work --mount type=bind,src=/home/haxor/models,dst=/models,readonly \
         --mount "type=bind,src=$D/vllm-work,dst=/work" --entrypoint /usr/bin/timeout "$IMAGE" \
         --signal=TERM --kill-after=8s "$CAP" vllm serve /models/qwen38-w4a16-snapshot \
         --host 127.0.0.1 --port "$BENCH_PORT" --served-model-name qwen38-flash-next-c1 \
@@ -130,7 +131,7 @@ vllm() (
         --gpu-memory-utilization 0.95 --max-model-len 32768 --max-num-batched-tokens 1024 --max-num-seqs 16 \
         --limit-mm-per-prompt '{"image":4,"video":2}' --async-scheduling --generation-config vllm \
         --compilation-config '{"cudagraph_mode":"FULL_AND_PIECEWISE","cudagraph_capture_sizes":[1,2,4,8,16,256,512,1024]}' \
-        --no-enable-prefix-caching --enable-prompt-tokens-details "${profiler_args[@]}" "${reference_args[@]}")
+        --no-enable-prefix-caching --enable-prompt-tokens-details "${profile_cli[@]}" "${reference_args[@]}")
     trap 'docker logs "$CID" > "$D/vllm.log" 2>&1 || :; docker rm -f "$CID" >/dev/null' EXIT
     trap 'exit 143' TERM INT
     docker inspect --format '{{.Image}} {{json .Path}} {{json .Args}}' "$CID" > "$D/vllm-invocation.txt"
