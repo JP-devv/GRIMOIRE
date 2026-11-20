@@ -1,0 +1,36 @@
+--- a/src/attention.cpp
++++ b/src/attention.cpp
+@@ -1351,6 +1351,12 @@
+     }();
+     const bool shared_merge = share_merge_weights && tokens == 4 && num_heads == 6 &&
+                               num_kv_heads == 1 && head_dim == 256 && splits > 1 && splits <= MAX_SPLITS;
++    static const bool coalesced_env = [] {
++        const char* value = std::getenv("GRIMOIRE_QFN_VERIFY_COALESCED_V");
++        return value && value[0] == '1' && !value[1];
++    }();
++    const bool coalesced_v = coalesced_env && tokens == 4 && num_heads == 6 &&
++                             num_kv_heads == 1 && head_dim == 256 && splits > 1;
+     const bool profile = tokens == 4 && verify_attn_profile_enabled();
+     if (profile) require_verify_attn_profiling_queue(q);
+ 
+@@ -1406,8 +1412,18 @@
+                         const int s = s0 + k;
+                         ksl[x] = s < s_end ? e4m3_to_f32(
+                             kh[int64_t(d) * seq_cap + s]) : 0.0f;
+-                        vsl[int64_t(k) * head_dim + d] = s < s_end
+-                            ? e4m3_to_f32(vh[int64_t(s) * head_dim + d]) : 0.0f;
++                        if (!coalesced_v)
++                            vsl[int64_t(k) * head_dim + d] = s < s_end
++                                ? e4m3_to_f32(vh[int64_t(s) * head_dim + d]) : 0.0f;
++                    }
++                    if (coalesced_v) {
++                        // V is token-major. Stage contiguous dimensions of each
++                        // token, leaving the shared-memory layout unchanged.
++                        for (int x = lid; x < KT * head_dim; x += wg) {
++                            const int s = s0 + x / head_dim;
++                            vsl[x] = s < s_end
++                                ? e4m3_to_f32(vh[int64_t(s0) * head_dim + x]) : 0.0f;
++                        }
+                     }
+                     sycl::group_barrier(it.get_group());
+ 
