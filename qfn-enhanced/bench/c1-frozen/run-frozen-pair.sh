@@ -20,6 +20,11 @@ case "$fixture" in
     *) echo "Unknown fixture: $fixture" >&2; exit 2 ;;
 esac
 cp "$D/fixtures/$fixture.request.json" "$D/request.json"
+if [[ ${PAIR_ORDER:-} == boundary ]]; then
+    [[ $fixture == full-chunk ]]
+    jq '.max_tokens = 2' "$D/request.json" > "$D/boundary-request.json"
+    mv "$D/boundary-request.json" "$D/request.json"
+fi
 exec 9>/tmp/grimoire-qfn-gpus.lock
 flock -n 9
 idle() {
@@ -144,18 +149,24 @@ vllm() (
     NAME=qfn-c1-$(basename "$D")
     URL=http://127.0.0.1:$BENCH_PORT
     mkdir -p "$D/vllm-work/cache/"{tmp,hf,triton,vllm,xdg}
-    local -a profiler_args=() profile_cli=() reference_args=()
+    local -a profiler_args=() profile_cli=() reference_args=() recipe_env=()
+    local context=32768
+    local compilation='{"cudagraph_mode":"FULL_AND_PIECEWISE","cudagraph_capture_sizes":[1,2,4,8,16,256,512,1024]}' 
     case "${REFERENCE_MODE:-graph-off}" in
         graph-off) ;;
         eager-off) reference_args=(--enforce-eager) ;;
-        recipe-mtp3)
+        recipe-mtp3|eager-mtp3)
+            context=262144
+            compilation='{"cudagraph_mode":"FULL_AND_PIECEWISE","cudagraph_capture_sizes":[1,2,4,8,12,16,20,24,28,32,36,40,44,48,52,56,60,64,256,512,1024]}'
+            recipe_env=(-e B70_MTP_DRAFT_PREFILL_NO_PIECEWISE=1)
             reference_args=(--speculative-config '{"method":"mtp","num_speculative_tokens":3,"model":"/models/qwen38-w4a16-mtp-snapshot","disable_eagle_block_drop":true}')
+            if [[ $REFERENCE_MODE == eager-mtp3 ]]; then reference_args+=(--enforce-eager); fi
             ;;
         *) echo "Invalid REFERENCE_MODE" >&2; exit 2 ;;
     esac
     printf '%s\n' "${REFERENCE_MODE:-graph-off}" > "$D/reference-mode"
     local batch_tokens=${REFERENCE_BATCH_TOKENS:-1024}
-    if [[ ${PAIR_ORDER:-} == profile && $fixture == full-chunk ]]; then batch_tokens=2048; fi
+    if [[ ( ${PAIR_ORDER:-} == profile || ${PAIR_ORDER:-} == boundary ) && $fixture == full-chunk ]]; then batch_tokens=2048; fi
     if [[ $batch_tokens != 1024 && ( $batch_tokens != 2048 || ${REFERENCE_MODE:-} != eager-off ) ]]; then
         echo "2048 reference batch tokens require the eager attribution arm" >&2
         exit 2
@@ -171,18 +182,30 @@ vllm() (
         profiler_args=(--mount "type=bind,src=$B/qfn_profile_worker.py,dst=/work/qfn_profile_worker.py,readonly")
         profile_cli=(--worker-cls qfn_profile_worker.QFNProfileWorker --profiler-config '{"profiler":"torch","torch_profiler_dir":"/work/traces"}')
         CAP=$(remaining 360); (( CAP <= 360 )) || CAP=360
+    elif [[ ${PAIR_ORDER:-} == boundary ]]; then
+        mkdir "$D/vllm-work/traces"
+        timeout --kill-after=5s 60s docker run --rm --pull=never \
+            --device /dev/dri:/dev/dri -e ZE_AFFINITY_MASK=0 \
+            --mount "type=bind,src=$B/prove-xpu-events.py,dst=/probe.py,readonly" \
+            --entrypoint /opt/venv/bin/python "$IMAGE" /probe.py > "$D/probe.log" 2>&1
+        idle
+        profiler_args=(
+            --mount "type=bind,src=$B/qfn_profile_worker.py,dst=/work/qfn_profile_worker.py,readonly"
+            --mount "type=bind,src=$B/qfn_boundary_worker.py,dst=/work/qfn_boundary_worker.py,readonly")
+        profile_cli=(--worker-cls qfn_boundary_worker.QFNBoundaryWorker)
+        CAP=$(remaining 360); (( CAP <= 360 )) || CAP=360
     fi
     CID=$(docker run --pull=never --detach --name "$NAME" --network host --ipc host \
         --device /dev/dri:/dev/dri --mount type=bind,src=/dev/dri/by-path,dst=/dev/dri/by-path,readonly --group-add render --group-add video \
         --ulimit memlock=-1:-1 --ulimit stack=67108864:67108864 \
-        --env-file "$B/vllm-c1.env" "${profiler_args[@]}" -e PYTHONPATH=/work --mount type=bind,src=/home/haxor/models,dst=/models,readonly \
+        --env-file "$B/vllm-c1.env" "${profiler_args[@]}" "${recipe_env[@]}" -e PYTHONPATH=/work --mount type=bind,src=/home/haxor/models,dst=/models,readonly \
         --mount "type=bind,src=$D/vllm-work,dst=/work" --entrypoint /usr/bin/timeout "$IMAGE" \
         --signal=TERM --kill-after=8s "$CAP" vllm serve /models/qwen38-w4a16-snapshot \
         --host 127.0.0.1 --port "$BENCH_PORT" --served-model-name qwen38-flash-next-c1 \
         --trust-remote-code --dtype bfloat16 --kv-cache-dtype auto --tensor-parallel-size 4 --enable-expert-parallel \
-        --gpu-memory-utilization 0.95 --max-model-len 32768 --max-num-batched-tokens "$batch_tokens" --max-num-seqs 16 \
+        --gpu-memory-utilization 0.95 --max-model-len "$context" --max-num-batched-tokens "$batch_tokens" --max-num-seqs 16 \
         --limit-mm-per-prompt '{"image":4,"video":2}' --async-scheduling --generation-config vllm \
-        --compilation-config '{"cudagraph_mode":"FULL_AND_PIECEWISE","cudagraph_capture_sizes":[1,2,4,8,16,256,512,1024]}' \
+        --compilation-config "$compilation" \
         --no-enable-prefix-caching --enable-prompt-tokens-details "${profile_cli[@]}" "${reference_args[@]}")
     trap 'docker logs "$CID" > "$D/vllm.log" 2>&1 || :; docker rm -f "$CID" >/dev/null' EXIT
     trap 'exit 143' TERM INT
@@ -206,6 +229,10 @@ vllm() (
         python3 "$B/trace-worker.py" "$D/vllm-work/traces" > "$D/worker-traces.json"
         exit 0
     fi
+    if [[ ${PAIR_ORDER:-} == boundary ]]; then
+        python3 "$B/summarize-boundaries.py" "$D/vllm-work/traces" > "$D/reference-boundaries.json"
+        exit 0
+    fi
     if [[ $fixture == frozen ]]; then
         if ! python3 "$B/c1.py" vllm "$D/response.json" "$D/before.prom" "$D/after.prom" \
             > "$D/vllm-phase.json" 2> "$D/vllm-score.log"; then
@@ -216,7 +243,7 @@ vllm() (
 case "${PAIR_ORDER:-native-first}" in
     native-first) native; vllm ;;
     reference-first) vllm; native ;;
-    profile|reference-only) vllm ;;
+    profile|boundary|reference-only) vllm ;;
     native-only) native ;;
     *) echo "Invalid PAIR_ORDER" >&2; exit 2 ;;
 esac
@@ -226,7 +253,7 @@ sudo -n journalctl -k -q --no-pager --after-cursor "$CURSOR" -o cat > "$D/kernel
 awk '/xe.*(Fault response|Timedout job|GPU HANG|Engine memory CAT error|wedged)/' "$D/kernel.log" > "$D/xe-fault.log"
 [[ ! -s $D/xe-fault.log ]]
 sha256sum -c "$SERVING"
-if [[ ${PAIR_ORDER:-} == profile ]]; then exit 0; fi
+if [[ ${PAIR_ORDER:-} == profile || ${PAIR_ORDER:-} == boundary ]]; then exit 0; fi
 if [[ ${PAIR_ORDER:-} == native-only ]]; then
     if [[ ${NATIVE_MODE:-} == replay ]]; then [[ -s $D/row-replay.txt ]]; else [[ -s $D/native-phase.json ]]; fi
     exit
