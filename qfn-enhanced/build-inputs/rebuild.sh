@@ -18,6 +18,7 @@ case $variant in
     hc-fused) patches=(hc-fused-bf16.patch) ;;
     coalesced-v) patches=(qfn-split-kv-coalesced-v.patch) ;;
     batch-head) patches=(qfn-verify-batch-head.patch) ;;
+    integrated-small-moe) patches=(qfn-prefill-rsag.patch qfn-prefill-rsag-probe.patch qfn-prefill-rsag-receipt.patch qfn-integrated-split-receipt.patch qfn-small-moe-receipt.patch) ;;
     integrated) patches=(qfn-prefill-rsag.patch qfn-prefill-rsag-probe.patch qfn-prefill-rsag-receipt.patch qfn-integrated-split-receipt.patch) ;;
     causal-tiles) patches=(qfn-prefill-rsag.patch qfn-prefill-rsag-probe.patch qfn-prefill-rsag-receipt.patch qfn-prefill-causal-tiles.patch) ;;
     hc-up-mean) patches=(qfn-prefill-rsag.patch qfn-prefill-rsag-probe.patch qfn-prefill-rsag-receipt.patch qfn-hc-up-mean.patch) ;;

@@ -144,11 +144,19 @@ native() (
             export GRIMOIRE_QFN_PREFILL_RSAG=1 GRIMOIRE_QFN_MOE_TRACE=1 GRIMOIRE_QFN_HC_FUSED_UP=0
             if [[ $NATIVE_MODE == hc-up-on ]]; then export GRIMOIRE_QFN_HC_FUSED_UP=1; fi
             ;;
-        integrated-mtp3|integrated-profile)
+        integrated-mtp3|integrated-profile|integrated-small-off|integrated-small-on)
             [[ $fixture == frozen && ${PAIR_ORDER:-} == native-only ]]
-            build="$Q/../receipts/integrated-build"
-            [[ $(< "$build/build-integrated.exit") == 0 ]]
-            (cd "$build"; sha256sum -c integrated.sha256)
+            if [[ $NATIVE_MODE == integrated-small-* ]]; then
+                build="$Q/../receipts/small-moe-integrated-build"
+                [[ $(< "$build/build-small-ab.exit") == 0 ]]
+                (cd "$build"; sha256sum -c small-moe-ab.sha256)
+                export GRIMOIRE_QFN_VERIFY_SMALL_MOE_RECEIPT=1 GRIMOIRE_QFN_SMALL_MOE=0
+                if [[ $NATIVE_MODE == integrated-small-on ]]; then export GRIMOIRE_QFN_SMALL_MOE=1; fi
+            else
+                build="$Q/../receipts/integrated-build"
+                [[ $(< "$build/build-integrated.exit") == 0 ]]
+                (cd "$build"; sha256sum -c integrated.sha256)
+            fi
             NATIVE_BIN=$build/qfn-combined
             export GRIMOIRE_QFN_PREFILL_RSAG=1 GRIMOIRE_QFN_VERIFY_SPLIT_KV=1 GRIMOIRE_QFN_VERIFY_REQUIRE_SPLIT=1
             export GRIMOIRE_QFN_TP4_VERIFY_DIAGNOSTIC=mtp3 GRIMOIRE_SPEC_STATS=1
@@ -223,6 +231,11 @@ native() (
             for rank in 0 1 2 3; do
                 [[ $(grep -Ec "^QFN split verifier rank=$rank pos=[0-9]+ rows=4 layers=12$" "$D/native/r$rank.log") == 11 ]]
                 grep -Fq '(21 of 33 drafted, 63.6%) over 11 steps' "$D/native/r$rank.out"
+                if [[ $NATIVE_MODE == integrated-small-* ]]; then
+                    local expert_layers=0
+                    if [[ $NATIVE_MODE == integrated-small-on ]]; then expert_layers=48; fi
+                    [[ $(grep -Fxc "QFN small-M verifier rank=$rank rows=4 layers=$expert_layers" "$D/native/r$rank.log") == 11 ]]
+                fi
             done
         fi
         if [[ ${NATIVE_MODE:-} == integrated-profile ]]; then
