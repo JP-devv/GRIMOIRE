@@ -32,6 +32,15 @@ int main(){
     assert(r.messages[0].content=="“Hi” 😀"&&r.messages[1].content=="reply"&&r.stream&&r.max_tokens==32);
     r=parse_completion_request(R"({"prompt":"literal \"stream\":true, \"max_tokens\":99","stream":false,"max_tokens":4})",false);
     assert(!r.stream&&r.max_tokens==4);
+    const auto raw_ids=parse_completion_request(
+        R"({"prompt":[0,12,248319],"return_token_ids":true,"ignore_eos":true})",false);
+    assert(raw_ids.prompt_ids && *raw_ids.prompt_ids==std::vector<int32_t>({0,12,248319}));
+    assert(raw_ids.return_token_ids && raw_ids.ignore_eos && !r.prompt_ids);
+    for(const auto* body: {R"({"prompt":[]})", R"({"prompt":[-1]})",
+                          R"({"prompt":[1.5]})", R"({"prompt":[true]})",
+                          R"({"prompt":[2147483648]})",
+                          R"({"prompt":[1],"stream":true,"return_token_ids":true})"})
+        bad([&]{parse_completion_request(body,false);});
     for(auto s:{"{\"x\":01}","{\"x\":1e}","{\"x\":1e400}","{\"x\":truex}","{} []","{\"x\":1,\"x\":2}","[1,]","\"\\ud800\"","\"\\udc00\"","\"\\q\""})
         bad([&]{Json::parse(s);});
     bad([]{parse_completion_request(R"({"messages":[{"role":"user","content":[{"type":"image_url","image_url":"x"}]}]})",true);});

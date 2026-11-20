@@ -21,12 +21,16 @@
 #include "b70/sampling.hpp"
 #include <algorithm>
 #include <cctype>
+#include <optional>
 #include "b70/tokenizer.hpp"
 
 namespace b70 {
 struct CompletionRequest {
     std::vector<ChatMessage> messages;
     std::string prompt;
+    std::optional<std::vector<int32_t>> prompt_ids;
+    bool return_token_ids=false;
+    bool ignore_eos=false;
     int max_tokens=4096;
     bool stream=false;
     std::vector<Json> tools;   // OpenAI function tools, kept for argument typing
@@ -106,7 +110,25 @@ inline CompletionRequest parse_completion_request(const std::string& body, bool 
             if(v && v->kind!=Json::Kind::Null)
                 throw std::invalid_argument(std::string("unsupported request field: ")+field);
         }
-        r.prompt=j.at("prompt").text();return r;
+        const auto& prompt=j.at("prompt");
+        if(prompt.kind==Json::Kind::Array) {
+            if(prompt.array.empty())throw std::invalid_argument("prompt ID array must be nonempty");
+            r.prompt_ids.emplace();
+            r.prompt_ids->reserve(prompt.array.size());
+            for(const auto& id:prompt.array) {
+                if(id.kind!=Json::Kind::Number||!std::isfinite(id.number)||
+                   id.number<0||id.number>INT32_MAX||id.number!=std::floor(id.number))
+                    throw std::invalid_argument("prompt IDs must be nonnegative integers");
+                r.prompt_ids->push_back(static_cast<int32_t>(id.number));
+            }
+        } else {
+            r.prompt=prompt.text();
+        }
+        r.return_token_ids=j.bool_or("return_token_ids",false);
+        r.ignore_eos=j.bool_or("ignore_eos",false);
+        if(r.stream&&r.return_token_ids)
+            throw std::invalid_argument("return_token_ids requires a non-streaming completion");
+        return r;
     }
     // Tools: OpenAI function definitions, printed into the prompt by the
     // model's own template.  tool_choice "auto" (default) or "none"; forcing

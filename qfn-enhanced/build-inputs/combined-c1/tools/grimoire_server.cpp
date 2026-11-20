@@ -333,14 +333,16 @@ int main(int argc, char** argv) {
         const std::string prompt=chat?tk.apply_chat_template(request.messages,request.chat):request.prompt;
         const bool think=chat&&!harmony_model&&request.chat.enable_thinking;
         const std::vector<b70::Json> tools=request.tools;
-        const auto ids=tk.encode(prompt,true);
+        const auto ids=request.prompt_ids ? *request.prompt_ids : tk.encode(prompt,true);
+        const auto eos=request.ignore_eos ? -1 : tk.eos();
+        const auto eos2=request.ignore_eos ? -1 : tk.eos2();
         const int budget=b70::generation_budget(ids,request.max_tokens,max_seq,int(tk.vocab_size()));
         const auto sampling=request.sampling;
         const std::string model=json_escape(model_dir);
         const auto request_id=std::to_string(std::chrono::steady_clock::now().time_since_epoch().count());
         if(request.stream) {
             res.set_chunked_content_provider("text/event-stream",
-                [&,ids,budget,chat,model,request_id,think,tools,sampling](size_t,httplib::DataSink& sink) {
+                [&,ids,budget,chat,model,request_id,think,tools,sampling,eos,eos2](size_t,httplib::DataSink& sink) {
                     auto send=[&](const std::string& payload) {
                         const auto line="data: "+payload+"\n\n";return sink.write(line.data(),line.size());
                     };
@@ -359,7 +361,7 @@ int main(int argc, char** argv) {
                         b70::FinishReason finish;
                         std::vector<int32_t> out;
                         const int n=b70::grimoire_scheduler_generate(*sched,ids,budget,
-                            tk.eos(),tk.eos2(),out,
+                            eos,eos2,out,
                             [&](int32_t t){return decoder.push(t,emit)&&!g_stop.load();},&finish,sampling);
                         if(connected)connected=decoder.finish(emit);
                         std::string reason=b70::finish_reason_name(finish);
@@ -388,8 +390,8 @@ int main(int argc, char** argv) {
             b70::FinishReason finish;
             std::vector<int32_t> out;
             // a stop ends this request at its next token (the scheduler then cancels the job)
-            const int n=b70::grimoire_scheduler_generate(*sched,ids,budget,tk.eos(),
-                tk.eos2(),out,[](int32_t){return !g_stop.load();},&finish,sampling);
+            const int n=b70::grimoire_scheduler_generate(*sched,ids,budget,eos,
+                eos2,out,[](int32_t){return !g_stop.load();},&finish,sampling);
             std::string content,reasoning;
             b70::ResponseDecoder decoder(tk,chat&&harmony_model,think);
             if(chat&&!tools.empty())decoder.enable_tools();
@@ -410,8 +412,18 @@ int main(int argc, char** argv) {
                 (reasoning.empty()?"":",\"reasoning_content\":\""+json_escape(reasoning)+"\"")+
                 (calls_json.empty()?"":",\"tool_calls\":"+calls_json)+"}":
                 "\"text\":\""+json_escape(content)+"\"";
+            auto encode_ids=[](const std::vector<int32_t>& tokens) {
+                std::string result="[";
+                for(size_t i=0;i<tokens.size();++i) {
+                    if(i)result+=",";
+                    result+=std::to_string(tokens[i]);
+                }
+                return result+"]";
+            };
+            const std::string token_fields=request.return_token_ids ?
+                ",\"prompt_token_ids\":"+encode_ids(ids)+",\"token_ids\":"+encode_ids(out) : "";
             res.set_content("{\"id\":\"cmpl-"+request_id+"\",\"object\":\""+(chat?"chat.completion":"text_completion")+
-                "\",\"model\":\""+model+"\",\"choices\":[{\"index\":0,"+answer+",\"finish_reason\":\""+
+                "\",\"model\":\""+model+"\",\"choices\":[{\"index\":0,"+answer+token_fields+",\"finish_reason\":\""+
                 reason+"\"}],\"usage\":{\"prompt_tokens\":"+std::to_string(ids.size())+
                 ",\"completion_tokens\":"+std::to_string(n)+",\"total_tokens\":"+std::to_string(ids.size()+n)+"}}","application/json");
         }
