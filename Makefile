@@ -33,9 +33,13 @@ QFN_TESTS = bin/test_qfn_indexed_load bin/test_qfn_moe_routes bin/test_qfn_shard
 .PHONY: qfn-tools
 qfn-tools: $(QFN_TOOLS)
 
-$(QFN_TOOLS): bin/%: tools/%.cpp
+$(filter-out bin/qfn_compare_dn_prefix,$(QFN_TOOLS)): bin/%: tools/%.cpp
 	@mkdir -p bin
 	$(CXX) $(CXXFLAGS) $< -o $@
+
+bin/qfn_compare_dn_prefix: tools/qfn_compare_dn_prefix.cpp src/safetensors.cpp include/b70/safetensors.hpp include/b70/formats.hpp
+	@mkdir -p bin
+	$(CXX) $(CXXFLAGS) $(filter %.cpp,$^) -o $@
 
 bin/qfn_freeze_inputs: include/b70/qfn_inputs.hpp include/b70/json.hpp
 

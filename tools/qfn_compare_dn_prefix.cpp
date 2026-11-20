@@ -1,4 +1,7 @@
 // Localize Flash-Next token-361 DeltaNet/MoE replay in layer 0 or 1.
+#include "b70/formats.hpp"
+#include "b70/safetensors.hpp"
+
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
@@ -40,7 +43,8 @@ struct Delta {
 
 // Compare all rows. A TP rank holds a contiguous segment of each PP row,
 // not a contiguous segment of the batched record.
-Delta delta(const std::vector<float>& pp, const std::vector<float>& tp, size_t m, size_t width,
+template <class A, class B>
+Delta delta(const std::vector<A>& pp, const std::vector<B>& tp, size_t m, size_t width,
             size_t offset, size_t local) {
     if (!local || pp.size() != m * width || tp.size() != m * local || offset + local > width)
         throw std::runtime_error("DeltaNet capture shape mismatch");
@@ -130,14 +134,70 @@ void compare(const fs::path& root, int layer) {
     }
 }
 
+std::vector<double> project_fp64(const std::vector<float>& weights, const std::vector<float>& input,
+                                 size_t width, size_t offset) {
+    if (!width || weights.empty() || weights.size() % width || input.empty() ||
+        offset > width || input.size() > width - offset)
+        throw std::runtime_error("projection reference shape mismatch");
+    std::vector<double> out(weights.size() / width);
+    for (size_t n = 0; n < out.size(); ++n) {
+        const float* w = weights.data() + n * width + offset;
+        for (size_t k = 0; k < input.size(); ++k) out[n] += double(w[k]) * double(input[k]);
+        if (!std::isfinite(out[n])) throw std::runtime_error("nonfinite projection reference");
+    }
+    return out;
+}
+
+void compare_projection(const fs::path& root, int layer, const std::string& shard_path) {
+    // The engine's dense BF16 upload copies these tensor bytes directly. TP
+    // retains a contiguous column slice of each row, in value-head order.
+    b70::SafeTensors shard;
+    std::string error;
+    if (!shard.open(shard_path, error)) throw std::runtime_error(error);
+    const auto* tensor = shard.find("model.language_model.layers." + std::to_string(layer) +
+                                    ".linear_attn.out_proj.weight");
+    if (!tensor || tensor->dtype != b70::STDtype::BF16 ||
+        tensor->shape != std::vector<int64_t>{hidden, value})
+        throw std::runtime_error("expected the unscaled BF16 DeltaNet output projection tensor");
+    std::vector<float> weights(hidden * value);
+    if (!shard.read_f32(*tensor, weights.data(), error)) throw std::runtime_error(error);
+    const auto pp = root / "pp4", tp = root / "tp4";
+    const auto pp_actual = read(pp, layer, 0, "dn-projection-local", hidden);
+    const auto tp_reduced = read(tp, layer, 0, "dn-projection-reduced", hidden);
+    for (const bool round_input : {false, true}) {
+        const auto input = [&](const fs::path& arm, int rank, size_t width) {
+            auto x = read(arm, layer, rank, "dn-projection-input", width);
+            if (round_input)
+                for (auto& v : x) v = b70::bf16_to_f32(b70::f32_to_bf16(v));
+            return x;
+        };
+        std::cout << "projection_reference operands=" << (round_input ? "bf16-rounded" : "captured-fp32") << '\n';
+        const auto full = project_fp64(weights, input(pp, 0, value), value, 0);
+        print("pp4-local-vs-fp64", 0, delta(full, pp_actual, 1, hidden, 0, hidden), 1);
+        std::vector<double> sum(hidden);
+        for (int rank = 0; rank < 4; ++rank) {
+            const auto partial = project_fp64(weights, input(tp, rank, value / 4), value, rank * (value / 4));
+            const auto actual = read(tp, layer, rank, "dn-projection-local", hidden);
+            print("tp4-local-vs-fp64", rank, delta(partial, actual, 1, hidden, 0, hidden), 1);
+            for (size_t i = 0; i < hidden; ++i) sum[i] += partial[i];
+        }
+        print("tp4-reduced-vs-fp64", 0, delta(sum, tp_reduced, 1, hidden, 0, hidden), 1);
+        print("tp4-fp64-sum-vs-pp4-fp64", 0, delta(full, sum, 1, hidden, 0, hidden), 1);
+    }
+}
+
 void self_test() {
     if (capture_path("tp4", 0, 3, "dn-projection-input") != "tp4/l0-p361-r3-dn-projection-input.bin" ||
         capture_path("pp4", 1, 0, "logits") != "pp4/l1-p361-r0-logits.bin")
         throw std::runtime_error("capture filenames must carry the selected layer");
+    const std::vector<float> weights{16777216, 1, -16777216, 2, 3, 4};
+    if (project_fp64(weights, {1, 1, 1}, 3, 0) != std::vector<double>{1, 9} ||
+        project_fp64(weights, {2, 3}, 3, 1) != std::vector<double>{-50331646, 18})
+        throw std::runtime_error("projection reference lost FP64 accumulation or sliced the wrong columns");
     const std::vector<float> pp{1, 2, 3, 4, 5, 6, 7, 8};
-    if (delta(pp, {3, 4, 7, 8}, 2, 4, 2, 2).different != 0)
+    if (delta(pp, std::vector<float>{3, 4, 7, 8}, 2, 4, 2, 2).different != 0)
         throw std::runtime_error("rank slice was not compared within each row");
-    const auto d = delta(pp, {3, 4, 7, 9}, 2, 4, 2, 2);
+    const auto d = delta(pp, std::vector<float>{3, 4, 7, 9}, 2, 4, 2, 2);
     if (d.different != 1 || d.first != 1 || d.rms != 0.5)
         throw std::runtime_error("prefix divergence was not localized");
     std::cout << "QFN DeltaNet prefix comparator PASS\n";
@@ -147,9 +207,11 @@ void self_test() {
 int main(int argc, char** argv) {
     try {
         if (argc == 2 && std::string(argv[1]) == "--self-test") self_test();
-        else if (argc == 3 && std::string(argv[2]) == "0") compare(argv[1], 0);
-        else if (argc == 2 || (argc == 3 && std::string(argv[2]) == "1")) compare(argv[1], 1);
-        else throw std::runtime_error("usage: qfn_compare_dn_prefix DIR [0|1] | --self-test");
+        else if (argc >= 2 && argc <= 4 && (argc == 2 || std::string(argv[2]) == "0" || std::string(argv[2]) == "1")) {
+            const int layer = argc == 2 ? 1 : argv[2][0] - '0';
+            compare(argv[1], layer);
+            if (argc == 4) compare_projection(argv[1], layer, argv[3]);
+        } else throw std::runtime_error("usage: qfn_compare_dn_prefix DIR [0|1 [PROJECTION_SHARD]] | --self-test");
         return 0;
     } catch (const std::exception& e) {
         std::cerr << e.what() << '\n';

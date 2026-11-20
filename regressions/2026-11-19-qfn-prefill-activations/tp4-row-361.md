@@ -26,6 +26,29 @@ the residual delta is `1.12679e-09` RMS. The next recorded delta, the layer-1
 mixer, is `2.32017e-05` RMS, and the expert flip makes the MoE delta
 `7.43771e-04` RMS. The amplification point inside the mixer is not yet proven.
 
+## Layer-zero replay and FP64 projection reference
+
+The layer-zero replay used the identical embedding entry and the same binary
+hash. The recurrence inputs and row-361 projection operands matched exactly.
+The first difference was again the reduced DeltaNet projection
+(`1.02096449e-08` RMS); the rank-order FP32 reconstruction matched all four
+TP4 outputs exactly. Both layouts agreed on the router cutoff (375 over 3).
+
+The checker loaded the BF16 checkpoint tensor whose bytes the production
+loader uploads directly. It evaluated the full PP4 matrix and each contiguous
+TP4 column slice, using the captured FP32 activation and FP64 accumulation.
+
+| Layer | PP4 actual vs FP64 RMS | TP4 local actual vs FP64 RMS (ranks 0–3) | Full vs sum of FP64 shards RMS |
+|---|---:|---|---:|
+| 0 | 1.00e-8 | 3.27e-9, 3.35e-9, 4.31e-9, 5.43e-9 | 1.18e-17 |
+| 1 | 1.59e-8 | 4.83e-9, 5.26e-9, 5.94e-9, 1.05e-8 | 1.70e-17 |
+
+An alternate reference rounding inputs to BF16 was four orders of magnitude
+farther from the observed projection. These GEMV-mode measurements support
+ordinary FP32 accumulation-order differences, not incorrect output-projection
+shards or a broken collective. They do not yet explain where the native
+layer-1 mixer amplifies the small layer-zero residual delta.
+
 ## Transport qualification
 
 The peer-push design study in `qfn-enhanced/tp4ep4p2p.md` uses dedicated
