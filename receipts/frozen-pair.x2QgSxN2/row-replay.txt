@@ -1,0 +1,16 @@
+QFN row replay rank=0 sample=0 rows=1 verify_ms=82.273893 target_ids_match=1
+QFN row replay rank=0 sample=1 rows=4 verify_ms=98.641891 target_ids_match=1
+QFN row replay rank=0 sample=2 rows=4 verify_ms=89.203512 target_ids_match=1
+QFN row replay rank=0 sample=3 rows=1 verify_ms=71.921471 target_ids_match=1
+QFN row replay rank=1 sample=0 rows=1 verify_ms=82.320207 target_ids_match=1
+QFN row replay rank=1 sample=1 rows=4 verify_ms=98.672462 target_ids_match=1
+QFN row replay rank=1 sample=2 rows=4 verify_ms=89.239902 target_ids_match=1
+QFN row replay rank=1 sample=3 rows=1 verify_ms=71.938025 target_ids_match=1
+QFN row replay rank=2 sample=0 rows=1 verify_ms=82.071839 target_ids_match=1
+QFN row replay rank=2 sample=1 rows=4 verify_ms=98.447483 target_ids_match=1
+QFN row replay rank=2 sample=2 rows=4 verify_ms=88.998849 target_ids_match=1
+QFN row replay rank=2 sample=3 rows=1 verify_ms=71.699531 target_ids_match=1
+QFN row replay rank=3 sample=0 rows=1 verify_ms=82.135551 target_ids_match=1
+QFN row replay rank=3 sample=1 rows=4 verify_ms=98.497897 target_ids_match=1
+QFN row replay rank=3 sample=2 rows=4 verify_ms=89.065181 target_ids_match=1
+QFN row replay rank=3 sample=3 rows=1 verify_ms=71.743541 target_ids_match=1

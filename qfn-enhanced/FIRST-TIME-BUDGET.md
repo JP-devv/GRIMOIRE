@@ -14,3 +14,29 @@ The diagnostic attention A/B changed prefill latency by +7.21% and −8.14% in r
 | Collectives | 365.214 | Unmeasured | Nested in the rows above. Copy was 257.2 ms with 20,971,520 logical payload bytes per reduction. Compare arrival, explicit copy and reduction intervals and count actual transmitted bytes per link. |
 
 These are fenced phase counters from the archived profile. The rank-0 chunk span is 1,522.166 ms. The counters are inclusive and cannot be summed into that span or credited as throughput savings. A fresh profile must capture the same stage boundaries on all ranks and keep queue drain and rank arrival skew separate from payload transport.
+
+## New four-rank evidence
+
+The split-KV diagnostic reduced the two unprofiled decode phases from 1,064.267 and 1,074.475 ms to 606.359 and 613.485 ms. Identical frozen IDs and 21/33 acceptance held in all arms. The saving was 41.628 and 41.908 ms per completed round. It leaves 384.930–392.056 ms to remove over 11 rounds at the same emission count. Split-KV already uses one KV workgroup per split for all 24 queries. Coalescing the existing token-major V staging and reusing FP32-input batched GEMV for the sharded head are bounded follow-on experiments. The archived head bucket is about 2.57 ms, which bounds the opportunity there.
+
+Target-only direct verifier replay used the same proposed rows at a fixed context and reversed the order within one process start. The maximum per-rank durations for M1/M4/M4/M1 were 82.320207/98.672462/89.239902/71.938025 ms. Each predicted token matched a sequential replay. The measured increments were 16.352255 and 17.301877 ms. This uses the ordinary dense block verifier and excludes draft cache warming and commit. It does not qualify speculative serving state.
+
+The full-chunk HC activation fusion fired 94 times per rank and avoided a separate conversion pass reading 7,885,291,520 logical activation bytes per rank. It increased the frozen prefill by 8.155 ms and 52.628 ms against the same-build controls in reversed order. All four arms matched the frozen IDs. Reject this fusion. The separate resident pack prototype targets repeated weight packing while preserving BF16 values and FP32 reduction order. It charges 600 MiB per rank and must demonstrate the same context capacity before any serving promotion.
+
+FP32 Level Zero reduce-scatter/all-gather is a separate transport prototype for the 2,048 × 2,560 full-chunk payload. It aims to move 31,457,280 outgoing peer bytes per rank per reduction instead of 62,914,560, with five shard groups instead of twenty copy chunks at a 1 MiB peer capacity. It adds a local gather copy. The archived full-chunk copy bucket was 257.2 ms. Expected whole-chunk savings are roughly 90–145 ms if the byte reduction survives readiness and local copies. Test canonical cancellation and exact payload bytes against the host sum before model A/B. The two-stage transfer keeps canonical FP32 addition order and does not change KV or wire dtype.
+
+## Recovered reference worker trace
+
+All four XPU model workers recorded a first scheduler step of exactly 2,048 rows with the installed TP4/EP4 image in eager mode. The standalone trace proof captured a known device operation. The worker export timed out after 30 s and left incomplete gzip files. The complete CPU stage events were recovered without a second trace launch. These host boundary spans include submission, profiling overhead and waits. Device kernel times, collective transport and payload bytes remain unmeasured in this export.
+
+| Stage | Reference worker host union, min–max across rank (ms) | What to compare next |
+|---|---:|---|
+| HC | 97.537–99.405 | Same activation dtype, including the VNNI pack or tiled launcher costs |
+| Dense attention | 29.579–30.355 | FlashAttention 2 and native dense block ownership, cache write and packing |
+| DeltaNet | 78.839–86.978 | Official reference GDN path, projections, layout and recurrence |
+| MoE | 117.862–124.453 | Full rank-local route, projections and communication |
+| PLE layer | 1.930–2.861 | Keep per-layer work separate from pre-forward preparation |
+| PLE pre-forward | 7.221–90.499 | Rank skew, host index preparation, stream wait and row gather |
+| Collective transport | Unmeasured | Record actual logical call shapes and separate queue spans from bytes on the wire |
+
+Whole worker host span was 548.168–553.419 ms. These numbers come from a separate instrumented run and do not enter the parity score. The event-based worker fallback captures smaller current-stream intervals without a large Kineto export.

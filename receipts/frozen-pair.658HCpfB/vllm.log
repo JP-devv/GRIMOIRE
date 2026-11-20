@@ -1,0 +1,560 @@
+[l0-peer-shim pid=1] active scope=large-nonccl-tracked-device-allocation-peer-residency path=loader-tracer pool_ceiling=4194304 report_interval=15s
+[l0-peer-shim pid=7] active scope=large-nonccl-tracked-device-allocation-peer-residency path=loader-tracer pool_ceiling=4194304 report_interval=15s
+[l0-peer-shim pid=56] active scope=large-nonccl-tracked-device-allocation-peer-residency path=loader-tracer pool_ceiling=4194304 report_interval=15s
+(APIServer pid=7) INFO 11-20 21:01:12 [api_utils.py:347] 
+(APIServer pid=7) INFO 11-20 21:01:12 [api_utils.py:347]        █     █     █▄   ▄█
+(APIServer pid=7) INFO 11-20 21:01:12 [api_utils.py:347]  ▄▄ ▄█ █     █     █ ▀▄▀ █  version 0.30.0
+(APIServer pid=7) INFO 11-20 21:01:12 [api_utils.py:347]   █▄█▀ █     █     █     █  model   /models/qwen38-w4a16-snapshot
+(APIServer pid=7) INFO 11-20 21:01:12 [api_utils.py:347]    ▀▀  ▀▀▀▀▀ ▀▀▀▀▀ ▀     ▀
+(APIServer pid=7) INFO 11-20 21:01:12 [api_utils.py:347] 
+(APIServer pid=7) INFO 11-20 21:01:12 [api_utils.py:286] non-default args: {'model_tag': '/models/qwen38-w4a16-snapshot', 'enable_prompt_tokens_details': True, 'host': '127.0.0.1', 'port': 41579, 'model': '/models/qwen38-w4a16-snapshot', 'trust_remote_code': True, 'dtype': 'bfloat16', 'max_model_len': 32768, 'enforce_eager': True, 'served_model_name': ['qwen38-flash-next-c1'], 'generation_config': 'vllm', 'tensor_parallel_size': 4, 'enable_expert_parallel': True, 'worker_cls': 'qfn_profile_worker.QFNProfileWorker', 'gpu_memory_utilization': 0.95, 'enable_prefix_caching': False, 'limit_mm_per_prompt': {'image': 4, 'video': 2}, 'max_num_batched_tokens': 2048, 'max_num_seqs': 16, 'async_scheduling': True, 'compilation_config': {'mode': None, 'debug_dump_path': None, 'cache_dir': '', 'compile_cache_save_format': 'binary', 'backend': 'inductor', 'custom_ops': [], 'ir_enable_torch_wrap': None, 'splitting_ops': None, 'compile_mm_encoder': False, 'cudagraph_mm_encoder': False, 'encoder_cudagraph_token_budgets': [], 'encoder_cudagraph_max_vision_items_per_batch': 0, 'encoder_cudagraph_max_frames_per_batch': None, 'compile_sizes': None, 'compile_ranges_endpoints': None, 'inductor_compile_config': {'enable_auto_functionalized_v2': False, 'combo_kernels': True, 'benchmark_combo_kernel': True}, 'inductor_passes': {}, 'cudagraph_mode': <CUDAGraphMode.FULL_AND_PIECEWISE: (2, 1)>, 'cudagraph_num_of_warmups': 0, 'cudagraph_capture_sizes': [1, 2, 4, 8, 16, 256, 512, 1024], 'cudagraph_copy_inputs': False, 'cudagraph_specialize_lora': True, 'use_inductor_graph_partition': None, 'pass_config': {}, 'max_cudagraph_capture_size': None, 'dynamic_shapes_config': {'type': <DynamicShapesType.BACKED: 'backed'>, 'evaluate_guards': False, 'assume_32_bit_indexing': False}, 'local_cache_dir': None, 'fast_moe_cold_start': None, 'static_all_moe_layers': []}, 'profiler_config': ProfilerConfig(profiler='torch', torch_profiler_dir='/work/traces', proton_profiler_dir='', proton_context='shadow', proton_data='tree', proton_backend=None, proton_mode=None, proton_hook=None, proton_output_format=None, proton_graph_attribution=False, torch_profiler_with_stack=True, torch_profiler_with_flops=False, torch_profiler_use_gzip=True, torch_profiler_dump_cuda_time_total=True, torch_profiler_record_shapes=False, torch_profiler_with_memory=False, capture_torch_profiler=False, detailed_trace_annotation=False, ignore_frontend=False, delay_iterations=0, max_iterations=0, warmup_iterations=0, active_iterations=5, wait_iterations=0)}
+(APIServer pid=7) [transformers] Unrecognized keys in `rope_parameters` for 'rope_type'='default': {'mrope_section', 'mrope_interleaved'}
+(APIServer pid=7) [transformers] Unrecognized keys in `rope_parameters` for 'rope_type'='default': {'mrope_section', 'mrope_interleaved'}
+(APIServer pid=7) [transformers] Unrecognized keys in `rope_parameters` for 'rope_type'='default': {'mrope_section', 'mrope_interleaved'}
+(APIServer pid=7) [transformers] Unrecognized keys in `rope_parameters` for 'rope_type'='default': {'mrope_section', 'mrope_interleaved'}
+(APIServer pid=7) [transformers] Unrecognized keys in `rope_parameters` for 'rope_type'='default': {'mrope_section', 'mrope_interleaved'}
+(APIServer pid=7) INFO 11-20 21:01:24 [model.py:692] Resolved architecture: Qwen4ExpForConditionalGeneration
+(APIServer pid=7) INFO 11-20 21:01:24 [model.py:2030] Using max model len 32768
+[l0-peer-shim pid=178] active scope=large-nonccl-tracked-device-allocation-peer-residency path=loader-tracer pool_ceiling=4194304 report_interval=15s
+(APIServer pid=7) [transformers] Unrecognized keys in `rope_parameters` for 'rope_type'='default': {'mrope_section', 'mrope_interleaved'}
+(APIServer pid=7) [transformers] Unrecognized keys in `rope_parameters` for 'rope_type'='default': {'mrope_section', 'mrope_interleaved'}
+(APIServer pid=7) [transformers] Unrecognized keys in `rope_parameters` for 'rope_type'='default': {'mrope_section', 'mrope_interleaved'}
+(APIServer pid=7) [transformers] Unrecognized keys in `rope_parameters` for 'rope_type'='default': {'mrope_section', 'mrope_interleaved'}
+(APIServer pid=7) [transformers] Unrecognized keys in `rope_parameters` for 'rope_type'='default': {'mrope_section', 'mrope_interleaved'}
+(APIServer pid=7) WARNING 11-20 21:01:26 [indexer_topk.py:29] Failed to import the DeepSelect extension (vllm._deepselect_C): No module named 'vllm._deepselect_C'
+(APIServer pid=7) WARNING 11-20 21:01:26 [vllm.py:1547] Enforce eager set, disabling torch.compile and CUDAGraphs. This is equivalent to setting -cc.mode=none -cc.cudagraph_mode=none
+(APIServer pid=7) INFO 11-20 21:01:26 [vllm.py:762] Auto-enabling VLLM_USE_BREAKABLE_CUDAGRAPH=1. Set VLLM_USE_BREAKABLE_CUDAGRAPH=0 to opt out.
+(APIServer pid=7) INFO 11-20 21:01:26 [kernel.py:416] Final IR op priority after setting platform defaults: IrOpPriorityConfig(rms_norm=['vllm_c', 'native'], fused_add_rms_norm=['vllm_c', 'native'], gelu_and_mul_sparse=['native'])
+(APIServer pid=7) INFO 11-20 21:01:26 [vllm.py:1780] Cudagraph is disabled under eager mode
+(APIServer pid=7) WARNING 11-20 21:01:26 [xpu.py:308] XPU Graph support is experimental and currently only supports single-GPU execution.
+(APIServer pid=7) INFO 11-20 21:01:26 [xpu.py:382] XPU platform: set server shutdown_timeout=5.
+(APIServer pid=7) INFO 11-20 21:01:26 [compilation.py:336] Enabled custom fusions: norm_quant, act_quant
+(APIServer pid=7) [transformers] Unrecognized keys in `rope_parameters` for 'rope_type'='default': {'mrope_section', 'mrope_interleaved'}
+(APIServer pid=7) [transformers] Unrecognized keys in `rope_parameters` for 'rope_type'='default': {'mrope_section', 'mrope_interleaved'}
+(APIServer pid=7) [transformers] The `use_fast` parameter is deprecated and will be removed in a future version. Use `backend="torchvision"` instead of `use_fast=True`, or `backend="pil"` instead of `use_fast=False`.
+(APIServer pid=7) [transformers] Unrecognized keys in `rope_parameters` for 'rope_type'='default': {'mrope_section', 'mrope_interleaved'}
+(APIServer pid=7) [transformers] Unrecognized keys in `rope_parameters` for 'rope_type'='default': {'mrope_section', 'mrope_interleaved'}
+[l0-peer-shim pid=187] active scope=large-nonccl-tracked-device-allocation-peer-residency path=loader-tracer pool_ceiling=4194304 report_interval=15s
+[l0-peer-shim pid=188] active scope=large-nonccl-tracked-device-allocation-peer-residency path=loader-tracer pool_ceiling=4194304 report_interval=15s
+[l0-peer-shim pid=237] active scope=large-nonccl-tracked-device-allocation-peer-residency path=loader-tracer pool_ceiling=4194304 report_interval=15s
+(EngineCore pid=188) INFO 11-20 21:01:37 [core.py:123] Initializing a V1 LLM engine (v0.30.0) with config: model='/models/qwen38-w4a16-snapshot', speculative_config=None, tokenizer='/models/qwen38-w4a16-snapshot', skip_tokenizer_init=False, tokenizer_mode=auto, revision=None, tokenizer_revision=None, trust_remote_code=True, dtype=torch.bfloat16, max_seq_len=32768, download_dir=None, load_format=auto, tensor_parallel_size=4, pipeline_parallel_size=1, data_parallel_size=1, decode_context_parallel_size=1, dcp_comm_backend=ag_rs, disable_custom_all_reduce=True, quantization=inc, quantization_config=None, enforce_eager=True, enable_return_routed_experts=False, kv_cache_dtype=auto, device_config=xpu, structured_outputs_config=StructuredOutputsConfig(backend='auto', disable_any_whitespace=False, disable_additional_properties=False, reasoning_parser='', reasoning_parser_plugin='', enable_in_reasoning=False), observability_config=ObservabilityConfig(show_hidden_metrics_for_version=None, otlp_traces_endpoint=None, collect_detailed_traces=None, per_request_spec_decode_metrics='none', kv_cache_metrics=False, kv_cache_metrics_sample=0.01, cudagraph_metrics=False, enable_layerwise_nvtx_tracing=False, enable_mfu_metrics=False, enable_mm_processor_stats=False, enable_logging_iteration_details=False, jit_monitor_mode='warn', jit_monitor_verbose=False), seed=0, served_model_name=qwen38-flash-next-c1, enable_prefix_caching=False, enable_chunked_prefill=True, pooler_config=None, compilation_config={'mode': <CompilationMode.NONE: 0>, 'debug_dump_path': None, 'cache_dir': '', 'compile_cache_save_format': 'binary', 'backend': 'inductor', 'custom_ops': ['all'], 'ir_enable_torch_wrap': False, 'splitting_ops': [], 'compile_mm_encoder': False, 'cudagraph_mm_encoder': False, 'encoder_cudagraph_token_budgets': [], 'encoder_cudagraph_max_vision_items_per_batch': 0, 'encoder_cudagraph_max_frames_per_batch': None, 'compile_sizes': [], 'compile_ranges_endpoints': [2048], 'inductor_compile_config': {'enable_auto_functionalized_v2': False, 'combo_kernels': True, 'benchmark_combo_kernel': True}, 'inductor_passes': {}, 'cudagraph_mode': <CUDAGraphMode.NONE: 0>, 'cudagraph_num_of_warmups': 0, 'cudagraph_capture_sizes': [], 'cudagraph_copy_inputs': False, 'cudagraph_specialize_lora': True, 'use_inductor_graph_partition': False, 'pass_config': {'fuse_norm_quant': True, 'fuse_act_quant': True, 'fuse_attn_quant': False, 'enable_sp': False, 'fuse_gemm_comms': False, 'fuse_allreduce_rms': False, 'enable_qk_norm_rope_fusion': False, 'fuse_rope_kvcache_cat_mla': False, 'fuse_act_padding': False, 'fuse_qk_norm_rope_kvcache': False}, 'max_cudagraph_capture_size': 0, 'dynamic_shapes_config': {'type': <DynamicShapesType.BACKED: 'backed'>, 'evaluate_guards': False, 'assume_32_bit_indexing': False}, 'local_cache_dir': None, 'fast_moe_cold_start': False, 'static_all_moe_layers': []}, kernel_config=KernelConfig(ir_op_priority=IrOpPriorityConfig(rms_norm=['vllm_c', 'native'], fused_add_rms_norm=['vllm_c', 'native'], gelu_and_mul_sparse=['native']), enable_flashinfer_autotune=True, enable_cutedsl_warmup=True, enable_jit_warmup=True, moe_backend='auto', sparse_indexer_topk_backend='auto', linear_backend='auto', linear_backend_per_quant=None)
+(EngineCore pid=188) INFO 11-20 21:01:37 [multiproc_executor.py:153] DP group leader: node_rank=0, node_rank_within_dp=0, master_addr=127.0.0.1, mq_connect_ip=10.0.0.194 (local), world_size=4, local_world_size=4
+[l0-peer-shim pid=275] active scope=large-nonccl-tracked-device-allocation-peer-residency path=loader-tracer pool_ceiling=4194304 report_interval=15s
+[l0-peer-shim pid=7] summary reason=periodic path=loader-tracer alloc_calls=8 tracked=8 freed=0 live=4 owner_allowed=8 peer_preserved=24 peer_suppressed=0 peer_bytes=0 other_passthrough=0
+[l0-peer-shim pid=288] active scope=large-nonccl-tracked-device-allocation-peer-residency path=loader-tracer pool_ceiling=4194304 report_interval=15s
+[l0-peer-shim pid=296] active scope=large-nonccl-tracked-device-allocation-peer-residency path=loader-tracer pool_ceiling=4194304 report_interval=15s
+WARNING 11-20 21:01:42 [indexer_topk.py:29] Failed to import the DeepSelect extension (vllm._deepselect_C): No module named 'vllm._deepselect_C'
+(APIServer pid=7) [transformers] Unrecognized keys in `rope_parameters` for 'rope_type'='default': {'mrope_section', 'mrope_interleaved'}
+(APIServer pid=7) [transformers] Unrecognized keys in `rope_parameters` for 'rope_type'='default': {'mrope_section', 'mrope_interleaved'}
+[l0-peer-shim pid=303] active scope=large-nonccl-tracked-device-allocation-peer-residency path=loader-tracer pool_ceiling=4194304 report_interval=15s
+[transformers] Unrecognized keys in `rope_parameters` for 'rope_type'='default': {'mrope_section', 'mrope_interleaved'}
+[transformers] Unrecognized keys in `rope_parameters` for 'rope_type'='default': {'mrope_interleaved', 'mrope_section'}
+[transformers] Unrecognized keys in `rope_parameters` for 'rope_type'='default': {'mrope_interleaved', 'mrope_section'}
+[transformers] Unrecognized keys in `rope_parameters` for 'rope_type'='default': {'mrope_section', 'mrope_interleaved'}
+[transformers] Unrecognized keys in `rope_parameters` for 'rope_type'='default': {'mrope_section', 'mrope_interleaved'}
+(Worker pid=275) INFO 11-20 21:01:44 [parallel_state.py:1827] world_size=4 rank=0 local_rank=0 distributed_init_method=file:///work/cache/tmp/vllm_dist_1227ad31a62e43559642c537a686a480 backend=xccl
+(APIServer pid=7) [transformers] Qwen3VL video processing does not apply the per-frame pixel cap the reference implementation (qwen-vl-utils) applies, so some videos cost far more tokens than they would there. In v5.22 the capped behavior will become the default and `cap_pixels_per_frame` will be removed. Pass `cap_pixels_per_frame=True` to adopt the reference behavior now, or `False` to keep the current behavior and silence this warning.
+[l0-peer-shim pid=341] active scope=large-nonccl-tracked-device-allocation-peer-residency path=loader-tracer pool_ceiling=4194304 report_interval=15s
+(APIServer pid=7) INFO 11-20 21:01:47 [base.py:261] Multi-modal warmup completed in 10.141s
+[l0-peer-shim pid=349] active scope=large-nonccl-tracked-device-allocation-peer-residency path=loader-tracer pool_ceiling=4194304 report_interval=15s
+WARNING 11-20 21:01:47 [indexer_topk.py:29] Failed to import the DeepSelect extension (vllm._deepselect_C): No module named 'vllm._deepselect_C'
+[l0-peer-shim pid=351] active scope=large-nonccl-tracked-device-allocation-peer-residency path=loader-tracer pool_ceiling=4194304 report_interval=15s
+[transformers] Unrecognized keys in `rope_parameters` for 'rope_type'='default': {'mrope_interleaved', 'mrope_section'}
+[transformers] Unrecognized keys in `rope_parameters` for 'rope_type'='default': {'mrope_interleaved', 'mrope_section'}
+[transformers] Unrecognized keys in `rope_parameters` for 'rope_type'='default': {'mrope_interleaved', 'mrope_section'}
+[transformers] Unrecognized keys in `rope_parameters` for 'rope_type'='default': {'mrope_interleaved', 'mrope_section'}
+[transformers] Unrecognized keys in `rope_parameters` for 'rope_type'='default': {'mrope_interleaved', 'mrope_section'}
+(APIServer pid=7) INFO 11-20 21:01:48 [base.py:261] Readonly multi-modal warmup completed in 0.868s
+(Worker pid=296) INFO 11-20 21:01:49 [parallel_state.py:1827] world_size=4 rank=1 local_rank=1 distributed_init_method=file:///work/cache/tmp/vllm_dist_1227ad31a62e43559642c537a686a480 backend=xccl
+[l0-peer-shim pid=370] active scope=large-nonccl-tracked-device-allocation-peer-residency path=loader-tracer pool_ceiling=4194304 report_interval=15s
+[l0-peer-shim pid=378] active scope=large-nonccl-tracked-device-allocation-peer-residency path=loader-tracer pool_ceiling=4194304 report_interval=15s
+WARNING 11-20 21:01:52 [indexer_topk.py:29] Failed to import the DeepSelect extension (vllm._deepselect_C): No module named 'vllm._deepselect_C'
+[l0-peer-shim pid=380] active scope=large-nonccl-tracked-device-allocation-peer-residency path=loader-tracer pool_ceiling=4194304 report_interval=15s
+[transformers] Unrecognized keys in `rope_parameters` for 'rope_type'='default': {'mrope_interleaved', 'mrope_section'}
+[transformers] Unrecognized keys in `rope_parameters` for 'rope_type'='default': {'mrope_interleaved', 'mrope_section'}
+[transformers] Unrecognized keys in `rope_parameters` for 'rope_type'='default': {'mrope_interleaved', 'mrope_section'}
+[transformers] Unrecognized keys in `rope_parameters` for 'rope_type'='default': {'mrope_interleaved', 'mrope_section'}
+[transformers] Unrecognized keys in `rope_parameters` for 'rope_type'='default': {'mrope_interleaved', 'mrope_section'}
+(Worker pid=349) INFO 11-20 21:01:54 [parallel_state.py:1827] world_size=4 rank=2 local_rank=2 distributed_init_method=file:///work/cache/tmp/vllm_dist_1227ad31a62e43559642c537a686a480 backend=xccl
+[l0-peer-shim pid=399] active scope=large-nonccl-tracked-device-allocation-peer-residency path=loader-tracer pool_ceiling=4194304 report_interval=15s
+WARNING 11-20 21:01:57 [indexer_topk.py:29] Failed to import the DeepSelect extension (vllm._deepselect_C): No module named 'vllm._deepselect_C'
+[l0-peer-shim pid=408] active scope=large-nonccl-tracked-device-allocation-peer-residency path=loader-tracer pool_ceiling=4194304 report_interval=15s
+[l0-peer-shim pid=275] summary reason=periodic path=loader-tracer alloc_calls=8 tracked=8 freed=0 live=4 owner_allowed=8 peer_preserved=24 peer_suppressed=0 peer_bytes=0 other_passthrough=0
+[transformers] Unrecognized keys in `rope_parameters` for 'rope_type'='default': {'mrope_interleaved', 'mrope_section'}
+[transformers] Unrecognized keys in `rope_parameters` for 'rope_type'='default': {'mrope_interleaved', 'mrope_section'}
+[transformers] Unrecognized keys in `rope_parameters` for 'rope_type'='default': {'mrope_interleaved', 'mrope_section'}
+[transformers] Unrecognized keys in `rope_parameters` for 'rope_type'='default': {'mrope_interleaved', 'mrope_section'}
+[transformers] Unrecognized keys in `rope_parameters` for 'rope_type'='default': {'mrope_interleaved', 'mrope_section'}
+(Worker pid=378) INFO 11-20 21:01:59 [parallel_state.py:1827] world_size=4 rank=3 local_rank=3 distributed_init_method=file:///work/cache/tmp/vllm_dist_1227ad31a62e43559642c537a686a480 backend=xccl
+(Worker pid=275) INFO 11-20 21:01:59 [parallel_state.py:2267] rank 0 in world size 4 is assigned as DP rank 0, PP rank 0, PCP rank 0, TP rank 0, ETP rank 0, EP rank 0, EPLB rank N/A
+2026:11:20-21:01:59:  378 |CCL_WARN| value of CCL_ATL_TRANSPORT changed to be ofi (default:mpi)
+2026:11:20-21:01:59:  378 |CCL_WARN| value of CCL_SYCL_ALLREDUCE_TMP_BUF changed to be 1 (default:0)
+2026:11:20-21:01:59:  378 |CCL_WARN| value of CCL_SYCL_ALLGATHERV_TMP_BUF changed to be 1 (default:0)
+2026:11:20-21:01:59:  378 |CCL_WARN| value of CCL_ZE_IPC_EXCHANGE changed to be sockets (default:pidfd)
+2026:11:20-21:01:59:  349 |CCL_WARN| value of CCL_ATL_TRANSPORT changed to be ofi (default:mpi)
+2026:11:20-21:01:59:  349 |CCL_WARN| value of CCL_SYCL_ALLREDUCE_TMP_BUF changed to be 1 (default:0)
+2026:11:20-21:01:59:  378 |CCL_WARN| could not get local_idx/count from environment variables, trying to get them from ATL
+2026:11:20-21:01:59:  349 |CCL_WARN| value of CCL_SYCL_ALLGATHERV_TMP_BUF changed to be 1 (default:0)
+2026:11:20-21:01:59:  296 |CCL_WARN| value of CCL_ATL_TRANSPORT changed to be ofi (default:mpi)
+2026:11:20-21:01:59:  275 |CCL_WARN| value of CCL_ATL_TRANSPORT changed to be ofi (default:mpi)
+2026:11:20-21:01:59:  296 |CCL_WARN| value of CCL_SYCL_ALLREDUCE_TMP_BUF changed to be 1 (default:0)
+2026:11:20-21:01:59:  296 |CCL_WARN| value of CCL_SYCL_ALLGATHERV_TMP_BUF changed to be 1 (default:0)
+2026:11:20-21:01:59:  275 |CCL_WARN| value of CCL_SYCL_ALLREDUCE_TMP_BUF changed to be 1 (default:0)
+2026:11:20-21:01:59:  275 |CCL_WARN| value of CCL_SYCL_ALLGATHERV_TMP_BUF changed to be 1 (default:0)
+2026:11:20-21:01:59:  349 |CCL_WARN| value of CCL_ZE_IPC_EXCHANGE changed to be sockets (default:pidfd)
+2026:11:20-21:01:59:  349 |CCL_WARN| could not get local_idx/count from environment variables, trying to get them from ATL
+2026:11:20-21:01:59:  275 |CCL_WARN| value of CCL_ZE_IPC_EXCHANGE changed to be sockets (default:pidfd)
+2026:11:20-21:01:59:  296 |CCL_WARN| value of CCL_ZE_IPC_EXCHANGE changed to be sockets (default:pidfd)
+2026:11:20-21:01:59:  296 |CCL_WARN| could not get local_idx/count from environment variables, trying to get them from ATL
+2026:11:20-21:01:59:  275 |CCL_WARN| could not get local_idx/count from environment variables, trying to get them from ATL
+2026:11:20-21:02:01:  532:[0] |CCL_WARN| no membind support for NUMA node 0, skip thread membind
+2026:11:20-21:02:01:  533:[2] |CCL_WARN| no membind support for NUMA node 0, skip thread membind
+2026:11:20-21:02:01:  534:[3] |CCL_WARN| no membind support for NUMA node 0, skip thread membind
+2026:11:20-21:02:01:  531:[1] |CCL_WARN| no membind support for NUMA node 0, skip thread membind
+2026:11:20-21:02:01:  275:[0] |CCL_WARN| topology recognition shows PCIe connection between devices. If this is not correct, you can disable topology recognition, with CCL_TOPO_FABRIC_VERTEX_CONNECTION_CHECK=0. This will assume XeLinks across devices
+2026:11:20-21:02:01:  349:[2] |CCL_WARN| topology recognition shows PCIe connection between devices. If this is not correct, you can disable topology recognition, with CCL_TOPO_FABRIC_VERTEX_CONNECTION_CHECK=0. This will assume XeLinks across devices
+2026:11:20-21:02:01:  378:[3] |CCL_WARN| topology recognition shows PCIe connection between devices. If this is not correct, you can disable topology recognition, with CCL_TOPO_FABRIC_VERTEX_CONNECTION_CHECK=0. This will assume XeLinks across devices
+2026:11:20-21:02:01:  296:[1] |CCL_WARN| topology recognition shows PCIe connection between devices. If this is not correct, you can disable topology recognition, with CCL_TOPO_FABRIC_VERTEX_CONNECTION_CHECK=0. This will assume XeLinks across devices
+2026:11:20-21:02:01:  275:[0] |CCL_WARN| pidfd is not supported, fallbacks to drmfd exchange mode
+2026:11:20-21:02:01:  296:[1] |CCL_WARN| pidfd is not supported, fallbacks to drmfd exchange mode
+2026:11:20-21:02:01:  378:[3] |CCL_WARN| pidfd is not supported, fallbacks to drmfd exchange mode
+2026:11:20-21:02:01:  349:[2] |CCL_WARN| pidfd is not supported, fallbacks to drmfd exchange mode
+(Worker pid=275) INFO 11-20 21:02:01 [xpu_worker.py:169] Using V2 Model Runner
+(Worker_TP0_EP0 pid=275) INFO 11-20 21:02:02 [model_runner.py:397] Loading model from scratch...
+(Worker_TP0_EP0 pid=275) INFO 11-20 21:02:02 [xpu.py:233] Using backend AttentionBackendEnum.FLASH_ATTN for vit attention
+(Worker_TP0_EP0 pid=275) INFO 11-20 21:02:02 [mm_encoder_attention.py:372] Using AttentionBackendEnum.FLASH_ATTN for MMEncoderAttention.
+(Worker_TP0_EP0 pid=275) INFO 11-20 21:02:02 [qwen_gdn_linear_attn.py:176] Using Triton/FLA GDN prefill kernel (requested=auto, head_k_dim=128).
+(Worker_TP0_EP0 pid=275) INFO 11-20 21:02:02 [qwen_gdn_linear_attn.py:528] GDN decode kernel: cuda
+(Worker_TP0_EP0 pid=275) INFO 11-20 21:02:02 [expert_map_manager.py:245] [EP Rank 0/4] Expert parallelism is enabled. Expert placement strategy: linear. Local/global number of experts: 128/512. Experts local to global index map: 0->0, 1->1, 2->2, 3->3, 4->4, 5->5, 6->6, 7->7, 8->8, 9->9, 10->10, 11->11, 12->12, 13->13, 14->14, 15->15, 16->16, 17->17, 18->18, 19->19, 20->20, 21->21, 22->22, 23->23, 24->24, 25->25, 26->26, 27->27, 28->28, 29->29, 30->30, 31->31, 32->32, 33->33, 34->34, 35->35, 36->36, 37->37, 38->38, 39->39, 40->40, 41->41, 42->42, 43->43, 44->44, 45->45, 46->46, 47->47, 48->48, 49->49, 50->50, 51->51, 52->52, 53->53, 54->54, 55->55, 56->56, 57->57, 58->58, 59->59, 60->60, 61->61, 62->62, 63->63, 64->64, 65->65, 66->66, 67->67, 68->68, 69->69, 70->70, 71->71, 72->72, 73->73, 74->74, 75->75, 76->76, 77->77, 78->78, 79->79, 80->80, 81->81, 82->82, 83->83, 84->84, 85->85, 86->86, 87->87, 88->88, 89->89, 90->90, 91->91, 92->92, 93->93, 94->94, 95->95, 96->96, 97->97, 98->98, 99->99, 100->100, 101->101, 102->102, 103->103, 104->104, 105->105, 106->106, 107->107, 108->108, 109->109, 110->110, 111->111, 112->112, 113->113, 114->114, 115->115, 116->116, 117->117, 118->118, 119->119, 120->120, 121->121, 122->122, 123->123, 124->124, 125->125, 126->126, 127->127.
+(Worker_TP0_EP0 pid=275) INFO 11-20 21:02:02 [int_wna16.py:325] Using 'XPU' WNA16 MoE backend.
+(Worker_TP1_EP1 pid=296) INFO 11-20 21:02:02 [ngram_embedding.py:2403] Initialized PLE embedding language_model.model.layers.1.ple.ple_embedding.ngram_embedding: quantization_method=B70PLEFp8PinnedEmbeddingMethod, weight_dtype=torch.float8_e4m3fn, weight_device=cpu, pinned=False
+(Worker_TP0_EP0 pid=275) INFO 11-20 21:02:02 [ngram_embedding.py:2403] Initialized PLE embedding language_model.model.layers.1.ple.ple_embedding.ngram_embedding: quantization_method=B70PLEFp8PinnedEmbeddingMethod, weight_dtype=torch.float8_e4m3fn, weight_device=cpu, pinned=False
+(Worker_TP3_EP3 pid=378) INFO 11-20 21:02:02 [ngram_embedding.py:2403] Initialized PLE embedding language_model.model.layers.1.ple.ple_embedding.ngram_embedding: quantization_method=B70PLEFp8PinnedEmbeddingMethod, weight_dtype=torch.float8_e4m3fn, weight_device=cpu, pinned=False
+(Worker_TP2_EP2 pid=349) INFO 11-20 21:02:02 [ngram_embedding.py:2403] Initialized PLE embedding language_model.model.layers.1.ple.ple_embedding.ngram_embedding: quantization_method=B70PLEFp8PinnedEmbeddingMethod, weight_dtype=torch.float8_e4m3fn, weight_device=cpu, pinned=False
+(Worker_TP0_EP0 pid=275) INFO 11-20 21:02:02 [xpu.py:199] Using Flash Attention backend.
+(Worker_TP0_EP0 pid=275) INFO 11-20 21:02:02 [flash_attn.py:1116] Using FlashAttention version 2
+[l0-peer-shim pid=296] summary reason=periodic path=loader-tracer alloc_calls=82 tracked=81 freed=0 live=76 owner_allowed=81 peer_preserved=96 peer_suppressed=141 peer_bytes=10399776768 other_passthrough=0
+(Worker_TP0_EP0 pid=275) INFO 11-20 21:02:04 [weight_utils.py:895] Filesystem type for checkpoints: EXT4. Checkpoint size: 68.53 GiB. Available RAM: 41.95 GiB.
+(Worker_TP0_EP0 pid=275) INFO 11-20 21:02:04 [weight_utils.py:925] Auto-prefetch is disabled because the filesystem (EXT4) is not a recognized network FS (NFS/Lustre) and the checkpoint size (68.53 GiB) exceeds 90% of available RAM (41.95 GiB).
+(Worker_TP0_EP0 pid=275) Loading safetensors checkpoint shards:   0% Completed | 0/15 [00:00<?, ?it/s]
+(Worker_TP0_EP0 pid=275) Loading safetensors checkpoint shards:   7% Completed | 1/15 [00:01<00:24,  1.77s/it]
+(Worker_TP0_EP0 pid=275) INFO 11-20 21:02:07 [ple_nvme.py:560] PLE NVMe native reader loaded from /work/cache/tmp/b70-ple-nvme/ple_nvme_reader-547ad09f26d0e506.so
+(Worker_TP0_EP0 pid=275) INFO 11-20 21:02:07 [ngram_embedding.py:1658] PLE FP8 NVMe load (B70_PLE_FP8_NVME=1) starting: /models/qwen38-w4a16, 128 shards in 10 files, 16 I/O threads, reader native; VmRSS=3.6 GiB, MemAvailable=41.6 GiB
+(Worker_TP1_EP1 pid=296) INFO 11-20 21:02:07 [ple_nvme.py:560] PLE NVMe native reader loaded from /work/cache/tmp/b70-ple-nvme/ple_nvme_reader-547ad09f26d0e506.so
+(Worker_TP1_EP1 pid=296) INFO 11-20 21:02:07 [ngram_embedding.py:1658] PLE FP8 NVMe load (B70_PLE_FP8_NVME=1) starting: /models/qwen38-w4a16, 128 shards in 10 files, 16 I/O threads, reader native; VmRSS=3.6 GiB, MemAvailable=41.6 GiB
+[l0-peer-shim pid=349] summary reason=periodic path=loader-tracer alloc_calls=370 tracked=370 freed=0 live=365 owner_allowed=370 peer_preserved=282 peer_suppressed=822 peer_bytes=59039023104 other_passthrough=0
+(Worker_TP3_EP3 pid=378) INFO 11-20 21:02:08 [ple_nvme.py:560] PLE NVMe native reader loaded from /work/cache/tmp/b70-ple-nvme/ple_nvme_reader-547ad09f26d0e506.so
+(Worker_TP3_EP3 pid=378) INFO 11-20 21:02:08 [ngram_embedding.py:1658] PLE FP8 NVMe load (B70_PLE_FP8_NVME=1) starting: /models/qwen38-w4a16, 128 shards in 10 files, 16 I/O threads, reader native; VmRSS=3.7 GiB, MemAvailable=40.9 GiB
+(Worker_TP0_EP0 pid=275) INFO 11-20 21:02:08 [ngram_embedding.py:2013] PLE NVMe pinned allocation: row cache 13421772 x 160 B = 2147483520 B (2.000 GiB), is_pinned=True
+(Worker_TP1_EP1 pid=296) INFO 11-20 21:02:08 [ngram_embedding.py:2013] PLE NVMe pinned allocation: row cache 13421772 x 160 B = 2147483520 B (2.000 GiB), is_pinned=True
+(Worker_TP3_EP3 pid=378) INFO 11-20 21:02:09 [ngram_embedding.py:2013] PLE NVMe pinned allocation: row cache 13421772 x 160 B = 2147483520 B (2.000 GiB), is_pinned=True
+(Worker_TP0_EP0 pid=275) INFO 11-20 21:02:09 [ngram_embedding.py:2131] PLE NVMe host-hash self-test: 1024 ids equal to the device hash on xpu:0
+(Worker_TP0_EP0 pid=275) INFO 11-20 21:02:09 [ngram_embedding.py:2067] PLE NVMe pinned allocation: id staging 262144 B, is_pinned=True
+(Worker_TP0_EP0 pid=275) INFO 11-20 21:02:09 [ngram_embedding.py:2084] PLE NVMe host path ready (rank 0, rows from NVMe): cache 13421772 rows (2.00 GiB pinned, 0.51 GiB maps), own heads [0, 1, 2, 3, 4], rows [0, 80000384); VmRSS=4.6 GiB, MemAvailable=33.4 GiB
+(Worker_TP0_EP0 pid=275) INFO 11-20 21:02:09 [ngram_embedding.py:1707] Serving FP8 PLE table from NVMe in place, /models/qwen38-w4a16 (128 shards x 2500012 rows; layout matches model: ngram_heads_offsets, ngram_heads_vocab_sizes, layer_multipliers): tp rows [0, 80000384) of 320001536, 160 B/row, scale=0.000199318; boot: 4352 rows byte-equal to the mmap, 65536 own rows NaN-free; VmRSS=4.6 GiB, MemAvailable=33.4 GiB
+(Worker_TP1_EP1 pid=296) INFO 11-20 21:02:09 [ngram_embedding.py:2131] PLE NVMe host-hash self-test: 1024 ids equal to the device hash on xpu:1
+(Worker_TP1_EP1 pid=296) INFO 11-20 21:02:09 [ngram_embedding.py:2067] PLE NVMe pinned allocation: id staging 262144 B, is_pinned=True
+(Worker_TP1_EP1 pid=296) INFO 11-20 21:02:09 [ngram_embedding.py:2084] PLE NVMe host path ready (rank 1, rows from NVMe): cache 13421772 rows (2.00 GiB pinned, 0.51 GiB maps), own heads [4, 5, 6, 7, 8], rows [80000384, 160000768); VmRSS=4.6 GiB, MemAvailable=33.4 GiB
+(Worker_TP1_EP1 pid=296) INFO 11-20 21:02:09 [ngram_embedding.py:1707] Serving FP8 PLE table from NVMe in place, /models/qwen38-w4a16 (128 shards x 2500012 rows; layout matches model: ngram_heads_offsets, ngram_heads_vocab_sizes, layer_multipliers): tp rows [80000384, 160000768) of 320001536, 160 B/row, scale=0.000199318; boot: 4352 rows byte-equal to the mmap, 65536 own rows NaN-free; VmRSS=4.6 GiB, MemAvailable=33.4 GiB
+(Worker_TP3_EP3 pid=378) INFO 11-20 21:02:09 [ngram_embedding.py:2131] PLE NVMe host-hash self-test: 1024 ids equal to the device hash on xpu:3
+(Worker_TP3_EP3 pid=378) INFO 11-20 21:02:09 [ngram_embedding.py:2067] PLE NVMe pinned allocation: id staging 262144 B, is_pinned=True
+(Worker_TP3_EP3 pid=378) INFO 11-20 21:02:09 [ngram_embedding.py:2084] PLE NVMe host path ready (rank 3, rows from NVMe): cache 13421772 rows (2.00 GiB pinned, 0.51 GiB maps), own heads [12, 13, 14, 15], rows [240001152, 320001536); VmRSS=4.7 GiB, MemAvailable=33.0 GiB
+(Worker_TP3_EP3 pid=378) INFO 11-20 21:02:09 [ngram_embedding.py:1707] Serving FP8 PLE table from NVMe in place, /models/qwen38-w4a16 (128 shards x 2500012 rows; layout matches model: ngram_heads_offsets, ngram_heads_vocab_sizes, layer_multipliers): tp rows [240001152, 320001536) of 320001536, 160 B/row, scale=0.000199318; boot: 4352 rows byte-equal to the mmap, 65536 own rows NaN-free; VmRSS=4.7 GiB, MemAvailable=33.0 GiB
+(Worker_TP2_EP2 pid=349) INFO 11-20 21:02:09 [ple_nvme.py:560] PLE NVMe native reader loaded from /work/cache/tmp/b70-ple-nvme/ple_nvme_reader-547ad09f26d0e506.so
+(Worker_TP2_EP2 pid=349) INFO 11-20 21:02:09 [ngram_embedding.py:1658] PLE FP8 NVMe load (B70_PLE_FP8_NVME=1) starting: /models/qwen38-w4a16, 128 shards in 10 files, 16 I/O threads, reader native; VmRSS=3.6 GiB, MemAvailable=32.9 GiB
+(Worker_TP2_EP2 pid=349) INFO 11-20 21:02:10 [ngram_embedding.py:2013] PLE NVMe pinned allocation: row cache 13421772 x 160 B = 2147483520 B (2.000 GiB), is_pinned=True
+(Worker_TP2_EP2 pid=349) INFO 11-20 21:02:11 [ngram_embedding.py:2131] PLE NVMe host-hash self-test: 1024 ids equal to the device hash on xpu:2
+(Worker_TP2_EP2 pid=349) INFO 11-20 21:02:11 [ngram_embedding.py:2067] PLE NVMe pinned allocation: id staging 262144 B, is_pinned=True
+(Worker_TP2_EP2 pid=349) INFO 11-20 21:02:11 [ngram_embedding.py:2084] PLE NVMe host path ready (rank 2, rows from NVMe): cache 13421772 rows (2.00 GiB pinned, 0.51 GiB maps), own heads [8, 9, 10, 11, 12], rows [160000768, 240001152); VmRSS=4.7 GiB, MemAvailable=29.9 GiB
+(Worker_TP2_EP2 pid=349) INFO 11-20 21:02:11 [ngram_embedding.py:1707] Serving FP8 PLE table from NVMe in place, /models/qwen38-w4a16 (128 shards x 2500012 rows; layout matches model: ngram_heads_offsets, ngram_heads_vocab_sizes, layer_multipliers): tp rows [160000768, 240001152) of 320001536, 160 B/row, scale=0.000199318; boot: 4352 rows byte-equal to the mmap, 65536 own rows NaN-free; VmRSS=4.7 GiB, MemAvailable=29.9 GiB
+(Worker_TP0_EP0 pid=275) Loading safetensors checkpoint shards:  13% Completed | 2/15 [00:08<00:57,  4.44s/it]
+[l0-peer-shim pid=378] summary reason=periodic path=loader-tracer alloc_calls=370 tracked=370 freed=0 live=365 owner_allowed=370 peer_preserved=282 peer_suppressed=822 peer_bytes=59039023104 other_passthrough=0
+[l0-peer-shim pid=275] summary reason=periodic path=loader-tracer alloc_calls=370 tracked=370 freed=0 live=365 owner_allowed=370 peer_preserved=282 peer_suppressed=822 peer_bytes=59039023104 other_passthrough=0
+[l0-peer-shim pid=296] summary reason=periodic path=loader-tracer alloc_calls=370 tracked=370 freed=0 live=365 owner_allowed=370 peer_preserved=282 peer_suppressed=822 peer_bytes=59039023104 other_passthrough=0
+(Worker_TP0_EP0 pid=275) Loading safetensors checkpoint shards:  20% Completed | 3/15 [00:31<02:35, 12.94s/it]
+(Worker_TP0_EP0 pid=275) Loading safetensors checkpoint shards:  27% Completed | 4/15 [00:34<01:39,  9.05s/it]
+(Worker_TP0_EP0 pid=275) Loading safetensors checkpoint shards:  33% Completed | 5/15 [00:37<01:10,  7.09s/it]
+(Worker_TP0_EP0 pid=275) Loading safetensors checkpoint shards:  40% Completed | 6/15 [01:06<02:08, 14.29s/it]
+(Worker_TP0_EP0 pid=275) Loading safetensors checkpoint shards:  47% Completed | 7/15 [01:09<01:24, 10.58s/it]
+(Worker_TP0_EP0 pid=275) Loading safetensors checkpoint shards:  53% Completed | 8/15 [01:12<00:58,  8.29s/it]
+(Worker_TP0_EP0 pid=275) Loading safetensors checkpoint shards:  60% Completed | 9/15 [01:41<01:28, 14.69s/it]
+(Worker_TP0_EP0 pid=275) Loading safetensors checkpoint shards:  67% Completed | 10/15 [01:43<00:55, 11.01s/it]
+(Worker_TP0_EP0 pid=275) Loading safetensors checkpoint shards:  73% Completed | 11/15 [01:47<00:34,  8.74s/it]
+(Worker_TP0_EP0 pid=275) Loading safetensors checkpoint shards:  80% Completed | 12/15 [01:51<00:21,  7.13s/it]
+(Worker_TP0_EP0 pid=275) Loading safetensors checkpoint shards:  87% Completed | 13/15 [01:54<00:12,  6.01s/it]
+(Worker_TP0_EP0 pid=275) Loading safetensors checkpoint shards:  93% Completed | 14/15 [01:56<00:04,  4.89s/it]
+(Worker_TP0_EP0 pid=275) Loading safetensors checkpoint shards: 100% Completed | 15/15 [01:56<00:00,  3.47s/it]
+(Worker_TP0_EP0 pid=275) Loading safetensors checkpoint shards: 100% Completed | 15/15 [01:56<00:00,  7.79s/it]
+(Worker_TP0_EP0 pid=275) 
+(Worker_TP0_EP0 pid=275) INFO 11-20 21:04:01 [default_loader.py:430] Loading weights took 116.90 seconds
+(Worker_TP0_EP0 pid=275) INFO 11-20 21:04:01 [int_wna16.py:435] Using MoEPrepareAndFinalizeNoDPEPModular
+(Worker_TP0_EP0 pid=275) INFO 11-20 21:04:01 [int_wna16.py:436] Using XPUExpertsWNA16
+(Worker_TP2_EP2 pid=349) INFO 11-20 21:04:02 [model_runner.py:429] Model loading took 19.01 GiB memory and 120.069987 seconds
+(Worker_TP0_EP0 pid=275) INFO 11-20 21:04:02 [model_runner.py:429] Model loading took 19.01 GiB memory and 120.074650 seconds
+(Worker_TP2_EP2 pid=349) INFO 11-20 21:04:02 [interface.py:635] Setting kv cache block size to 64 for FLASH_ATTN backend.
+(Worker_TP2_EP2 pid=349) INFO 11-20 21:04:02 [interface.py:933] Setting attention block size to 832 tokens to ensure that attention page size is >= mamba page size.
+(Worker_TP2_EP2 pid=349) INFO 11-20 21:04:02 [interface.py:957] Padding mamba page size by 6.26% to ensure that mamba page size and attention page size are exactly equal.
+(Worker_TP0_EP0 pid=275) INFO 11-20 21:04:02 [interface.py:635] Setting kv cache block size to 64 for FLASH_ATTN backend.
+(Worker_TP0_EP0 pid=275) INFO 11-20 21:04:02 [interface.py:933] Setting attention block size to 832 tokens to ensure that attention page size is >= mamba page size.
+(Worker_TP0_EP0 pid=275) INFO 11-20 21:04:02 [interface.py:957] Padding mamba page size by 6.26% to ensure that mamba page size and attention page size are exactly equal.
+(Worker_TP3_EP3 pid=378) INFO 11-20 21:04:02 [model_runner.py:429] Model loading took 19.01 GiB memory and 120.280537 seconds
+(Worker_TP3_EP3 pid=378) INFO 11-20 21:04:02 [interface.py:635] Setting kv cache block size to 64 for FLASH_ATTN backend.
+(Worker_TP3_EP3 pid=378) INFO 11-20 21:04:02 [interface.py:933] Setting attention block size to 832 tokens to ensure that attention page size is >= mamba page size.
+(Worker_TP3_EP3 pid=378) INFO 11-20 21:04:02 [interface.py:957] Padding mamba page size by 6.26% to ensure that mamba page size and attention page size are exactly equal.
+(Worker_TP1_EP1 pid=296) INFO 11-20 21:04:07 [model_runner.py:429] Model loading took 19.01 GiB memory and 125.091904 seconds
+(Worker_TP1_EP1 pid=296) INFO 11-20 21:04:07 [interface.py:635] Setting kv cache block size to 64 for FLASH_ATTN backend.
+(Worker_TP1_EP1 pid=296) INFO 11-20 21:04:07 [interface.py:933] Setting attention block size to 832 tokens to ensure that attention page size is >= mamba page size.
+(Worker_TP1_EP1 pid=296) INFO 11-20 21:04:07 [interface.py:957] Padding mamba page size by 6.26% to ensure that mamba page size and attention page size are exactly equal.
+(EngineCore pid=188) INFO 11-20 21:04:07 [torch_utils.py:287] Reducing Torch threads from 6 to 1 for serving. Set OMP_NUM_THREADS in the external environment to override.
+(EngineCore pid=188) INFO 11-20 21:04:07 [utils.py:320] Using LBNHC KV cache layout.
+(Worker_TP3_EP3 pid=378) [transformers] Unrecognized keys in `rope_parameters` for 'rope_type'='default': {'mrope_interleaved', 'mrope_section'}
+(Worker_TP1_EP1 pid=296) [transformers] Unrecognized keys in `rope_parameters` for 'rope_type'='default': {'mrope_interleaved', 'mrope_section'}
+(Worker_TP2_EP2 pid=349) [transformers] Unrecognized keys in `rope_parameters` for 'rope_type'='default': {'mrope_interleaved', 'mrope_section'}
+(Worker_TP3_EP3 pid=378) [transformers] Unrecognized keys in `rope_parameters` for 'rope_type'='default': {'mrope_interleaved', 'mrope_section'}
+(Worker_TP1_EP1 pid=296) [transformers] Unrecognized keys in `rope_parameters` for 'rope_type'='default': {'mrope_interleaved', 'mrope_section'}
+(Worker_TP2_EP2 pid=349) [transformers] Unrecognized keys in `rope_parameters` for 'rope_type'='default': {'mrope_interleaved', 'mrope_section'}
+(Worker_TP0_EP0 pid=275) [transformers] Unrecognized keys in `rope_parameters` for 'rope_type'='default': {'mrope_section', 'mrope_interleaved'}
+(Worker_TP0_EP0 pid=275) [transformers] Unrecognized keys in `rope_parameters` for 'rope_type'='default': {'mrope_interleaved', 'mrope_section'}
+[l0-peer-shim pid=349] summary reason=periodic path=loader-tracer alloc_calls=381 tracked=381 freed=0 live=376 owner_allowed=381 peer_preserved=282 peer_suppressed=855 peer_bytes=62310580224 other_passthrough=0
+(Worker_TP1_EP1 pid=296) [transformers] The `use_fast` parameter is deprecated and will be removed in a future version. Use `backend="torchvision"` instead of `use_fast=True`, or `backend="pil"` instead of `use_fast=False`.
+(Worker_TP2_EP2 pid=349) [transformers] The `use_fast` parameter is deprecated and will be removed in a future version. Use `backend="torchvision"` instead of `use_fast=True`, or `backend="pil"` instead of `use_fast=False`.
+(Worker_TP3_EP3 pid=378) [transformers] The `use_fast` parameter is deprecated and will be removed in a future version. Use `backend="torchvision"` instead of `use_fast=True`, or `backend="pil"` instead of `use_fast=False`.
+(Worker_TP0_EP0 pid=275) [transformers] The `use_fast` parameter is deprecated and will be removed in a future version. Use `backend="torchvision"` instead of `use_fast=True`, or `backend="pil"` instead of `use_fast=False`.
+(Worker_TP1_EP1 pid=296) [transformers] Unrecognized keys in `rope_parameters` for 'rope_type'='default': {'mrope_interleaved', 'mrope_section'}
+(Worker_TP1_EP1 pid=296) [transformers] Unrecognized keys in `rope_parameters` for 'rope_type'='default': {'mrope_interleaved', 'mrope_section'}
+(Worker_TP2_EP2 pid=349) [transformers] Unrecognized keys in `rope_parameters` for 'rope_type'='default': {'mrope_interleaved', 'mrope_section'}
+(Worker_TP2_EP2 pid=349) [transformers] Unrecognized keys in `rope_parameters` for 'rope_type'='default': {'mrope_interleaved', 'mrope_section'}
+(Worker_TP3_EP3 pid=378) [transformers] Unrecognized keys in `rope_parameters` for 'rope_type'='default': {'mrope_interleaved', 'mrope_section'}
+(Worker_TP3_EP3 pid=378) [transformers] Unrecognized keys in `rope_parameters` for 'rope_type'='default': {'mrope_interleaved', 'mrope_section'}
+(Worker_TP0_EP0 pid=275) [transformers] Unrecognized keys in `rope_parameters` for 'rope_type'='default': {'mrope_section', 'mrope_interleaved'}
+(Worker_TP0_EP0 pid=275) [transformers] Unrecognized keys in `rope_parameters` for 'rope_type'='default': {'mrope_interleaved', 'mrope_section'}
+(Worker_TP0_EP0 pid=275) INFO 11-20 21:04:12 [encoder_runner.py:131] Encoder cache will be initialized with a budget of 16384 tokens, and profiled with 1 image items of the maximum feature size.
+[l0-peer-shim pid=378] summary reason=periodic path=loader-tracer alloc_calls=384 tracked=384 freed=0 live=379 owner_allowed=384 peer_preserved=282 peer_suppressed=864 peer_bytes=63820529664 other_passthrough=0
+[l0-peer-shim pid=275] summary reason=periodic path=loader-tracer alloc_calls=384 tracked=384 freed=0 live=379 owner_allowed=384 peer_preserved=282 peer_suppressed=864 peer_bytes=63820529664 other_passthrough=0
+2026:11:20-21:04:13:  296:[1] |CCL_WARN| pidfd is not supported, fallbacks to drmfd exchange mode
+2026:11:20-21:04:13:  349:[2] |CCL_WARN| pidfd is not supported, fallbacks to drmfd exchange mode
+2026:11:20-21:04:13:  378:[3] |CCL_WARN| pidfd is not supported, fallbacks to drmfd exchange mode
+2026:11:20-21:04:13:  275:[0] |CCL_WARN| pidfd is not supported, fallbacks to drmfd exchange mode
+(Worker_TP2_EP2 pid=349) INFO 11-20 21:04:15 [hyperconnection.py:223] HC down GEMM: deterministic K-split engaged at row width 2048 (stock single GEMM kept for widths <= 64)
+(Worker_TP3_EP3 pid=378) INFO 11-20 21:04:15 [hyperconnection.py:223] HC down GEMM: deterministic K-split engaged at row width 2048 (stock single GEMM kept for widths <= 64)
+(Worker_TP1_EP1 pid=296) INFO 11-20 21:04:15 [hyperconnection.py:223] HC down GEMM: deterministic K-split engaged at row width 2048 (stock single GEMM kept for widths <= 64)
+(Worker_TP0_EP0 pid=275) INFO 11-20 21:04:15 [hyperconnection.py:223] HC down GEMM: deterministic K-split engaged at row width 2048 (stock single GEMM kept for widths <= 64)
+[l0-peer-shim pid=296] summary reason=periodic path=loader-tracer alloc_calls=398 tracked=398 freed=0 live=393 owner_allowed=398 peer_preserved=288 peer_suppressed=900 peer_bytes=67444408320 other_passthrough=0
+(Worker_TP3_EP3 pid=378) /opt/venv/lib/python3.12/site-packages/torch/distributed/c10d_logger.py:83: FutureWarning: `torch.distributed.all_gather_into_tensor` is deprecated. Please use `torch.distributed.all_gather_single` instead.
+(Worker_TP0_EP0 pid=275) /opt/venv/lib/python3.12/site-packages/torch/distributed/c10d_logger.py:83: FutureWarning: `torch.distributed.all_gather_into_tensor` is deprecated. Please use `torch.distributed.all_gather_single` instead.
+(Worker_TP3_EP3 pid=378)   return func(*args, **kwargs)
+(Worker_TP0_EP0 pid=275)   return func(*args, **kwargs)
+(Worker_TP1_EP1 pid=296) /opt/venv/lib/python3.12/site-packages/torch/distributed/c10d_logger.py:83: FutureWarning: `torch.distributed.all_gather_into_tensor` is deprecated. Please use `torch.distributed.all_gather_single` instead.
+(Worker_TP1_EP1 pid=296)   return func(*args, **kwargs)
+(Worker_TP2_EP2 pid=349) /opt/venv/lib/python3.12/site-packages/torch/distributed/c10d_logger.py:83: FutureWarning: `torch.distributed.all_gather_into_tensor` is deprecated. Please use `torch.distributed.all_gather_single` instead.
+(Worker_TP2_EP2 pid=349)   return func(*args, **kwargs)
+(Worker_TP0_EP0 pid=275) INFO 11-20 21:04:21 [gpu_worker.py:640] Available KV cache memory: 7.53 GiB
+(EngineCore pid=188) INFO 11-20 21:04:21 [kv_cache_utils.py:2395] XPU KV cache size: 601,232 tokens, Maximum concurrency for 32,768 tokens per request: 18.35x
+(Worker_TP3_EP3 pid=378) INFO 11-20 21:04:21 [kernel_warmup.py:172] JIT kernel warmup starting.
+(Worker_TP2_EP2 pid=349) INFO 11-20 21:04:21 [kernel_warmup.py:172] JIT kernel warmup starting.
+(Worker_TP0_EP0 pid=275) INFO 11-20 21:04:21 [kernel_warmup.py:172] JIT kernel warmup starting.
+(Worker_TP1_EP1 pid=296) INFO 11-20 21:04:21 [kernel_warmup.py:172] JIT kernel warmup starting.
+(Worker_TP3_EP3 pid=378) INFO 11-20 21:04:21 [kernel_warmup.py:185] JIT kernel warmup finished in 0.00s.
+(Worker_TP2_EP2 pid=349) INFO 11-20 21:04:21 [kernel_warmup.py:185] JIT kernel warmup finished in 0.00s.
+(Worker_TP0_EP0 pid=275) INFO 11-20 21:04:21 [kernel_warmup.py:185] JIT kernel warmup finished in 0.00s.
+(Worker_TP1_EP1 pid=296) INFO 11-20 21:04:21 [kernel_warmup.py:185] JIT kernel warmup finished in 0.00s.
+(Worker_TP2_EP2 pid=349) INFO 11-20 21:04:21 [qwen_vl_triton_warmup.py:57] Warmed position embedding and vision rotary kernels on grids=[(1, 16, 16), (1, 16, 2), (1, 2, 16), (1, 2, 2)].
+(Worker_TP1_EP1 pid=296) INFO 11-20 21:04:21 [qwen_vl_triton_warmup.py:57] Warmed position embedding and vision rotary kernels on grids=[(1, 16, 16), (1, 16, 2), (1, 2, 16), (1, 2, 2)].
+(Worker_TP3_EP3 pid=378) INFO 11-20 21:04:21 [qwen_vl_triton_warmup.py:57] Warmed position embedding and vision rotary kernels on grids=[(1, 16, 16), (1, 16, 2), (1, 2, 16), (1, 2, 2)].
+(Worker_TP0_EP0 pid=275) INFO 11-20 21:04:21 [qwen_vl_triton_warmup.py:57] Warmed position embedding and vision rotary kernels on grids=[(1, 16, 16), (1, 16, 2), (1, 2, 16), (1, 2, 2)].
+(Worker_TP1_EP1 pid=296) INFO 11-20 21:04:21 [qwen_vl_triton_warmup.py:98] Warmed M-RoPE Triton kernels.
+(Worker_TP2_EP2 pid=349) INFO 11-20 21:04:21 [qwen_vl_triton_warmup.py:98] Warmed M-RoPE Triton kernels.
+(Worker_TP3_EP3 pid=378) INFO 11-20 21:04:21 [qwen_vl_triton_warmup.py:98] Warmed M-RoPE Triton kernels.
+(Worker_TP0_EP0 pid=275) INFO 11-20 21:04:21 [qwen_vl_triton_warmup.py:98] Warmed M-RoPE Triton kernels.
+[l0-peer-shim pid=349] summary reason=periodic path=loader-tracer alloc_calls=411 tracked=411 freed=0 live=401 owner_allowed=411 peer_preserved=288 peer_suppressed=915 peer_bytes=94208262144 other_passthrough=0
+(Worker_TP2_EP2 pid=349) INFO 11-20 21:04:25 [_xpu_ops.py:175] B70-0023: GDN op mode -> official
+(Worker_TP3_EP3 pid=378) INFO 11-20 21:04:25 [_xpu_ops.py:175] B70-0023: GDN op mode -> official
+(Worker_TP0_EP0 pid=275) INFO 11-20 21:04:25 [_xpu_ops.py:175] B70-0023: GDN op mode -> official
+(Worker_TP1_EP1 pid=296) INFO 11-20 21:04:25 [_xpu_ops.py:175] B70-0023: GDN op mode -> official
+(Worker_TP3_EP3 pid=378) /opt/venv/lib/python3.12/site-packages/torch/distributed/c10d_logger.py:83: FutureWarning: `torch.distributed.all_gather_into_tensor` is deprecated. Please use `torch.distributed.all_gather_single` instead.
+(Worker_TP3_EP3 pid=378)   return func(*args, **kwargs)
+(Worker_TP2_EP2 pid=349) /opt/venv/lib/python3.12/site-packages/torch/distributed/c10d_logger.py:83: FutureWarning: `torch.distributed.all_gather_into_tensor` is deprecated. Please use `torch.distributed.all_gather_single` instead.
+(Worker_TP2_EP2 pid=349)   return func(*args, **kwargs)
+(Worker_TP0_EP0 pid=275) /opt/venv/lib/python3.12/site-packages/torch/distributed/c10d_logger.py:83: FutureWarning: `torch.distributed.all_gather_into_tensor` is deprecated. Please use `torch.distributed.all_gather_single` instead.
+(Worker_TP0_EP0 pid=275)   return func(*args, **kwargs)
+(Worker_TP1_EP1 pid=296) /opt/venv/lib/python3.12/site-packages/torch/distributed/c10d_logger.py:83: FutureWarning: `torch.distributed.all_gather_into_tensor` is deprecated. Please use `torch.distributed.all_gather_single` instead.
+(Worker_TP1_EP1 pid=296)   return func(*args, **kwargs)
+[l0-peer-shim pid=378] summary reason=periodic path=loader-tracer alloc_calls=419 tracked=419 freed=0 live=405 owner_allowed=419 peer_preserved=288 peer_suppressed=915 peer_bytes=94208262144 other_passthrough=0
+[l0-peer-shim pid=275] summary reason=periodic path=loader-tracer alloc_calls=419 tracked=419 freed=0 live=405 owner_allowed=419 peer_preserved=288 peer_suppressed=915 peer_bytes=94208262144 other_passthrough=0
+[l0-peer-shim pid=296] summary reason=periodic path=loader-tracer alloc_calls=419 tracked=419 freed=0 live=405 owner_allowed=419 peer_preserved=288 peer_suppressed=915 peer_bytes=94208262144 other_passthrough=0
+[l0-peer-shim pid=349] summary reason=periodic path=loader-tracer alloc_calls=419 tracked=419 freed=0 live=405 owner_allowed=419 peer_preserved=288 peer_suppressed=915 peer_bytes=94208262144 other_passthrough=0
+(Worker_TP2_EP2 pid=349) INFO 11-20 21:05:19 [prompt_logprob.py:43] B70-0029b: prompt logprobs on Model Runner V2, 128 rows per chunk (first step: 32 rows)
+(Worker_TP3_EP3 pid=378) INFO 11-20 21:05:19 [prompt_logprob.py:43] B70-0029b: prompt logprobs on Model Runner V2, 128 rows per chunk (first step: 32 rows)
+(Worker_TP0_EP0 pid=275) INFO 11-20 21:05:19 [prompt_logprob.py:43] B70-0029b: prompt logprobs on Model Runner V2, 128 rows per chunk (first step: 32 rows)
+(Worker_TP1_EP1 pid=296) INFO 11-20 21:05:19 [prompt_logprob.py:43] B70-0029b: prompt logprobs on Model Runner V2, 128 rows per chunk (first step: 32 rows)
+(EngineCore pid=188) INFO 11-20 21:05:22 [shm_broadcast.py:801] No available shared memory broadcast block found in 60 seconds. This typically happens when some processes are hanging or doing some time-consuming work (e.g. compilation, weight/kv cache quantization).
+(Worker_TP3_EP3 pid=378) /opt/venv/lib/python3.12/site-packages/torch/distributed/c10d_logger.py:83: FutureWarning: `torch.distributed.all_gather_into_tensor` is deprecated. Please use `torch.distributed.all_gather_single` instead.
+(Worker_TP3_EP3 pid=378)   return func(*args, **kwargs)
+(Worker_TP0_EP0 pid=275) /opt/venv/lib/python3.12/site-packages/torch/distributed/c10d_logger.py:83: FutureWarning: `torch.distributed.all_gather_into_tensor` is deprecated. Please use `torch.distributed.all_gather_single` instead.
+(Worker_TP0_EP0 pid=275)   return func(*args, **kwargs)
+(Worker_TP2_EP2 pid=349) /opt/venv/lib/python3.12/site-packages/torch/distributed/c10d_logger.py:83: FutureWarning: `torch.distributed.all_gather_into_tensor` is deprecated. Please use `torch.distributed.all_gather_single` instead.
+(Worker_TP2_EP2 pid=349)   return func(*args, **kwargs)
+(Worker_TP1_EP1 pid=296) /opt/venv/lib/python3.12/site-packages/torch/distributed/c10d_logger.py:83: FutureWarning: `torch.distributed.all_gather_into_tensor` is deprecated. Please use `torch.distributed.all_gather_single` instead.
+(Worker_TP1_EP1 pid=296)   return func(*args, **kwargs)
+[l0-peer-shim pid=349] summary reason=periodic path=loader-tracer alloc_calls=420 tracked=420 freed=0 live=406 owner_allowed=420 peer_preserved=288 peer_suppressed=918 peer_bytes=94233427968 other_passthrough=0
+[l0-peer-shim pid=378] summary reason=periodic path=loader-tracer alloc_calls=420 tracked=420 freed=0 live=406 owner_allowed=420 peer_preserved=288 peer_suppressed=918 peer_bytes=94233427968 other_passthrough=0
+[l0-peer-shim pid=275] summary reason=periodic path=loader-tracer alloc_calls=420 tracked=420 freed=0 live=406 owner_allowed=420 peer_preserved=288 peer_suppressed=918 peer_bytes=94233427968 other_passthrough=0
+(Worker_TP2_EP2 pid=349) INFO 11-20 21:05:29 [gpu_worker.py:888] Free memory on device (29.0/30.3 GiB) on startup. Desired GPU memory utilization is (0.95, 28.78 GiB). Actual usage is 20.07 GiB for consumed memory (weights + non-torch), 1.17 GiB for peak activation, and 0.0 GiB for CUDAGraph memory. Replace gpu_memory_utilization config with `--kv-cache-memory=7940738765` (7.4 GiB) to fit into requested memory, or `--kv-cache-memory=8177741312` (7.62 GiB) to fully utilize gpu memory. Current kv cache memory in use is 7.54 GiB.
+(Worker_TP2_EP2 pid=349) INFO 11-20 21:05:29 [jit_monitor.py:85] Kernel JIT monitor activated; monitored JIT compilations during inference will use mode=warn.
+(Worker_TP0_EP0 pid=275) INFO 11-20 21:05:29 [gpu_worker.py:888] Free memory on device (28.78/30.3 GiB) on startup. Desired GPU memory utilization is (0.95, 28.78 GiB). Actual usage is 20.08 GiB for consumed memory (weights + non-torch), 1.17 GiB for peak activation, and 0.0 GiB for CUDAGraph memory. Replace gpu_memory_utilization config with `--kv-cache-memory=7924567757` (7.38 GiB) to fit into requested memory, or `--kv-cache-memory=7927057920` (7.38 GiB) to fully utilize gpu memory. Current kv cache memory in use is 7.53 GiB.
+(Worker_TP0_EP0 pid=275) INFO 11-20 21:05:29 [jit_monitor.py:85] Kernel JIT monitor activated; monitored JIT compilations during inference will use mode=warn.
+(Worker_TP3_EP3 pid=378) INFO 11-20 21:05:29 [gpu_worker.py:888] Free memory on device (29.0/30.3 GiB) on startup. Desired GPU memory utilization is (0.95, 28.78 GiB). Actual usage is 20.07 GiB for consumed memory (weights + non-torch), 1.17 GiB for peak activation, and 0.0 GiB for CUDAGraph memory. Replace gpu_memory_utilization config with `--kv-cache-memory=7939772109` (7.39 GiB) to fit into requested memory, or `--kv-cache-memory=8176811520` (7.62 GiB) to fully utilize gpu memory. Current kv cache memory in use is 7.54 GiB.
+(Worker_TP3_EP3 pid=378) INFO 11-20 21:05:29 [jit_monitor.py:85] Kernel JIT monitor activated; monitored JIT compilations during inference will use mode=warn.
+(Worker_TP1_EP1 pid=296) INFO 11-20 21:05:29 [gpu_worker.py:888] Free memory on device (29.0/30.3 GiB) on startup. Desired GPU memory utilization is (0.95, 28.78 GiB). Actual usage is 20.07 GiB for consumed memory (weights + non-torch), 1.17 GiB for peak activation, and 0.0 GiB for CUDAGraph memory. Replace gpu_memory_utilization config with `--kv-cache-memory=7940632269` (7.4 GiB) to fit into requested memory, or `--kv-cache-memory=8177647104` (7.62 GiB) to fully utilize gpu memory. Current kv cache memory in use is 7.54 GiB.
+(Worker_TP1_EP1 pid=296) INFO 11-20 21:05:29 [jit_monitor.py:85] Kernel JIT monitor activated; monitored JIT compilations during inference will use mode=warn.
+(Worker_TP0_EP0 pid=275) INFO 11-20 21:05:29 [torch_utils.py:287] Reducing Torch threads from 6 to 1 for serving. Set OMP_NUM_THREADS in the external environment to override.
+(EngineCore pid=188) INFO 11-20 21:05:29 [core.py:379] init engine (profile, create kv cache, warmup model) took 82.46 s
+(EngineCore pid=188) [transformers] Unrecognized keys in `rope_parameters` for 'rope_type'='default': {'mrope_section', 'mrope_interleaved'}
+(EngineCore pid=188) [transformers] Unrecognized keys in `rope_parameters` for 'rope_type'='default': {'mrope_section', 'mrope_interleaved'}
+(EngineCore pid=188) [transformers] Unrecognized keys in `rope_parameters` for 'rope_type'='default': {'mrope_section', 'mrope_interleaved'}
+(EngineCore pid=188) [transformers] Unrecognized keys in `rope_parameters` for 'rope_type'='default': {'mrope_section', 'mrope_interleaved'}
+(EngineCore pid=188) [transformers] Unrecognized keys in `rope_parameters` for 'rope_type'='default': {'mrope_section', 'mrope_interleaved'}
+(EngineCore pid=188) INFO 11-20 21:05:30 [kv_cache_utils.py:748] kv cache group sizes [32768, 32768, 32768, 32768, 32768, 32768, 32768, 32768, 32768, 32768, 32768, 32768, 32768, 32768, 32768, 32768, 32768, 32768, 32768, 32768, 32768, 32768, 32768, 32768, 32768, 32768, 32768, 32768, 32768, 32768, 32768, 32768, 32768, 32768, 32768, 32768, 32768, 832, 832, 832, 832, 832, 832, 832, 832, 832, 832, 832, 832]
+(EngineCore pid=188) INFO 11-20 21:05:30 [kv_cache_utils.py:749] kv lcm block sizes 425984
+[l0-peer-shim pid=963] active scope=large-nonccl-tracked-device-allocation-peer-residency path=loader-tracer pool_ceiling=4194304 report_interval=15s
+(EngineCore pid=188) [transformers] Unrecognized keys in `rope_parameters` for 'rope_type'='default': {'mrope_section', 'mrope_interleaved'}
+(EngineCore pid=188) [transformers] Unrecognized keys in `rope_parameters` for 'rope_type'='default': {'mrope_section', 'mrope_interleaved'}
+(EngineCore pid=188) [transformers] The `use_fast` parameter is deprecated and will be removed in a future version. Use `backend="torchvision"` instead of `use_fast=True`, or `backend="pil"` instead of `use_fast=False`.
+[l0-peer-shim pid=296] summary reason=periodic path=loader-tracer alloc_calls=420 tracked=420 freed=0 live=406 owner_allowed=420 peer_preserved=288 peer_suppressed=918 peer_bytes=94233427968 other_passthrough=0
+(EngineCore pid=188) [transformers] Unrecognized keys in `rope_parameters` for 'rope_type'='default': {'mrope_section', 'mrope_interleaved'}
+(EngineCore pid=188) [transformers] Unrecognized keys in `rope_parameters` for 'rope_type'='default': {'mrope_section', 'mrope_interleaved'}
+(EngineCore pid=188) WARNING 11-20 21:05:35 [vllm.py:1547] Enforce eager set, disabling torch.compile and CUDAGraphs. This is equivalent to setting -cc.mode=none -cc.cudagraph_mode=none
+(EngineCore pid=188) INFO 11-20 21:05:35 [kernel.py:416] Final IR op priority after setting platform defaults: IrOpPriorityConfig(rms_norm=['vllm_c', 'native'], fused_add_rms_norm=['vllm_c', 'native'], gelu_and_mul_sparse=['native'])
+(EngineCore pid=188) INFO 11-20 21:05:35 [vllm.py:1780] Cudagraph is disabled under eager mode
+(EngineCore pid=188) WARNING 11-20 21:05:35 [xpu.py:308] XPU Graph support is experimental and currently only supports single-GPU execution.
+(EngineCore pid=188) INFO 11-20 21:05:35 [compilation.py:336] Enabled custom fusions: norm_quant, act_quant
+(APIServer pid=7) INFO 11-20 21:05:35 [async_llm.py:208] Torch profiler enabled. AsyncLLM CPU traces will be collected under /work/traces
+(APIServer pid=7) INFO 11-20 21:05:35 [wrapper.py:202] Torch profiling enabled. Traces will be saved to: /work/traces
+(APIServer pid=7) INFO 11-20 21:05:35 [entry.py:135] Supported tasks: ['generate']
+(APIServer pid=7) WARNING 11-20 21:05:35 [api_router.py:41] Profiler with mode 'torch' is enabled in the API server. This should ONLY be used for local development!
+(APIServer pid=7) INFO 11-20 21:05:35 [factories.py:76] Scale-out endpoints are disabled. Set --enable-scale-out to enable them.
+(APIServer pid=7) [transformers] Unrecognized keys in `rope_parameters` for 'rope_type'='default': {'mrope_section', 'mrope_interleaved'}
+(APIServer pid=7) [transformers] Unrecognized keys in `rope_parameters` for 'rope_type'='default': {'mrope_section', 'mrope_interleaved'}
+(APIServer pid=7) INFO 11-20 21:05:36 [hf.py:642] Detected the chat template content format to be 'openai'. You can set `--chat-template-content-format` to override this.
+(APIServer pid=7) INFO 11-20 21:05:36 [entry.py:139] Starting vLLM server on http://127.0.0.1:41579
+(APIServer pid=7) INFO 11-20 21:05:36 [launcher.py:61] Available routes are:
+(APIServer pid=7) INFO 11-20 21:05:36 [launcher.py:70] Route: /openapi.json, Methods: GET, HEAD
+(APIServer pid=7) INFO 11-20 21:05:36 [launcher.py:70] Route: /docs, Methods: GET, HEAD
+(APIServer pid=7) INFO 11-20 21:05:36 [launcher.py:70] Route: /docs/oauth2-redirect, Methods: GET, HEAD
+(APIServer pid=7) INFO 11-20 21:05:36 [launcher.py:70] Route: /redoc, Methods: GET, HEAD
+(APIServer pid=7) INFO 11-20 21:05:36 [launcher.py:70] Route: /load, Methods: GET
+(APIServer pid=7) INFO 11-20 21:05:36 [launcher.py:70] Route: /version, Methods: GET
+(APIServer pid=7) INFO 11-20 21:05:36 [launcher.py:70] Route: /health, Methods: GET
+(APIServer pid=7) INFO 11-20 21:05:36 [launcher.py:70] Route: /metrics, Methods: GET
+(APIServer pid=7) INFO 11-20 21:05:36 [launcher.py:70] Route: /start_profile, Methods: POST
+(APIServer pid=7) INFO 11-20 21:05:36 [launcher.py:70] Route: /stop_profile, Methods: POST
+(APIServer pid=7) INFO 11-20 21:05:36 [launcher.py:70] Route: /tokenize, Methods: POST
+(APIServer pid=7) INFO 11-20 21:05:36 [launcher.py:70] Route: /detokenize, Methods: POST
+(APIServer pid=7) INFO 11-20 21:05:36 [launcher.py:70] Route: /v1/models, Methods: GET
+(APIServer pid=7) INFO 11-20 21:05:36 [launcher.py:70] Route: /ping, Methods: GET
+(APIServer pid=7) INFO 11-20 21:05:36 [launcher.py:70] Route: /ping, Methods: POST
+(APIServer pid=7) INFO 11-20 21:05:36 [launcher.py:70] Route: /invocations, Methods: POST
+(APIServer pid=7) INFO 11-20 21:05:36 [launcher.py:70] Route: /v1/chat/completions, Methods: POST
+(APIServer pid=7) INFO 11-20 21:05:36 [launcher.py:70] Route: /v1/chat/completions/batch, Methods: POST
+(APIServer pid=7) INFO 11-20 21:05:36 [launcher.py:70] Route: /v1/responses, Methods: POST
+(APIServer pid=7) INFO 11-20 21:05:36 [launcher.py:70] Route: /v1/responses/{response_id}, Methods: GET
+(APIServer pid=7) INFO 11-20 21:05:36 [launcher.py:70] Route: /v1/responses/{response_id}/cancel, Methods: POST
+(APIServer pid=7) INFO 11-20 21:05:36 [launcher.py:70] Route: /v1/completions, Methods: POST
+(APIServer pid=7) INFO 11-20 21:05:36 [launcher.py:70] Route: /v1/messages, Methods: POST
+(APIServer pid=7) INFO 11-20 21:05:36 [launcher.py:70] Route: /v1/messages/count_tokens, Methods: POST
+(APIServer pid=7) INFO 11-20 21:05:36 [launcher.py:70] Route: /generative_scoring, Methods: POST
+(APIServer pid=7) INFO 11-20 21:05:36 [launcher.py:70] Route: /scale_elastic_ep, Methods: POST
+(APIServer pid=7) INFO 11-20 21:05:36 [launcher.py:70] Route: /is_scaling_elastic_ep, Methods: POST
+(APIServer pid=7) INFO:     Started server process [7]
+(APIServer pid=7) INFO:     Waiting for application startup.
+(APIServer pid=7) INFO:     Application startup complete.
+(APIServer pid=7) INFO:     127.0.0.1:50726 - "GET /health HTTP/1.1" 200 OK
+(APIServer pid=7) INFO 11-20 21:05:36 [api_router.py:23] Starting profiler...
+(Worker_TP0_EP0 pid=275) INFO 11-20 21:05:36 [wrapper.py:202] Torch profiling enabled. Traces will be saved to: /work/traces
+ERROR: External init callback must run in same thread as registerClient (1004529344 != -203350144)
+USDT:2026-11-20 21:05:36 7:975 SyncActivityProfilerHandler.cpp:52] profiler_start
+USDT:2026-11-20 21:05:36 296:296 SyncActivityProfilerHandler.cpp:52] profiler_start
+USDT:2026-11-20 21:05:36 275:275 SyncActivityProfilerHandler.cpp:52] profiler_start
+USDT:2026-11-20 21:05:36 378:378 SyncActivityProfilerHandler.cpp:52] profiler_start
+USDT:2026-11-20 21:05:36 349:349 SyncActivityProfilerHandler.cpp:52] profiler_start
+(APIServer pid=7) INFO 11-20 21:05:36 [api_router.py:25] Profiler started.
+(APIServer pid=7) INFO:     127.0.0.1:50740 - "POST /start_profile HTTP/1.1" 200 OK
+(APIServer pid=7) INFO:     127.0.0.1:50754 - "GET /metrics HTTP/1.1" 200 OK
+[l0-peer-shim pid=349] summary reason=periodic path=loader-tracer alloc_calls=426 tracked=426 freed=0 live=412 owner_allowed=426 peer_preserved=288 peer_suppressed=936 peer_bytes=95397347328 other_passthrough=0
+[l0-peer-shim pid=378] summary reason=periodic path=loader-tracer alloc_calls=426 tracked=426 freed=0 live=412 owner_allowed=426 peer_preserved=288 peer_suppressed=936 peer_bytes=95397347328 other_passthrough=0
+[l0-peer-shim pid=275] summary reason=periodic path=loader-tracer alloc_calls=426 tracked=426 freed=0 live=412 owner_allowed=426 peer_preserved=288 peer_suppressed=936 peer_bytes=95397347328 other_passthrough=0
+(APIServer pid=7) INFO:     127.0.0.1:50756 - "POST /v1/completions HTTP/1.1" 200 OK
+(APIServer pid=7) INFO:     127.0.0.1:35560 - "GET /metrics HTTP/1.1" 200 OK
+(APIServer pid=7) INFO 11-20 21:05:43 [api_router.py:31] Stopping profiler...
+USDT:2026-11-20 21:05:43 7:975 SyncActivityProfilerHandler.cpp:59] profiler_stop
+[l0-peer-shim pid=188] summary reason=periodic path=loader-tracer alloc_calls=8 tracked=8 freed=0 live=4 owner_allowed=8 peer_preserved=24 peer_suppressed=0 peer_bytes=0 other_passthrough=0
+(APIServer pid=7) INFO 11-20 21:05:46 [loggers.py:315] Engine 000: Avg prompt throughput: 179.5 tokens/s, Avg generation throughput: 2.8 tokens/s, Running: 0 reqs, Waiting: 0 reqs, XPU KV cache usage: 0.0%, Prefix cache hit rate: 0.0%
+USDT:2026-11-20 21:05:47 296:296 SyncActivityProfilerHandler.cpp:59] profiler_stop
+USDT:2026-11-20 21:05:47 378:378 SyncActivityProfilerHandler.cpp:59] profiler_stop
+USDT:2026-11-20 21:05:47 349:349 SyncActivityProfilerHandler.cpp:59] profiler_stop
+USDT:2026-11-20 21:05:47 275:275 SyncActivityProfilerHandler.cpp:59] profiler_stop
+[l0-peer-shim pid=296] summary reason=periodic path=loader-tracer alloc_calls=426 tracked=426 freed=0 live=412 owner_allowed=426 peer_preserved=288 peer_suppressed=936 peer_bytes=95397347328 other_passthrough=0
+(APIServer pid=7) -------------------------------------------------------  ------------  ------------  ------------  ------------  ------------  ------------  
+(APIServer pid=7)                                                    Name    Self CPU %      Self CPU   CPU total %     CPU total  CPU time avg    # of Calls  
+(APIServer pid=7) -------------------------------------------------------  ------------  ------------  ------------  ------------  ------------  ------------  
+(APIServer pid=7)                          threading.py(1030): _bootstrap         0.00%       4.729us        75.00%       21.680s        7.227s             3  
+(APIServer pid=7)                    threading.py(1073): _bootstrap_inner         0.00%       7.170us        75.00%       21.680s        7.227s             3  
+(APIServer pid=7)                                 threading.py(1010): run         0.00%       6.365us        75.00%       21.680s        7.227s             3  
+(APIServer pid=7)               concurrent/futures/thread.py(92): _worker         0.00%     242.842us        25.00%        7.227s        7.227s             1  
+(APIServer pid=7)                   concurrent/futures/thread.py(58): run         0.00%      10.735us         0.00%       1.248ms       1.248ms             1  
+(APIServer pid=7)                     vllm/profiler/wrapper.py(97): start         0.00%       1.879us         0.00%       1.168ms       1.168ms             1  
+(APIServer pid=7)               vllm/profiler/wrapper.py(73): _call_start         0.00%       2.924us         0.00%       1.167ms       1.167ms             1  
+(APIServer pid=7)                   vllm/profiler/wrapper.py(321): _start         0.00%      16.513us         0.00%       1.164ms       1.164ms             1  
+(APIServer pid=7)                 torch/profiler/profiler.py(1128): start         0.00%       3.523us         0.00%       1.040ms       1.040ms             1  
+(APIServer pid=7)       torch/profiler/profiler.py(1262): _transit_action         0.00%       3.701us         0.00%       1.036ms       1.036ms             1  
+(APIServer pid=7)            torch/profiler/profiler.py(342): start_trace         0.00%      63.153us         0.00%       1.032ms       1.032ms             1  
+(APIServer pid=7)           torch/autograd/profiler.py(414): _start_trace         0.00%     896.440us         0.00%     907.684us     907.684us             1  
+(APIServer pid=7) vllm/v1/engine/core_client.py(786): monitor_engine_c...         0.00%       7.680us        25.00%        7.227s        7.227s             1  
+(APIServer pid=7) vllm/v1/engine/utils.py(263): monitor_engine_livenes...         0.00%      39.081us        25.00%        7.227s        7.227s             1  
+(APIServer pid=7)               multiprocessing/connection.py(1136): wait         0.00%      72.906us         1.37%     396.347ms     396.347ms             1  
+(APIServer pid=7)                               selectors.py(415): select         1.37%     396.264ms         1.37%     396.264ms     396.264ms             1  
+(APIServer pid=7)               concurrent/futures/thread.py(89): _worker        25.00%        7.227s        25.00%        7.227s        7.227s             1  
+(APIServer pid=7)                                      vllm(10): <module>         0.00%       5.903us        25.00%        7.227s        7.227s             1  
+(APIServer pid=7)                 vllm/entrypoints/cli/main.py(106): main         0.00%      14.110us        25.00%        7.227s        7.227s             1  
+(APIServer pid=7)                 vllm/entrypoints/cli/serve.py(154): cmd         0.00%       7.661us        25.00%        7.227s        7.227s             1  
+(APIServer pid=7)                             uvloop/__init__.py(96): run         0.00%       4.362us        25.00%        7.227s        7.227s             1  
+(APIServer pid=7)                            asyncio/runners.py(194): run         0.00%       2.948us        25.00%        7.227s        7.227s             1  
+(APIServer pid=7)                            asyncio/runners.py(118): run        24.74%        7.152s        25.00%        7.227s        7.227s             1  
+(APIServer pid=7)                     <built-in function perf_counter_ns>         0.00%      11.712us         0.00%      11.712us       5.856us             2  
+(APIServer pid=7)      torch/profiler/profiler.py(538): add_metadata_json         0.00%      20.851us         0.00%      33.220us      11.073us             3  
+(APIServer pid=7) <built-in method _add_metadata_json of pybind11_buil...         0.00%      12.369us         0.00%      12.369us       4.123us             3  
+(APIServer pid=7) <built-in method kineto_available of pybind11_builti...         0.00%       1.160us         0.00%       1.160us       1.160us             1  
+(APIServer pid=7) torch/profiler/profiler.py(554): _get_distributed_in...         0.00%      11.755us         0.00%      32.687us      32.687us             1  
+(APIServer pid=7)         torch/distributed/__init__.py(17): is_available         0.00%       4.334us         0.00%       6.886us       6.886us             1  
+(APIServer pid=7)                             <built-in function hasattr>         0.00%      93.466us         0.00%     117.205us       0.512us           229  
+(APIServer pid=7) torch/distributed/distributed_c10d.py(1394): is_init...         0.00%      10.791us         0.00%      14.046us      14.046us             1  
+(APIServer pid=7)       torch/distributed/distributed_c10d.py(817): WORLD         0.00%       2.713us         0.00%       3.255us       3.255us             1  
+(APIServer pid=7) torch/distributed/distributed_c10d.py(688): default_...         0.00%       0.542us         0.00%       0.542us       0.542us             1  
+(APIServer pid=7)                             <built-in function getattr>         0.01%       3.480ms         0.01%       3.498ms       0.097us         35949  
+(APIServer pid=7) <built-in method items of dict object at 0x78335c423...         0.00%       1.068us         0.00%       1.068us       1.068us             1  
+(APIServer pid=7) vllm/profiler/wrapper.py(295): _maybe_add_version_me...         0.00%      42.409us         0.00%     107.389us     107.389us             1  
+(APIServer pid=7)                            json/__init__.py(183): dumps         0.00%      12.752us         0.00%     153.689us      51.230us             3  
+(APIServer pid=7)                            json/encoder.py(183): encode         0.00%      27.200us         0.00%     140.317us      46.772us             3  
+(APIServer pid=7)                          <built-in function isinstance>         0.00%     778.750us         0.00%     827.392us       0.160us          5163  
+(APIServer pid=7)             <built-in function encode_basestring_ascii>         0.00%       1.424us         0.00%       1.424us       1.424us             1  
+(APIServer pid=7)                        json/encoder.py(205): iterencode         0.00%     107.037us         0.00%     107.037us      53.519us             2  
+(APIServer pid=7)        <built-in method join of str object at 0xb3c3f0>         0.00%       1.172us         0.00%       1.172us       1.172us             1  
+(APIServer pid=7)            concurrent/futures/_base.py(537): set_result         0.00%      17.765us         0.00%      68.601us      68.601us             1  
+(APIServer pid=7)                            threading.py(299): __enter__         0.00%      24.499us         0.00%      36.939us       2.638us            14  
+(APIServer pid=7) <built-in method __enter__ of _thread.RLock object a...         0.00%       7.668us         0.00%       7.668us       1.095us             7  
+(APIServer pid=7)                           threading.py(424): notify_all         0.00%       8.248us         0.00%      13.592us      13.592us             1  
+(APIServer pid=7)                                 <built-in function len>         0.00%     186.127us         0.00%     186.127us       0.116us          1606  
+(APIServer pid=7)                               threading.py(394): notify         0.00%      16.297us         0.00%      34.818us       5.803us             6  
+(APIServer pid=7) <built-in method _is_owned of _thread.RLock object a...         0.00%       0.644us         0.00%       0.644us       0.644us             1  
+(APIServer pid=7)                             threading.py(302): __exit__         0.00%      18.721us         0.00%      23.800us       1.700us            14  
+(APIServer pid=7) <built-in method __exit__ of _thread.RLock object at...         0.00%       4.072us         0.00%       4.072us       0.339us            12  
+(APIServer pid=7)     concurrent/futures/_base.py(337): _invoke_callbacks         0.00%       5.914us         0.00%      26.625us      26.625us             1  
+(APIServer pid=7)                asyncio/futures.py(394): _call_set_state         0.00%      20.012us         0.00%      20.711us      20.711us             1  
+(APIServer pid=7) <built-in method cancelled of _asyncio.Future object...         0.00%       0.699us         0.00%       0.699us       0.699us             1  
+(APIServer pid=7) <built-in method get_nowait of _queue.SimpleQueue ob...         0.00%      17.288us         0.00%      17.288us      17.288us             1  
+(APIServer pid=7)                              threading.py(515): release         0.00%      12.750us         0.00%      43.052us      43.052us             1  
+(APIServer pid=7) <built-in method __enter__ of _thread.lock object at...         0.00%       2.369us         0.00%       2.369us       2.369us             1  
+(APIServer pid=7)                            threading.py(314): _is_owned         0.00%       9.410us         0.00%      14.020us       2.337us             6  
+(APIServer pid=7) <built-in method acquire of _thread.lock object at 0...         0.00%       2.266us         0.00%       2.266us       2.266us             1  
+(APIServer pid=7) <built-in method __exit__ of _thread.lock object at ...         0.00%       1.018us         0.00%       1.018us       1.018us             1  
+(APIServer pid=7) <built-in method get of _queue.SimpleQueue object at...        24.99%        7.225s        24.99%        7.225s        7.225s             1  
+(APIServer pid=7) asyncio/futures.py(311): _set_result_unless_cancelle...         0.00%     360.013us         0.00%     813.959us      11.150us            73  
+(APIServer pid=7) <built-in method cancelled of _asyncio.Future object...         0.00%      97.002us         0.00%      97.002us       1.260us            77  
+(APIServer pid=7) <built-in method set_result of _asyncio.Future objec...         0.00%     560.144us         0.00%     560.144us       3.591us           156  
+(APIServer pid=7)                     asyncio/futures.py(381): _set_state         0.00%      11.908us         0.00%     112.006us     112.006us             1  
+(APIServer pid=7)                   asyncio/base_futures.py(13): isfuture         0.00%      15.150us         0.00%      20.838us       1.736us            12  
+(APIServer pid=7)             asyncio/futures.py(345): _copy_future_state         0.00%      35.539us         0.00%      88.950us      88.950us             1  
+(APIServer pid=7)                  concurrent/futures/_base.py(393): done         0.00%       9.008us         0.00%      22.038us      22.038us             1  
+(APIServer pid=7) <built-in method done of _asyncio.Future object at 0...         0.00%      21.421us         0.00%      21.421us       0.275us            78  
+(APIServer pid=7)             concurrent/futures/_base.py(383): cancelled         0.00%       3.542us         0.00%       6.513us       6.513us             1  
+(APIServer pid=7)             concurrent/futures/_base.py(463): exception         0.00%       5.188us         0.00%       7.239us       7.239us             1  
+(APIServer pid=7)                concurrent/futures/_base.py(428): result         0.00%      10.652us         0.00%      13.453us      13.453us             1  
+(APIServer pid=7)          concurrent/futures/_base.py(398): __get_result         0.00%       0.575us         0.00%       0.575us       0.575us             1  
+(APIServer pid=7)                            uvicorn/server.py(81): serve         0.00%     124.227us         0.01%       1.994ms      27.701us            72  
+(APIServer pid=7)                           uvicorn/server.py(98): _serve         0.00%     111.528us         0.01%       1.870ms      25.976us            72  
+(APIServer pid=7)                       uvicorn/server.py(239): main_loop         0.00%     385.132us         0.01%       1.759ms      24.427us            72  
+(APIServer pid=7)                            asyncio/tasks.py(665): sleep         0.00%     193.900us         0.00%     193.900us       2.656us            73  
+(APIServer pid=7)                         uvicorn/server.py(242): on_tick         0.00%     159.045us         0.00%     337.964us       4.694us            72  
+(APIServer pid=7)                            asyncio/tasks.py(653): sleep         0.00%     832.817us         0.00%     863.914us      11.220us            77  
+(APIServer pid=7)                    <built-in function get_running_loop>         0.00%      46.896us         0.00%      46.896us       0.364us           129  
+(APIServer pid=7)             asyncio/futures.py(387): _call_check_cancel         0.00%       1.898us         0.00%       2.340us       2.340us             1  
+(APIServer pid=7)                       asyncio/threads.py(25): to_thread         0.00%       1.403us         0.00%       1.403us       1.403us             1  
+(APIServer pid=7)                   asyncio/tasks.py(767): _done_callback         0.00%      37.108us         0.00%      47.371us       9.474us             5  
+(APIServer pid=7) <built-in method cancelled of _asyncio.Task object a...         0.00%       1.872us         0.00%       1.872us       0.187us            10  
+(APIServer pid=7) <built-in method exception of _asyncio.Task object a...         0.00%       2.247us         0.00%       2.247us       0.225us            10  
+(APIServer pid=7)                           zmq/asyncio.py(151): <lambda>         0.00%     173.061us         0.02%       4.535ms     129.564us            35  
+(APIServer pid=7)                     zmq/_future.py(670): _handle_events         0.00%     845.569us         0.02%       4.362ms     124.619us            35  
+(APIServer pid=7)                                  enum.py(726): __call__         0.00%     410.877us         0.00%     620.933us       1.069us           581  
+(APIServer pid=7)                                  enum.py(1129): __new__         0.00%     210.056us         0.00%     210.056us       0.362us           581  
+(APIServer pid=7)                                  enum.py(1562): __and__         0.00%     688.903us         0.01%       1.524ms       5.441us           280  
+(APIServer pid=7)                               enum.py(1544): _get_value         0.00%     463.499us         0.00%     746.316us       0.677us          1103  
+(APIServer pid=7)                       zmq/_future.py(586): _handle_recv         0.00%     555.304us         0.01%       2.761ms      78.881us            35  
+(APIServer pid=7) <built-in method popleft of collections.deque object...         0.00%      31.865us         0.00%      31.865us       0.306us           104  
+(APIServer pid=7)                     zmq/_future.py(704): _drop_io_state         0.00%     185.553us         0.00%     620.265us      17.722us            35  
+(APIServer pid=7)                               enum.py(1584): __invert__         0.00%      28.393us         0.00%      40.487us       1.157us            35  
+(APIServer pid=7)                   zmq/sugar/socket.py(376): __setattr__         0.00%     117.875us         0.00%     117.875us       1.684us            70  
+(APIServer pid=7)                    zmq/_future.py(710): _update_handler         0.00%      99.897us         0.00%     484.708us       6.924us            70  
+(APIServer pid=7)         zmq/_future.py(682): _schedule_remaining_events         0.00%     135.818us         0.00%     308.816us       2.941us           105  
+(APIServer pid=7)                             zmq/_future.py(193): cancel         0.00%       5.238us         0.00%       5.238us       0.150us            35  
+(APIServer pid=7)                                   enum.py(1551): __or__         0.00%     176.627us         0.00%     375.047us       4.935us            76  
+(APIServer pid=7) -------------------------------------------------------  ------------  ------------  ------------  ------------  ------------  ------------  
+(APIServer pid=7) Self CPU time total: 28.906s
+(APIServer pid=7) 
+(APIServer pid=7) -------------------------------------------------------  ------------  ------------  ------------  ------------  ------------  ------------  
+(APIServer pid=7)                                                    Name    Self CPU %      Self CPU   CPU total %     CPU total  CPU time avg    # of Calls  
+(APIServer pid=7) -------------------------------------------------------  ------------  ------------  ------------  ------------  ------------  ------------  
+(APIServer pid=7)               concurrent/futures/thread.py(89): _worker        25.00%        7.227s        25.00%        7.227s        7.227s             1  
+(APIServer pid=7) <built-in method get of _queue.SimpleQueue object at...        24.99%        7.225s        24.99%        7.225s        7.225s             1  
+(APIServer pid=7)                            asyncio/runners.py(118): run        24.74%        7.152s        25.00%        7.227s        7.227s             1  
+(APIServer pid=7) <built-in method poll of select.poll object at 0x783...        23.63%        6.830s        23.63%        6.830s     975.706ms             7  
+(APIServer pid=7)                               selectors.py(415): select         1.37%     396.264ms         1.37%     396.264ms     396.264ms             1  
+(APIServer pid=7)                             <built-in function compile>         0.04%      10.172ms         0.04%      10.172ms       5.086ms             2  
+(APIServer pid=7) <built-in method step of tokenizers.decoders.DecodeS...         0.03%       9.608ms         0.03%       9.608ms     300.244us            32  
+(APIServer pid=7)            importlib/metadata/__init__.py(347): __new__         0.02%       4.411ms         0.03%       7.687ms      22.677us           339  
+(APIServer pid=7)                             <built-in function getattr>         0.01%       3.480ms         0.01%       3.498ms       0.097us         35949  
+(APIServer pid=7)                                <built-in function open>         0.01%       1.505ms         0.02%       5.510ms      16.303us           338  
+(APIServer pid=7)                vllm/v1/metrics/loggers.py(1017): record         0.00%       1.142ms         0.01%       3.232ms      95.061us            34  
+(APIServer pid=7)                            pathlib.py(387): _parse_path         0.00%       1.092ms         0.01%       1.745ms       5.240us           333  
+(APIServer pid=7)           torch/autograd/profiler.py(414): _start_trace         0.00%     896.440us         0.00%     907.684us     907.684us             1  
+(APIServer pid=7)                     zmq/_future.py(670): _handle_events         0.00%     845.569us         0.02%       4.362ms     124.619us            35  
+(APIServer pid=7)                            asyncio/tasks.py(653): sleep         0.00%     832.817us         0.00%     863.914us      11.220us            77  
+(APIServer pid=7)                          <built-in function isinstance>         0.00%     778.750us         0.00%     827.392us       0.160us          5163  
+(APIServer pid=7)                                  enum.py(1562): __and__         0.00%     688.903us         0.01%       1.524ms       5.441us           280  
+(APIServer pid=7)          importlib/metadata/__init__.py(811): read_text         0.00%     635.979us         0.03%       8.312ms      24.961us           333  
+(APIServer pid=7)                        functools.py(35): update_wrapper         0.00%     584.293us         0.00%       1.094ms       3.198us           342  
+(APIServer pid=7)                    zmq/_future.py(470): _add_recv_event         0.00%     568.988us         0.01%       2.180ms      62.284us            35  
+(APIServer pid=7) importlib/metadata/_itertools.py(19): unique_eversee...         0.00%     565.971us         0.04%      12.490ms      37.508us           333  
+(APIServer pid=7) <built-in method set_result of _asyncio.Future objec...         0.00%     560.144us         0.00%     560.144us       3.591us           156  
+(APIServer pid=7)                       zmq/_future.py(586): _handle_recv         0.00%     555.304us         0.01%       2.761ms      78.881us            35  
+(APIServer pid=7)                zmq/sugar/socket.py(771): recv_multipart         0.00%     539.205us         0.00%     970.165us      27.719us            35  
+(APIServer pid=7)        vllm/v1/engine/async_llm.py(789): output_handler         0.00%     534.060us         0.06%      16.190ms     476.164us            34  
+(APIServer pid=7) <built-in method __new__ of type object at 0xa42c40>...         0.00%     531.798us         0.00%     552.901us       0.289us          1915  
+(APIServer pid=7) importlib/metadata/__init__.py(826): _normalized_nam...         0.00%     531.357us         0.01%       4.088ms      12.058us           339  
+(APIServer pid=7)                            <frozen posixpath>(71): join         0.00%     497.036us         0.00%     772.342us       2.319us           333  
+(APIServer pid=7)                                pathlib.py(437): __str__         0.00%     495.411us         0.01%       3.886ms       5.783us           672  
+(APIServer pid=7)                               enum.py(1544): _get_value         0.00%     463.499us         0.00%     746.316us       0.677us          1103  
+(APIServer pid=7)     tokenize.py(577): _generate_tokens_from_c_tokenizer         0.00%     444.881us         0.00%     724.364us       1.558us           465  
+(APIServer pid=7)                              inspect.py(1232): getblock         0.00%     434.295us         0.00%       1.266ms     422.073us             3  
+(APIServer pid=7)                    prometheus_client/values.py(27): inc         0.00%     429.618us         0.00%     505.612us       0.949us           533  
+(APIServer pid=7)                               pathlib.py(357): __init__         0.00%     424.057us         0.00%     637.205us       1.914us           333  
+(APIServer pid=7) <built-in method decode of msgspec.msgpack.Decoder o...         0.00%     421.766us         0.00%     456.501us      13.043us            35  
+(APIServer pid=7)                                  enum.py(726): __call__         0.00%     410.877us         0.00%     620.933us       1.069us           581  
+(APIServer pid=7) vllm/v1/engine/output_processor.py(629): process_out...         0.00%     392.069us         0.04%      11.121ms     347.538us            32  
+(APIServer pid=7)                       uvicorn/server.py(239): main_loop         0.00%     385.132us         0.01%       1.759ms      24.427us            72  
+(APIServer pid=7)                            pathlib.py(407): _load_parts         0.00%     369.955us         0.01%       2.948ms       8.854us           333  
+(APIServer pid=7) vllm/v1/engine/core_client.py(1114): process_outputs...         0.00%     365.190us         0.01%       3.580ms     102.283us            35  
+(APIServer pid=7) asyncio/futures.py(311): _set_result_unless_cancelle...         0.00%     360.013us         0.00%     813.959us      11.150us            73  
+(APIServer pid=7)                              <built-in function intern>         0.00%     354.335us         0.00%     354.335us       0.151us          2351  
+(APIServer pid=7)     importlib/metadata/__init__.py(310): _from_text_for         0.00%     349.143us         0.01%       3.312ms       9.946us           333  
+(APIServer pid=7)               importlib/metadata/__init__.py(109): read         0.00%     318.264us         0.00%     539.324us       1.620us           333  
+(APIServer pid=7)                                <built-in function stat>         0.00%     280.811us         0.00%     280.811us       9.058us            31  
+(APIServer pid=7)         importlib/metadata/_functools.py(89): pass_none         0.00%     274.318us         0.01%       1.446ms       4.267us           339  
+(APIServer pid=7)                     collections/__init__.py(447): _make         0.00%     271.012us         0.00%     513.677us       0.736us           698  
+(APIServer pid=7)                                <built-in function exec>         0.00%     271.003us         0.01%       1.929ms     241.097us             8  
+(APIServer pid=7)                  prometheus_client/metrics.py(337): inc         0.00%     248.745us         0.00%     838.465us       2.310us           363  
+(APIServer pid=7)       vllm/v1/metrics/stats.py(455): update_from_output         0.00%     243.129us         0.00%     753.768us      23.555us            32  
+(APIServer pid=7) -------------------------------------------------------  ------------  ------------  ------------  ------------  ------------  ------------  
+(APIServer pid=7) Self CPU time total: 28.906s
+(APIServer pid=7) 
+(APIServer pid=7) INFO 11-20 21:05:48 [wrapper.py:82] Profiler stopped successfully.
+(APIServer pid=7) INFO 11-20 21:05:56 [loggers.py:315] Engine 000: Avg prompt throughput: 0.0 tokens/s, Avg generation throughput: 0.0 tokens/s, Running: 0 reqs, Waiting: 0 reqs, XPU KV cache usage: 0.0%, Prefix cache hit rate: 0.0%

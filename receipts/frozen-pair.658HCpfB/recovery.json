@@ -1,0 +1,38 @@
+[
+  {
+    "source": "receipts/frozen-pair.658HCpfB/vllm-work/traces/dp0_pp0_tp0_dcp0_ep0_rank0.1795208753814554805.pt.trace.json.gz",
+    "target": "receipts/frozen-pair.658HCpfB/recovered/dp0_pp0_tp0_dcp0_ep0_rank0.1795208753814554805.pt.trace.json.gz",
+    "truncated_source": true,
+    "complete_events": {
+      "user_annotation": 9505,
+      "cpu_op": 416931
+    }
+  },
+  {
+    "source": "receipts/frozen-pair.658HCpfB/vllm-work/traces/dp0_pp0_tp1_dcp0_ep1_rank1.1795208753630245485.pt.trace.json.gz",
+    "target": "receipts/frozen-pair.658HCpfB/recovered/dp0_pp0_tp1_dcp0_ep1_rank1.1795208753630245485.pt.trace.json.gz",
+    "truncated_source": true,
+    "complete_events": {
+      "user_annotation": 9505,
+      "cpu_op": 416931
+    }
+  },
+  {
+    "source": "receipts/frozen-pair.658HCpfB/vllm-work/traces/dp0_pp0_tp2_dcp0_ep2_rank2.1795208753599894705.pt.trace.json.gz",
+    "target": "receipts/frozen-pair.658HCpfB/recovered/dp0_pp0_tp2_dcp0_ep2_rank2.1795208753599894705.pt.trace.json.gz",
+    "truncated_source": true,
+    "complete_events": {
+      "user_annotation": 9505,
+      "cpu_op": 416931
+    }
+  },
+  {
+    "source": "receipts/frozen-pair.658HCpfB/vllm-work/traces/dp0_pp0_tp3_dcp0_ep3_rank3.1795208753438671146.pt.trace.json.gz",
+    "target": "receipts/frozen-pair.658HCpfB/recovered/dp0_pp0_tp3_dcp0_ep3_rank3.1795208753438671146.pt.trace.json.gz",
+    "truncated_source": true,
+    "complete_events": {
+      "user_annotation": 9505,
+      "cpu_op": 416931
+    }
+  }
+]
