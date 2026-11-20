@@ -57,3 +57,25 @@ The installed 262K full-and-piecewise TP4/EP4 MTP3 recipe reached readiness and 
 Native causal tile trimming with the FP32 RSAG path enabled saved 203.086 and 41.348 ms in the forward and reverse frozen pairs. The faster arm was 2,141.950 ms prefill, 1,263.3348117369687 prompt tok/s and 48.672344060089934 generated tok/s. The controls had wide spread. Each arm reproduced all frozen IDs. The two chunks each dispatched the trimmed dense path on all 12 layers.
 
 The separate persistent packed HC up/mean fusion with RSAG enabled saved 52.216 and 86.866 ms in reversed frozen pairs. It passed the frozen IDs and verified 96 fused HC mixers per rank in the 2,048-row chunk. Its faster arm was 2,104.990 ms prefill, 1,285.5167958042557 prompt tok/s and 49.01131528979126 generated tok/s. This arm keeps the original BF16 weights and FP32 gates and requires 600 MiB of resident packed weights per rank. The combined build is measured separately, as no timing savings are added across these binaries.
+
+## Combined native prefill candidate
+
+The one-build frozen C1 controls and both feature-on arms used FP32 RSAG. The feature-on arms additionally enabled causal key-tile trimming and persistent packed HC up/mean fusion. Both orders passed all 32 frozen IDs and each stage's dispatch count. Causal trimming ran on all 12 dense layers in both chunks. The HC fusion ran 96 times per rank in the full chunk.
+
+| Order | Control prefill (ms) | Candidate prefill (ms) | Saved (ms) | Candidate generated tok/s | Candidate cold prompt tok/s |
+|---|---:|---:|---:|---:|---:|
+| Control then candidate | 2265.573 | 2054.576 | 210.997 | 49.63732727010713 | 1317.060064947707 |
+| Candidate then control | 2202.568 | 2053.170 | 149.398 | 49.08845898659252 | 1317.9619807419745 |
+
+The fastest prefill remains 1,376.670 ms over the 676.5 ms target. On that same arm, decode is 631.513 ms for 31 timed tokens, leaving 410.084428571 ms to remove for 140 tok/s. The benchmark uses MTP off on the native serving candidate. All 512 routed experts remain assigned across the four GPU ranks.
+
+An uncontended replay of the separate integrated RSAG + split-KV diagnostic passed every frozen ID and 21/33 acceptance at 49.566453424322425 generated and 1,026.6360066970358 cold prompt tok/s. This supersedes the CPU-build-overlapped diagnostic speed sample for that configuration. It is still a diagnostic CLI. The isolated small-M MoE variant dispatched on all 48 routed layers for each four-row verifier call but changed the frozen output at token 23 and changed acceptance to 22/29 over ten rounds. Its several-dozen-millisecond total reduction followed a lower round count. Both the control and rejected trial spent roughly 60.5 ms per completed round. Keep small-M disabled.
+
+Rebuild the measured serving candidate from the pinned base and overlays:
+
+```bash
+bash qfn-enhanced/build-inputs/rebuild.sh prefill-combined /path/to/new-build \
+    "$HOME/AI/GRIMOIRE-qfn-qgate/diagnostics/act-xe2-O5gnlh/sycl-tla"
+```
+
+The unprofiled engine-phase data is under `receipts/frozen-pair.{xnvQ6QCQ,RBKzQByx,V391O9oi,XuHOWmlJ}`. The raw-ID HTTP test measures first visible streamed text separately and uses a local-only endpoint. The combined candidate has a native C++/SYCL execution path. The process mappings show the local GRIMOIRE libraries, oneAPI SYCL/UR, and Level Zero. Benchmark clients and the vLLM reference instrumentation are separate tooling.
