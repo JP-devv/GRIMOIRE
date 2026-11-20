@@ -19,6 +19,9 @@ case $variant in
     coalesced-v) patches=(qfn-split-kv-coalesced-v.patch) ;;
     batch-head) patches=(qfn-verify-batch-head.patch) ;;
     integrated) patches=(qfn-prefill-rsag.patch qfn-prefill-rsag-probe.patch qfn-prefill-rsag-receipt.patch qfn-integrated-split-receipt.patch) ;;
+    causal-tiles) patches=(qfn-prefill-rsag.patch qfn-prefill-rsag-probe.patch qfn-prefill-rsag-receipt.patch qfn-prefill-causal-tiles.patch) ;;
+    hc-up-mean) patches=(qfn-prefill-rsag.patch qfn-prefill-rsag-probe.patch qfn-prefill-rsag-receipt.patch qfn-hc-up-mean.patch) ;;
+    verifier-scratch) patches=(qfn-prefill-rsag.patch qfn-prefill-rsag-probe.patch qfn-prefill-rsag-receipt.patch qfn-integrated-split-receipt.patch qfn-verify-reuse-scratch.patch) ;;
     prefill-rsag) patches=(qfn-prefill-rsag.patch qfn-prefill-rsag-probe.patch qfn-prefill-rsag-receipt.patch) ;;
     *) echo "Unknown variant: $variant" >&2; exit 2 ;;
 esac

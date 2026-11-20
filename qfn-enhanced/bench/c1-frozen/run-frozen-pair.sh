@@ -122,6 +122,24 @@ native() (
             # prefill dispatch counters. It enables no event or fence timing.
             export GRIMOIRE_QFN_MOE_TRACE=1
             ;;
+        causal-off|causal-on)
+            [[ $fixture == frozen && ${PAIR_ORDER:-} == native-only ]]
+            build="$Q/../receipts/causal-tiles-build"
+            [[ $(< "$build/build-causal.exit") == 0 ]]
+            (cd "$build"; sha256sum -c causal-tiles.sha256)
+            NATIVE_BIN=$build/qfn-combined
+            export GRIMOIRE_QFN_PREFILL_RSAG=1 GRIMOIRE_QFN_MOE_TRACE=1 GRIMOIRE_QFN_PREFILL_CAUSAL_TILES=0
+            if [[ $NATIVE_MODE == causal-on ]]; then export GRIMOIRE_QFN_PREFILL_CAUSAL_TILES=1; fi
+            ;;
+        hc-up-off|hc-up-on)
+            [[ $fixture == frozen && ${PAIR_ORDER:-} == native-only ]]
+            build="$Q/../receipts/hc-up-mean-build"
+            [[ $(< "$build/build-up-mean.exit") == 0 ]]
+            (cd "$build"; sha256sum -c hc-up-mean.sha256)
+            NATIVE_BIN=$build/qfn-combined
+            export GRIMOIRE_QFN_PREFILL_RSAG=1 GRIMOIRE_QFN_MOE_TRACE=1 GRIMOIRE_QFN_HC_FUSED_UP=0
+            if [[ $NATIVE_MODE == hc-up-on ]]; then export GRIMOIRE_QFN_HC_FUSED_UP=1; fi
+            ;;
         integrated-mtp3|integrated-profile)
             [[ $fixture == frozen && ${PAIR_ORDER:-} == native-only ]]
             build="$Q/../receipts/integrated-build"
@@ -180,12 +198,20 @@ native() (
                 grep -Eq "^QFN HC fused BF16 rank=$rank rows=2048 calls=[1-9][0-9]*$" "$D/native/r$rank.log"
             done
         fi
-        if [[ ${NATIVE_MODE:-} == rsag-* || ${NATIVE_MODE:-} == integrated-* ]]; then
+        if [[ ${NATIVE_MODE:-} == rsag-* || ${NATIVE_MODE:-} == integrated-* || ${NATIVE_MODE:-} == causal-* || ${NATIVE_MODE:-} == hc-up-* ]]; then
             for rank in 0 1 2 3; do
                 grep -Eq "^QFN Xe2 gate/up: rank=$rank rows=2048 calls=48 output=fp32$" "$D/native/r$rank.log"
                 grep -Eq "^QFN Xe2 down: rank=$rank rows=2048 calls=48 output=fp32$" "$D/native/r$rank.log"
                 if [[ $NATIVE_MODE != rsag-off ]]; then
                     grep -Fxq "QFN prefill RSAG rank=$rank rows=2048 calls=97" "$D/native/r$rank.log"
+                fi
+                if [[ $NATIVE_MODE == causal-on ]]; then
+                    for rows in 2048 658; do
+                        grep -Fxq "QFN prefill causal tiles rank=$rank rows=$rows layers=12" "$D/native/r$rank.log"
+                    done
+                fi
+                if [[ $NATIVE_MODE == hc-up-on ]]; then
+                    grep -Fxq "QFN HC up mean rank=$rank rows=2048 calls=96" "$D/native/r$rank.log"
                 fi
             done
         fi
