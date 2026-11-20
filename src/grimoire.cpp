@@ -2539,6 +2539,7 @@ struct Grimoire {
         int si = 0, s0 = 0, sn = 0;       // a MoE layer's shared expert (Qwen4-Exp)
     } tps;
     std::optional<QfnShardPlan> qfn_tp4_plan;
+    bool qfn_prefix_cache = false;
     std::string tp_mega_refusal() const;
     bool tp_take_rows(DevQuant& d, const std::vector<std::pair<int,int>>& blocks,
                       sycl::queue& owner, std::string& err);
@@ -3357,7 +3358,7 @@ struct Grimoire {
     // pointer.  The recurrent state is different and does need a copy --
     // see save_prefix().
     struct PrefixLayerCache {
-        float *dn = nullptr, *conv = nullptr;
+        float *dn = nullptr, *conv = nullptr, *ple = nullptr;
     };
     struct PrefixCache {
         bool valid = false;
@@ -3457,7 +3458,7 @@ struct Grimoire {
     // read and the restore puts that row's logits back.  Only for callers that take the first token right after the
     // restore (not the interleaved admission, whose chunks let other slots' steps overwrite s.logits).
     int  prefix_reuse(const std::vector<int32_t>& tokens,
-                      const std::vector<bool>* busy = nullptr, bool allow_full = true) const;
+                      const std::vector<bool>* busy = nullptr, bool allow_full = true);
     bool restore_prefix_upto(int n);
     bool save_prefix(const std::vector<int32_t>& tokens, bool output_valid = true);
     int admit_sequence(const std::vector<int32_t>& prompt, const std::vector<bool>& busy,
@@ -3486,6 +3487,9 @@ struct Grimoire {
     // the current slot.  Under TP every rank must end up with the same answer, so the outcome is agreed.
     // with_output: the head is the whole prompt; keep the last row's hidden state and logits too.
     bool save_prefix_head(const std::vector<int32_t>& tokens, bool with_output = false);
+    size_t ple_history_elements() const {
+        return size_t(std::max(1, (cfg.ple_conv_kernel - 1) * cfg.ngram_size)) * cfg.hc_count * cfg.hidden;
+    }
     // Where a prompt's head snapshot goes (0 = none): GRIMOIRE_PREFIX_HEAD_BACK (64) tokens before its end, when at
     // least GRIMOIRE_PREFIX_HEAD_MIN (1024) new tokens are read before it.  The split path: a DFlash drafter, or
     // GRIMOIRE_PREFIX_HEAD_END=0.
@@ -10346,6 +10350,15 @@ bool Grimoire::build(const std::string& dir, const UploadOptions& requested_opt,
         if (!pipe_host) { err = "multiprocess host staging allocation failed"; return false; }
         pipe_host_elems = size_t(H);
         if (!pp_connect(err)) return false;
+        if (qfn_tp4_plan) {
+            const int requested = prefix_cache_enabled() && seq_slots_requested() == 1;
+            int agreed = requested;
+            if (!tp_agree(agreed) || agreed != requested) {
+                err = "QFN TP4: ranks disagree on single-slot prefix caching";
+                return false;
+            }
+            qfn_prefix_cache = requested;
+        }
         if (!peer_copy_setup(err)) return false;
         if (!tp_peer_copy.active() && !tp_peer_push4.active() && !tp_shm_setup(err)) return false;
     }
@@ -10825,23 +10838,10 @@ void Grimoire::clear_seq_slot(int j) {
         prefix_slots[size_t(seq_slot)].valid = false;
         prefix_slots[size_t(seq_slot)].head_valid = false;   // a new conversation overwrites its KV rows
     }
-    const int Hv = cfg.lin_v_heads, Dv = cfg.lin_v_dim, Dk = cfg.lin_k_dim;
-    const int qkv_ch = 2 * cfg.lin_k_heads * cfg.lin_k_dim + Hv * Dv;
     for (auto& d : L) {
-        if (d.dn_state)
-            q.memset(d.dn_state, 0, size_t(Hv) * Dv * Dk * sizeof(float));
-        if (d.conv_ring)
-            q.memset(d.conv_ring, 0, size_t(qkv_ch) * (cfg.conv_kernel - 1) * sizeof(float));
-        // A PLE layer's dilated conv reads (kernel-1)*dilation rows of
-        // history.  Zero is what "before the start of the sequence"
-        // means, and a stale window from the previous request is a wrong
-        // number rather than an error.
-        if (d.ple_hist) {
-            const int state_len = (cfg.ple_conv_kernel - 1) * cfg.ngram_size;
-            q.memset(d.ple_hist, 0,
-                     size_t(state_len > 0 ? state_len : 1) *
-                     size_t(cfg.hc_count) * cfg.hidden * sizeof(float));
-        }
+        if (d.dn_state) q.memset(d.dn_state, 0, d.dn_slot * sizeof(float));
+        if (d.conv_ring) q.memset(d.conv_ring, 0, d.conv_slot * sizeof(float));
+        if (d.ple_hist) q.memset(d.ple_hist, 0, ple_history_elements() * sizeof(float));
     }
     // MTP head KV cache. Nothing outside mtp_draft ever writes it: prefill
     // does not touch it and reset() did not clear it, so a long-lived server
@@ -10890,20 +10890,9 @@ bool Grimoire::prefix_cache_usable() const {
 std::string Grimoire::prefix_cache_unusable_reason() const {
     if (!prefix_cache_enabled()) return "GRIMOIRE_PREFIX_CACHE=0";
     if (cfg.is_muse) return "not usable with Muse";
-    // Qwen4-Exp (external audit, 2026-09-21).  prefill_qwen4_exp()'s own
-    // comment already explains why it never calls save_prefix()/
-    // restore_prefix() itself: the snapshot covers ordinary KV and
-    // DeltaNet state, and knows nothing about the QSA indexer's two key
-    // caches, a PLE layer's conv history, or the q4_tok n-gram history --
-    // so a restored snapshot would be half this conversation and half
-    // whichever one saved it, silently.  That exclusion was deliberate
-    // and specific to prefill_qwen4_exp()'s own call path.  Lifting the
-    // MTP refusal above opened a GENERIC path -- the end-of-request
-    // snapshot in generation.hpp and the growing-prefix restore in
-    // prefill() -- that never routes through prefill_qwen4_exp() at all
-    // and so never saw that exclusion.  Nothing here re-checked it for
-    // the new path; this does.
-    if (cfg.is_qwen4_exp) return "not usable with Qwen4-Exp";
+    // Only dense TP4 Flash-Next has a qualified PLE snapshot path.
+    // Sparse QSA state and speculative draft state require their own restore.
+    if (cfg.is_qwen4_exp && !qfn_prefix_cache) return "Qwen4-Exp caching requires dense single-slot TP4";
     // MTP IS ALLOWED, AND WAS REFUSED FOR A REASON THAT WAS NOT ABOUT IT
     // (rule 13).  The refusal arrived with the F2 fix at 4cdcba8, whose
     // subject was a PP DEADLOCK: an earlier stage cached a prompt the
@@ -10949,7 +10938,8 @@ std::string Grimoire::prefix_cache_unusable_reason() const {
 }
 
 bool Grimoire::save_prefix(const std::vector<int32_t>& tokens, bool output_valid) {
-    if (!prefix_cache_usable() || tokens.empty()) return false;
+    // Flash-Next caches the completed prompt before decode can advance its state.
+    if (qfn_prefix_cache || !prefix_cache_usable() || tokens.empty()) return false;
     const int Hv = cfg.lin_v_heads, Dv = cfg.lin_v_dim, Dk = cfg.lin_k_dim;
     const size_t dn_bytes = size_t(Hv) * Dv * Dk * sizeof(float);
     const size_t conv_bytes = size_t(2 * cfg.lin_k_heads * cfg.lin_k_dim +
@@ -10976,7 +10966,7 @@ bool Grimoire::save_prefix(const std::vector<int32_t>& tokens, bool output_valid
         // on the card a device write through null, not a clean error.
         auto unwind = [&] {
             for (auto& c : prefix_cache.layers)
-                for (float* p : {c.dn, c.conv}) if (p) sycl::free(p, q);
+                for (float* p : {c.dn, c.conv, c.ple}) if (p) sycl::free(p, q);
             prefix_cache.layers.clear();
             if (prefix_cache.hidden) sycl::free(prefix_cache.hidden, q);
             if (prefix_cache.logits) sycl::free(prefix_cache.logits, q);
@@ -11042,7 +11032,7 @@ bool Grimoire::save_prefix(const std::vector<int32_t>& tokens, bool output_valid
 // rewound to an arbitrary point.  The only position it can resume from
 // is the one it was snapshotted at.
 int Grimoire::prefix_reuse(const std::vector<int32_t>& tokens,
-                          const std::vector<bool>* busy, bool allow_full) const {
+                          const std::vector<bool>* busy, bool allow_full) {
     prefix_hit = -1;
     if (!prefix_cache_usable()) return 0;
     int best = 0;
@@ -11072,6 +11062,17 @@ int Grimoire::prefix_reuse(const std::vector<int32_t>& tokens,
         if (n == 0 || (n >= tokens.size() && !whole_ok) || int(n) <= best) continue;
         if (!std::equal(c.head_tokens.begin(), c.head_tokens.end(), tokens.begin())) continue;
         best = int(n); prefix_hit = int(sl); prefix_hit_head = true;
+    }
+    if (qfn_prefix_cache) {
+        // This branch serves one slot, and all four ranks enter from the
+        // serial generation loop. Fall back together if any rank missed.
+        int agreed = best;
+        if (!tp_agree(agreed))
+            throw std::runtime_error("QFN TP4 prefix lookup agreement failed");
+        if (agreed != best) {
+            prefix_hit = -1;
+            return 0;
+        }
     }
     return best;
 }
@@ -11109,10 +11110,6 @@ bool Grimoire::prefix_head_at_end(size_t prompt_len, int reused) const {
 
 bool Grimoire::save_prefix_head(const std::vector<int32_t>& tokens, bool with_output) {
     if (!prefix_cache_usable() || tokens.empty()) return false;
-    const int Hv = cfg.lin_v_heads, Dv = cfg.lin_v_dim, Dk = cfg.lin_k_dim;
-    const size_t dn_bytes = size_t(Hv) * Dv * Dk * sizeof(float);
-    const size_t conv_bytes = size_t(2 * cfg.lin_k_heads * cfg.lin_k_dim +
-        Hv * Dv) * (cfg.conv_kernel - 1) * sizeof(float);
     if (prefix_slots.empty()) prefix_slots.resize(size_t(n_seq_slots));
     int ok = 0;
     if (seq_slot >= 0 && size_t(seq_slot) < prefix_slots.size()) {
@@ -11123,11 +11120,13 @@ bool Grimoire::save_prefix_head(const std::vector<int32_t>& tokens, bool with_ou
             c.head_layers.resize(L.size());
             for (size_t i = 0; i < L.size() && alloc; ++i) {
                 auto& h = c.head_layers[i];
-                if (L[i].dn_state && !(h.dn = sycl::malloc_device<float>(dn_bytes / sizeof(float), q))) alloc = false;
-                if (alloc && L[i].conv_ring && !(h.conv = sycl::malloc_device<float>(conv_bytes / sizeof(float), q))) alloc = false;
+                if (L[i].dn_state && !(h.dn = sycl::malloc_device<float>(L[i].dn_slot, q))) alloc = false;
+                if (alloc && L[i].conv_ring && !(h.conv = sycl::malloc_device<float>(L[i].conv_slot, q))) alloc = false;
+                if (alloc && qfn_prefix_cache && L[i].ple_hist &&
+                    !(h.ple = sycl::malloc_device<float>(ple_history_elements(), q))) alloc = false;
             }
             if (!alloc) {
-                for (auto& h : c.head_layers) for (float* p : {h.dn, h.conv}) if (p) sycl::free(p, q);
+                for (auto& h : c.head_layers) for (float* p : {h.dn, h.conv, h.ple}) if (p) sycl::free(p, q);
                 c.head_layers.clear();
                 std::fprintf(stderr, "  prefix head allocation failed\n");
             }
@@ -11148,11 +11147,18 @@ bool Grimoire::save_prefix_head(const std::vector<int32_t>& tokens, bool with_ou
         if (alloc) {
             for (size_t i = 0; i < L.size(); ++i) {
                 const auto& d = L[i]; auto& h = c.head_layers[i];
-                if (d.dn_state) { q.memcpy(h.dn, d.dn_state, dn_bytes); g_prefix_bytes_copied += long(dn_bytes); }
-                if (d.conv_ring) { q.memcpy(h.conv, d.conv_ring, conv_bytes); g_prefix_bytes_copied += long(conv_bytes); }
+                const auto save = [&](float* dst, const float* src, size_t elements) {
+                    if (!dst) return;
+                    const size_t bytes = elements * sizeof(float);
+                    q.memcpy(dst, src, bytes);
+                    g_prefix_bytes_copied += long(bytes);
+                };
+                save(h.dn, d.dn_state, d.dn_slot);
+                save(h.conv, d.conv_ring, d.conv_slot);
+                save(h.ple, d.ple_hist, ple_history_elements());
             }
             q.wait_and_throw();
-            ok = 1;
+            ok = with_output && !c.head_output ? 0 : 1;
         }
     }
     // Under TP the ranks must agree, or their next admissions would reuse different lengths.  NOT tp_coordinated():
@@ -12122,16 +12128,24 @@ bool Grimoire::restore_prefix_upto(int n) {
         PrefixCache& c = prefix_slots[size_t(prefix_hit)];
         if (!c.head_valid || size_t(n) != c.head_tokens.size() || c.head_layers.size() != L.size()) return false;
         c.used = ++prefix_clock;
-        const int Hv = cfg.lin_v_heads, Dv = cfg.lin_v_dim, Dk = cfg.lin_k_dim;
-        const size_t dn_bytes = size_t(Hv) * Dv * Dk * sizeof(float);
-        const size_t conv_bytes = size_t(2 * cfg.lin_k_heads * cfg.lin_k_dim +
-            Hv * Dv) * (cfg.conv_kernel - 1) * sizeof(float);
         bind_seq_slot(prefix_hit);
         clear_drafter_cache();
         for (size_t i = 0; i < L.size(); ++i) {
             auto& d = L[i]; const auto& h = c.head_layers[i];
-            if (d.dn_state) { q.memcpy(d.dn_state, h.dn, dn_bytes); g_prefix_bytes_copied += long(dn_bytes); }
-            if (d.conv_ring) { q.memcpy(d.conv_ring, h.conv, conv_bytes); g_prefix_bytes_copied += long(conv_bytes); }
+            const auto restore = [&](float* dst, const float* src, size_t elements) {
+                if (!src) return;
+                const size_t bytes = elements * sizeof(float);
+                q.memcpy(dst, src, bytes);
+                g_prefix_bytes_copied += long(bytes);
+            };
+            restore(d.dn_state, h.dn, d.dn_slot);
+            restore(d.conv_ring, h.conv, d.conv_slot);
+            restore(d.ple_hist, h.ple, ple_history_elements());
+        }
+        if (qfn_prefix_cache) {
+            q4_tok_h.resize(size_t(max_seq));
+            std::copy(c.head_tokens.begin(), c.head_tokens.end(), q4_tok_h.begin());
+            q.memcpy(q4_tok, q4_tok_h.data(), size_t(n) * sizeof(int32_t));
         }
         // a head at the prompt's end: its row's hidden state and logits too (an exact repeat reads nothing after
         // this; a longer prompt's prefill overwrites them)
@@ -13017,11 +13031,12 @@ void Grimoire::release() {
     // recurrent state, so a server reloading a model and freeing only the
     // first would leak the rest -- and the rest is where the memory is.
     for (auto& pc : prefix_slots) {
-        for (auto& c : pc.layers)
-            for (void* p : {(void*)c.dn, (void*)c.conv})
-                if (p) sycl::free(p, q);
-        if (pc.hidden) sycl::free(pc.hidden, q);
-        if (pc.logits) sycl::free(pc.logits, q);
+        for (auto* layers : {&pc.layers, &pc.head_layers})
+            for (auto& c : *layers)
+                for (float* p : {c.dn, c.conv, c.ple})
+                    if (p) sycl::free(p, q);
+        for (float* p : {pc.hidden, pc.logits, pc.head_hidden, pc.head_logits})
+            if (p) sycl::free(p, q);
     }
     prefix_slots.clear();
     prefix_hit = -1;
