@@ -10,15 +10,20 @@ case "$variant" in
     baseline) S=$ROOT/qfn-enhanced/build-inputs/combined-c1; manifest=rebuilt.sha256 ;;
     rsag) S=$ROOT/receipts/prefill-rsag-build; manifest=rsag.sha256 ;;
     causal) S=$ROOT/receipts/causal-tiles-build; manifest=causal-tiles.sha256 ;;
-    prefill-combined) S=$ROOT/receipts/prefill-combined-build; manifest=prefill-combined.sha256 ;;
+    prefill-combined)
+        S=${NATIVE_HTTP_BUILD_DIR:-$ROOT/artifacts/prefill-combined}
+        manifest=$ROOT/artifacts/prefill-combined/SHA256SUMS
+        ;;
     hc-up) S=$ROOT/receipts/hc-up-mean-build; manifest=hc-up-mean.sha256 ;;
     *) echo "Unknown native serving variant: $variant" >&2; exit 2 ;;
 esac
-SERVING=/home/haxor/AI/GRIMOIRE-qfn-qgate/diagnostics/act-xe2-tilecut-ab-6IU2nP/serving.sha256
+[[ $manifest = /* ]] || manifest=$S/$manifest
+S=$(realpath -- "$S")
+SERVING=$B/installed-serving.sha256
 D=$(mktemp -d "$ROOT/receipts/native-http.XXXXXXXX")
 echo "$D"
 (cd "$S"; sha256sum -c "$manifest")
-cp "$S/$manifest" "$D/build.sha256"
+cp "$manifest" "$D/build.sha256"
 printf '%s\n' "$variant" > "$D/variant"
 printf '%s\n' "$context" > "$D/context"
 (cd "$B"; sha256sum -c inputs.sha256; python3 checkpoint-lock.py)

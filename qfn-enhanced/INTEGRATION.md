@@ -89,8 +89,12 @@ Use the `prefill-combined` rebuild invocation above to reproduce the package.
 `serving.env` records the effective GRIMOIRE settings. The four-rank
 device placement, socket setup, model argument, Level Zero selector and
 exclusive-window cleanup are in `bench/c1-frozen/run-native-http.sh`
-(relative to this document). Use variant `prefill-combined` and context
-`262144` to reproduce the HTTP smoke.
+(relative to this document). Use `NATIVE_HTTP_VARIANT=prefill-combined` and
+`NATIVE_HTTP_CONTEXT=262144` to reproduce the HTTP smoke. The runner
+uses the package on haxor by default. In a fresh checkout, rebuild and
+set `NATIVE_HTTP_BUILD_DIR` to the rebuild directory. The runner checks
+either directory against the committed package hashes before starting
+any server process.
 
 The final build passed the frozen HTTP gate with one sequence slot at a
 262,144-token configured context. The streamed first visible text took
