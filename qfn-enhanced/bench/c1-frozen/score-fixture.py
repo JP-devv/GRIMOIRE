@@ -77,7 +77,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("request", type=Path)
     parser.add_argument("native_arm", type=Path)
-    parser.add_argument("reference_arm", type=Path)
+    parser.add_argument("reference_arm", type=Path, nargs="?")
     parser.add_argument("--expected-prefix", type=Path)
     args = parser.parse_args()
     request = json.loads(args.request.read_text())
@@ -88,9 +88,12 @@ def main():
         if emitted[:len(expected)] != expected:
             raise ValueError("Frozen output prefix mismatch")
     native = score(*(max(values) for values in zip(*ranks)), len(prompt), output)
-    vllm = score(*read_reference(args.reference_arm, request["model"], prompt, emitted),
-                 len(prompt), output)
-    print(json.dumps({"native": native, "native_rank_seconds": ranks, "vllm": vllm}, indent=2))
+    receipt = {"native": native, "native_rank_seconds": ranks}
+    if args.reference_arm:
+        receipt["vllm"] = score(
+            *read_reference(args.reference_arm, request["model"], prompt, emitted), len(prompt), output
+        )
+    print(json.dumps(receipt, indent=2))
 
 
 if __name__ == "__main__":

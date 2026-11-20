@@ -89,7 +89,7 @@ native() (
     NATIVE_BIN=/tmp/qfn-catchup.pf1/verifier/qfn-verifier
     case "${NATIVE_MODE:-baseline}" in
         baseline)
-            if [[ $fixture == long-decode ]]; then
+            if [[ $fixture != frozen ]]; then
                 build="$Q/../receipts/long-decode-build"
                 [[ $(< "$build/build-long.exit") == 0 ]]
                 (cd "$build"; sha256sum -c long.sha256)
@@ -346,6 +346,13 @@ esac
 sha256sum -c "$SERVING"
 if [[ ${PAIR_ORDER:-} == profile || ${PAIR_ORDER:-} == boundary ]]; then exit 0; fi
 if [[ ${PAIR_ORDER:-} == native-only ]]; then
+    if [[ $fixture != frozen ]]; then
+        score_args=()
+        if [[ $fixture == long-decode ]]; then
+            score_args=(--expected-prefix "$D/fixtures/$fixture.expected-prefix.ids")
+        fi
+        python3 -B "$B/score-fixture.py" "$D/request.json" "$D/native" "${score_args[@]}" > "$D/native-phase.json"
+    fi
     case "${NATIVE_MODE:-}" in
         replay) [[ -s $D/row-replay.txt ]] ;;
         integrated-profile) [[ -s $D/instrumented-stages.txt ]] ;;
