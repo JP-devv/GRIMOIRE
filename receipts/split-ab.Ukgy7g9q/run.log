@@ -1,0 +1,99 @@
+/tmp/qfn-catchup.pf1/verify-attn-profile/qfn-verify-split: OK
+/tmp/qfn-catchup.pf1/verify-attn-profile/verifier-split.cpp: OK
+/tmp/qfn-catchup.pf1/verify-attn-profile/src/qfn_verify_split_plan.hpp: OK
+/tmp/qfn-catchup.pf1/verify-attn-profile/src/attention.cpp: OK
+/tmp/qfn-catchup.pf1/verify-attn-profile/src/verify_attn_profile.hpp: OK
+/tmp/qfn-catchup.pf1/verify-attn-profile/libgrimoire_gemm.so: OK
+/tmp/qfn-catchup.pf1/verify-attn-profile/libgrimoire_attn.so: OK
+/home/haxor/AI/GRIMOIRE-qfn-qgate/diagnostics/act-xe2-tilecut-ab-6IU2nP/obj/cpu_experts.cpp.o: OK
+/home/haxor/AI/GRIMOIRE-qfn-qgate/diagnostics/act-xe2-tilecut-ab-6IU2nP/obj/deltanet.cpp.o: OK
+/home/haxor/AI/GRIMOIRE-qfn-qgate/diagnostics/act-xe2-tilecut-ab-6IU2nP/obj/gemm_fast.o: OK
+/home/haxor/AI/GRIMOIRE-qfn-qgate/diagnostics/act-xe2-tilecut-ab-6IU2nP/obj/gemm_xmx.cpp.o: OK
+/home/haxor/AI/GRIMOIRE-qfn-qgate/diagnostics/act-xe2-tilecut-ab-6IU2nP/obj/gemv_decode.cpp.o: OK
+/home/haxor/AI/GRIMOIRE-qfn-qgate/diagnostics/act-xe2-tilecut-ab-6IU2nP/obj/gguf.cpp.o: OK
+/home/haxor/AI/GRIMOIRE-qfn-qgate/diagnostics/act-xe2-tilecut-ab-6IU2nP/obj/gguf_decode.cpp.o: OK
+/home/haxor/AI/GRIMOIRE-qfn-qgate/diagnostics/act-xe2-tilecut-ab-6IU2nP/obj/gguf_qwen35.cpp.o: OK
+/home/haxor/AI/GRIMOIRE-qfn-qgate/diagnostics/act-xe2-tilecut-ab-6IU2nP/obj/gptq.cpp.o: OK
+/home/haxor/AI/GRIMOIRE-qfn-qgate/diagnostics/act-xe2-tilecut-ab-6IU2nP/obj/grimoire_main.cpp.o: OK
+/home/haxor/AI/GRIMOIRE-qfn-qgate/diagnostics/act-xe2-tilecut-ab-6IU2nP/obj/moe_kernels.cpp.o: OK
+/home/haxor/AI/GRIMOIRE-qfn-qgate/diagnostics/act-xe2-tilecut-ab-6IU2nP/obj/moe_ref.cpp.o: OK
+/home/haxor/AI/GRIMOIRE-qfn-qgate/diagnostics/act-xe2-tilecut-ab-6IU2nP/obj/native_model.cpp.o: OK
+/home/haxor/AI/GRIMOIRE-qfn-qgate/diagnostics/act-xe2-tilecut-ab-6IU2nP/obj/ops.cpp.o: OK
+/home/haxor/AI/GRIMOIRE-qfn-qgate/diagnostics/act-xe2-tilecut-ab-6IU2nP/obj/prefill.cpp.o: OK
+/home/haxor/AI/GRIMOIRE-qfn-qgate/diagnostics/act-xe2-tilecut-ab-6IU2nP/obj/qfn-xe2-bench.o: OK
+/home/haxor/AI/GRIMOIRE-qfn-qgate/diagnostics/act-xe2-tilecut-ab-6IU2nP/obj/quantize.cpp.o: OK
+/home/haxor/AI/GRIMOIRE-qfn-qgate/diagnostics/act-xe2-tilecut-ab-6IU2nP/obj/qwen35_loader.cpp.o: OK
+/home/haxor/AI/GRIMOIRE-qfn-qgate/diagnostics/act-xe2-tilecut-ab-6IU2nP/obj/safetensors.cpp.o: OK
+/home/haxor/AI/GRIMOIRE-qfn-qgate/diagnostics/act-xe2-tilecut-ab-6IU2nP/obj/tiered_moe.cpp.o: OK
+/home/haxor/AI/GRIMOIRE-qfn-qgate/diagnostics/act-xe2-tilecut-ab-6IU2nP/obj/tokenizer.cpp.o: OK
+/home/haxor/AI/GRIMOIRE/bin/grimoire-qfn-grouped-aot: OK
+/home/haxor/AI/GRIMOIRE-qfn-qgate/diagnostics/act-xe2-tilecut-ab-6IU2nP/qfn-xe2-candidate: OK
+/home/haxor/AI/GRIMOIRE-qfn-qgate/diagnostics/act-xe2-tilecut-ab-6IU2nP/xe2/gemm_xe2.hpp: OK
+/home/haxor/AI/GRIMOIRE-qfn-qgate/diagnostics/act-xe2-tilecut-ab-6IU2nP/xe2/gemm_xe2_policy.hpp: OK
+/home/haxor/AI/GRIMOIRE-qfn-qgate/diagnostics/act-xe2-tilecut-ab-6IU2nP/xe2/grouped_gemm_xe2.hpp: OK
+/home/haxor/AI/GRIMOIRE-qfn-qgate/diagnostics/act-moe-fU6ZtS/prompt.ids: OK
+/home/haxor/models/qwen38-w4a16-snapshot/model.safetensors.index.json: OK
+/home/haxor/models/qwen38-w4a16/model.safetensors.index.json: OK
+/home/haxor/AI/GRIMOIRE-qfn-qgate/diagnostics/act-xmx-ab-N8CMZj/grouped-gate/matched-r0.ids: OK
+/home/haxor/AI/GRIMOIRE-qfn-qgate/diagnostics/act-xmx-ab-N8CMZj/grouped-gate/matched-r1.ids: OK
+/home/haxor/AI/GRIMOIRE-qfn-qgate/diagnostics/act-xmx-ab-N8CMZj/grouped-gate/matched-r2.ids: OK
+/home/haxor/AI/GRIMOIRE-qfn-qgate/diagnostics/act-xmx-ab-N8CMZj/grouped-gate/matched-r3.ids: OK
+/tmp/qfn-catchup.pf1/verifier/qfn-verifier: OK
+/home/haxor/AI/GRIMOIRE-qfn-qgate/diagnostics/act-moe-fU6ZtS/prompt.ids: OK
+/home/haxor/models/qwen38-w4a16-snapshot/model.safetensors.index.json: OK
+/home/haxor/models/qwen38-w4a16/model.safetensors.index.json: OK
+/home/haxor/models/qwen38-w4a16-mtp-snapshot/config.json: OK
+/home/haxor/models/qwen38-w4a16-mtp-snapshot/model.safetensors.index.json: OK
+/home/haxor/models/qwen38-w4a16-mtp-snapshot/mtp-dense.safetensors: OK
+/home/haxor/models/qwen38-w4a16-mtp-snapshot/mtp-routed-experts-int4.safetensors: OK
+gate-control rank=0 exit=0
+gate-control rank=1 exit=0
+gate-control rank=2 exit=0
+gate-control rank=3 exit=0
+gate-split rank=0 exit=0
+gate-split rank=1 exit=0
+gate-split rank=2 exit=0
+gate-split rank=3 exit=0
+1-control rank=0 exit=0
+1-control rank=1 exit=0
+1-control rank=2 exit=0
+1-control rank=3 exit=0
+1-split rank=0 exit=0
+1-split rank=1 exit=0
+1-split rank=2 exit=0
+1-split rank=3 exit=0
+2-split rank=0 exit=0
+2-split rank=1 exit=0
+2-split rank=2 exit=0
+2-split rank=3 exit=0
+2-control rank=0 exit=0
+2-control rank=1 exit=0
+2-control rank=2 exit=0
+2-control rank=3 exit=0
+/tmp/qfn-catchup.pf1/verify-attn-profile/qfn-verify-split: OK
+/tmp/qfn-catchup.pf1/verify-attn-profile/verifier-split.cpp: OK
+/tmp/qfn-catchup.pf1/verify-attn-profile/src/qfn_verify_split_plan.hpp: OK
+/tmp/qfn-catchup.pf1/verify-attn-profile/src/attention.cpp: OK
+/tmp/qfn-catchup.pf1/verify-attn-profile/src/verify_attn_profile.hpp: OK
+/tmp/qfn-catchup.pf1/verify-attn-profile/libgrimoire_gemm.so: OK
+/tmp/qfn-catchup.pf1/verify-attn-profile/libgrimoire_attn.so: OK
+/home/haxor/AI/GRIMOIRE-qfn-qgate/diagnostics/act-xe2-tilecut-ab-6IU2nP/qfn-xe2-candidate: OK
+/home/haxor/AI/GRIMOIRE-qfn-qgate/diagnostics/act-xe2-tilecut-ab-6IU2nP/xe2/gemm_xe2.hpp: OK
+/home/haxor/AI/GRIMOIRE-qfn-qgate/diagnostics/act-xe2-tilecut-ab-6IU2nP/xe2/gemm_xe2_policy.hpp: OK
+/home/haxor/AI/GRIMOIRE-qfn-qgate/diagnostics/act-xe2-tilecut-ab-6IU2nP/xe2/grouped_gemm_xe2.hpp: OK
+/home/haxor/AI/GRIMOIRE-qfn-qgate/diagnostics/act-moe-fU6ZtS/prompt.ids: OK
+/home/haxor/models/qwen38-w4a16-snapshot/model.safetensors.index.json: OK
+/home/haxor/models/qwen38-w4a16/model.safetensors.index.json: OK
+/home/haxor/AI/GRIMOIRE-qfn-qgate/diagnostics/act-xmx-ab-N8CMZj/grouped-gate/matched-r0.ids: OK
+/home/haxor/AI/GRIMOIRE-qfn-qgate/diagnostics/act-xmx-ab-N8CMZj/grouped-gate/matched-r1.ids: OK
+/home/haxor/AI/GRIMOIRE-qfn-qgate/diagnostics/act-xmx-ab-N8CMZj/grouped-gate/matched-r2.ids: OK
+/home/haxor/AI/GRIMOIRE-qfn-qgate/diagnostics/act-xmx-ab-N8CMZj/grouped-gate/matched-r3.ids: OK
+/tmp/qfn-catchup.pf1/verifier/qfn-verifier: OK
+/home/haxor/AI/GRIMOIRE-qfn-qgate/diagnostics/act-moe-fU6ZtS/prompt.ids: OK
+/home/haxor/models/qwen38-w4a16-snapshot/model.safetensors.index.json: OK
+/home/haxor/models/qwen38-w4a16/model.safetensors.index.json: OK
+/home/haxor/models/qwen38-w4a16-mtp-snapshot/config.json: OK
+/home/haxor/models/qwen38-w4a16-mtp-snapshot/model.safetensors.index.json: OK
+/home/haxor/models/qwen38-w4a16-mtp-snapshot/mtp-dense.safetensors: OK
+/home/haxor/models/qwen38-w4a16-mtp-snapshot/mtp-routed-experts-int4.safetensors: OK
+/home/haxor/AI/GRIMOIRE/bin/grimoire-qfn-grouped-aot: OK

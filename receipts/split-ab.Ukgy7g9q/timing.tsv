@@ -1,0 +1,5 @@
+arm	prefill_ms	decode_ms	prefill_tok_s	decode_tok_s
+1-control	2988.035	1064.267	905.61	29.13
+1-split	2958.899	606.359	914.53	51.12
+2-split	3015.847	613.485	897.26	50.53
+2-control	2985.119	1074.475	906.50	28.85
