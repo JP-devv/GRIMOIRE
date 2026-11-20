@@ -1,0 +1,154 @@
+[
+  {
+    "rank": 0,
+    "rows": 2048,
+    "host_start_ns": 539679767263229,
+    "stream_union_ms": {
+      "collective_stream_span": 82.74776800000004,
+      "ple-prepare": 7.795833999999999,
+      "hc": 93.15042099999994,
+      "deltanet": 62.07984200000001,
+      "moe": 162.12557400000014,
+      "ple": 2.1861980000000045,
+      "dense-attention": 19.404217000000074,
+      "worker_step": 399.50989599999997
+    },
+    "observed_collective_api_logical_input_bytes": {
+      "all_reduce": 1022361600
+    },
+    "rank_entry_skew_ms": 1.13149
+  },
+  {
+    "rank": 1,
+    "rows": 2048,
+    "host_start_ns": 539679768343904,
+    "stream_union_ms": {
+      "collective_stream_span": 81.61791999999993,
+      "ple-prepare": 7.907709000000004,
+      "hc": 93.81801800000027,
+      "deltanet": 61.666922999999926,
+      "moe": 161.66359999999995,
+      "ple": 2.1971869999999996,
+      "dense-attention": 19.400833000000034,
+      "worker_step": 398.407552
+    },
+    "observed_collective_api_logical_input_bytes": {
+      "all_reduce": 1022361600
+    },
+    "rank_entry_skew_ms": 2.212165
+  },
+  {
+    "rank": 2,
+    "rows": 2048,
+    "host_start_ns": 539679769147174,
+    "stream_union_ms": {
+      "collective_stream_span": 68.35599199999973,
+      "ple-prepare": 7.726875,
+      "hc": 94.60046700000028,
+      "deltanet": 61.45952499999994,
+      "moe": 161.2385959999998,
+      "ple": 2.1919790000000035,
+      "dense-attention": 19.34098999999992,
+      "worker_step": 397.821094
+    },
+    "observed_collective_api_logical_input_bytes": {
+      "all_reduce": 1022361600
+    },
+    "rank_entry_skew_ms": 3.015435
+  },
+  {
+    "rank": 3,
+    "rows": 2048,
+    "host_start_ns": 539679766131739,
+    "stream_union_ms": {
+      "collective_stream_span": 79.80640799999969,
+      "ple-prepare": 8.103437,
+      "hc": 93.92401699999965,
+      "deltanet": 61.522342000000094,
+      "moe": 161.64245000000017,
+      "ple": 2.1683850000000007,
+      "dense-attention": 19.29140799999999,
+      "worker_step": 400.70281299999994
+    },
+    "observed_collective_api_logical_input_bytes": {
+      "all_reduce": 1022361600
+    },
+    "rank_entry_skew_ms": 0.0
+  },
+  {
+    "rank": 0,
+    "rows": 1,
+    "host_start_ns": 539680197907636,
+    "stream_union_ms": {
+      "collective_stream_span": 123.58426799999992,
+      "ple-prepare": 1.2124999999999986,
+      "hc": 7.028596000000004,
+      "deltanet": 66.09978900000004,
+      "moe": 50.335936000000004,
+      "ple": 0.6157290000000017,
+      "dense-attention": 13.690989000000016,
+      "worker_step": 167.319583
+    },
+    "observed_collective_api_logical_input_bytes": {
+      "all_reduce": 499200
+    },
+    "rank_entry_skew_ms": 0.608392
+  },
+  {
+    "rank": 1,
+    "rows": 1,
+    "host_start_ns": 539680208160645,
+    "stream_union_ms": {
+      "collective_stream_span": 102.55292099999991,
+      "ple-prepare": 1.1177080000000004,
+      "hc": 10.147753999999946,
+      "deltanet": 64.34166400000001,
+      "moe": 48.30150699999998,
+      "ple": 0.6057810000000003,
+      "dense-attention": 13.07025700000002,
+      "worker_step": 167.314687
+    },
+    "observed_collective_api_logical_input_bytes": {
+      "all_reduce": 499200
+    },
+    "rank_entry_skew_ms": 10.861401
+  },
+  {
+    "rank": 2,
+    "rows": 1,
+    "host_start_ns": 539680197299244,
+    "stream_union_ms": {
+      "collective_stream_span": 49.49713500000001,
+      "ple-prepare": 1.201823000000001,
+      "hc": 34.49953099999988,
+      "deltanet": 21.531930000000052,
+      "moe": 63.60062299999993,
+      "ple": 0.6322909999999986,
+      "dense-attention": 8.797083999999984,
+      "worker_step": 167.76177099999998
+    },
+    "observed_collective_api_logical_input_bytes": {
+      "all_reduce": 499200
+    },
+    "rank_entry_skew_ms": 0.0
+  },
+  {
+    "rank": 3,
+    "rows": 1,
+    "host_start_ns": 539680208581159,
+    "stream_union_ms": {
+      "collective_stream_span": 102.69681899999992,
+      "ple-prepare": 1.1423960000000015,
+      "hc": 9.287449000000041,
+      "deltanet": 64.729117,
+      "moe": 48.78969000000011,
+      "ple": 0.5977090000000018,
+      "dense-attention": 13.194114000000013,
+      "worker_step": 167.039583
+    },
+    "observed_collective_api_logical_input_bytes": {
+      "all_reduce": 499200
+    },
+    "rank_entry_skew_ms": 11.281915
+  }
+]

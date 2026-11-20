@@ -40,3 +40,18 @@ All four XPU model workers recorded a first scheduler step of exactly 2,048 rows
 | Collective transport | Unmeasured | Record actual logical call shapes and separate queue spans from bytes on the wire |
 
 Whole worker host span was 548.168–553.419 ms. These numbers come from a separate instrumented run and do not enter the parity score. The event-based worker fallback captures smaller current-stream intervals without a large Kineto export.
+
+## Bounded reference worker device events
+
+The smaller event-based fallback passed the known-operation check and then captured all four workers at 2,048 rows and at the first one-row decode step. The returned raw input had exactly 2,048 IDs and no cached prompt tokens. The reference image selected FlashAttention 2, XPU WNA16 MoE, official GDN, TP4/EP4 and FP8 PLE. Installed reference KV is BF16 and native KV is E4M3. The stateful PLE pre-forward and first decode step have different synchronization from the full-chunk layer stages.
+
+| Stage | Native rank 0 fenced full chunk (ms) | Reference four-rank current-stream union (ms) | Deciding experiment |
+|---|---:|---:|---|
+| HC | 470.3 | 93.150–94.601 | Resident exact VNNI down operands, then isolate down/up projections against worker shapes |
+| Dense attention | 276.9 | 19.291–19.405 | Whole-stage dense attention with cache preparation at identical causal boundaries |
+| DeltaNet | 341.7 | 61.459–62.080 | Native QKV and Z/out projection vs convolution and recurrence boundary timings |
+| MoE | 414.8 | 161.238–162.126 | Compare routed-device path and collective separately at identical routing and live expert rows |
+| PLE | 18.5 | 2.168–2.198 layer; 7.726–8.104 prepare | Compare host preparation, H2D staging and gather at matching row-cache state |
+| Collective boundary | 365.214 | 68.355–82.748 | Native full-chunk payload experiment and reference XCCL transport attribution |
+
+Reference whole-step spans were 397.821–400.703 ms, with up to 3.016 ms of host entry skew. The first one-row instrumented step had up to 11.282 ms of host entry skew and is heavily perturbed by instrumentation and first-use work. The reference actually submitted 1,022,361,600 logical bytes per rank through the hooked all-reduce API for the 2,048-row step, consistent with 97 BF16 2,048 × 2,560 reductions. Native's corresponding FP32 logical input is 2,034,237,440 bytes per rank for 97 full-width reductions plus the shape-specific PLE differences. Logical API bytes and requested peer-copy bytes are different measurements. Physical wire bytes and transport-only reference time are unmeasured. Current-stream intervals may include waits on asynchronous work, and collective boundaries are nested within phase spans. Do not add them to the table or credit these profiled times as serving throughput gains.

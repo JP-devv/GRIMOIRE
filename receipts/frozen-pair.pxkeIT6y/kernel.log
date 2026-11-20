@@ -1,0 +1,13 @@
+docker0: port 1(veth4680b74) entered blocking state
+docker0: port 1(veth4680b74) entered disabled state
+veth4680b74: entered allmulticast mode
+veth4680b74: entered promiscuous mode
+eth0: renamed from vethc52c468
+docker0: port 1(veth4680b74) entered blocking state
+docker0: port 1(veth4680b74) entered forwarding state
+docker0: port 1(veth4680b74) entered disabled state
+vethc52c468: renamed from eth0
+docker0: port 1(veth4680b74) entered disabled state
+veth4680b74 (unregistering): left allmulticast mode
+veth4680b74 (unregistering): left promiscuous mode
+docker0: port 1(veth4680b74) entered disabled state
