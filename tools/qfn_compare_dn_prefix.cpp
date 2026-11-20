@@ -1,4 +1,4 @@
-// Localize the Flash-Next layer-1, token-361 DeltaNet/MoE replay.
+// Localize Flash-Next token-361 DeltaNet/MoE replay in layer 0 or 1.
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
@@ -16,9 +16,14 @@ namespace {
 namespace fs = std::filesystem;
 constexpr size_t rows = 512, position = 361, hidden = 2560, key = 16 * 128, value = 48 * 128, heads = 48;
 
+fs::path capture_path(const fs::path& dir, int layer, int rank, const char* name) {
+    return dir / ("l" + std::to_string(layer) + "-p" + std::to_string(position) +
+                  "-r" + std::to_string(rank) + "-" + name + ".bin");
+}
+
 template <class T = float>
-std::vector<T> read(const fs::path& dir, int rank, const char* name, size_t count) {
-    const auto path = dir / ("l1-p361-r" + std::to_string(rank) + "-" + name + ".bin");
+std::vector<T> read(const fs::path& dir, int layer, int rank, const char* name, size_t count) {
+    const auto path = capture_path(dir, layer, rank, name);
     std::ifstream file(path, std::ios::binary);
     std::vector<T> values(count);
     if (!file.read(reinterpret_cast<char*>(values.data()), count * sizeof(T)) ||
@@ -64,7 +69,7 @@ void print(const char* name, int rank, const Delta& d, size_t m) {
     std::cout << '\n';
 }
 
-void compare(const fs::path& root) {
+void compare(const fs::path& root, int layer) {
     const auto ppdir = root / "pp4", tpdir = root / "tp4";
     struct Tap { const char* name; size_t m, width; bool sharded; };
     const Tap taps[] = {
@@ -83,12 +88,12 @@ void compare(const fs::path& root) {
     size_t first_rows = 0;
     Delta first_delta;
     for (const auto& tap : taps) {
-        auto pp = read(ppdir, 0, tap.name, tap.m * tap.width);
+        auto pp = read(ppdir, layer, 0, tap.name, tap.m * tap.width);
         const size_t local = tap.sharded ? tap.width / 4 : tap.width;
         const size_t relevant = tap.m == rows && tap.sharded ? position + 1 : tap.m;
         pp.resize(relevant * tap.width);
         for (int rank = 0; rank < 4; ++rank) {
-            auto tp = read(tpdir, rank, tap.name, tap.m * local);
+            auto tp = read(tpdir, layer, rank, tap.name, tap.m * local);
             tp.resize(relevant * local);
             if (std::strcmp(tap.name, "entry-span") == 0 &&
                 std::memcmp(pp.data(), tp.data(), pp.size() * sizeof(float)) != 0)
@@ -102,21 +107,21 @@ void compare(const fs::path& root) {
     }
     if (first) { std::cout << "first_differing_tap "; print(first, first_rank, first_delta, first_rows); }
     else std::cout << "first_differing_tap none\n";
-    auto rank_partial_sum = read(tpdir, 0, "dn-projection-local", hidden);
+    auto rank_partial_sum = read(tpdir, layer, 0, "dn-projection-local", hidden);
     for (int rank = 1; rank < 4; ++rank) {
-        const auto partial = read(tpdir, rank, "dn-projection-local", hidden);
+        const auto partial = read(tpdir, layer, rank, "dn-projection-local", hidden);
         for (size_t i = 0; i < hidden; ++i) rank_partial_sum[i] += partial[i];
     }
     for (int rank = 0; rank < 4; ++rank) {
-        const auto actual = read(tpdir, rank, "dn-projection-reduced", hidden);
+        const auto actual = read(tpdir, layer, rank, "dn-projection-reduced", hidden);
         print("projection-rank-sum-vs-reduced", rank, delta(rank_partial_sum, actual, 1, hidden, 0, hidden), 1);
     }
     for (const auto& arm : {ppdir, tpdir}) for (int rank = 0; rank < (arm == ppdir ? 1 : 4); ++rank) {
-        const auto logits = read(arm, rank, "logits", 512);
+        const auto logits = read(arm, layer, rank, "logits", 512);
         std::vector<int> ids(logits.size());
         for (size_t i = 0; i < ids.size(); ++i) ids[i] = int(i);
         std::stable_sort(ids.begin(), ids.end(), [&](int a, int b) { return logits[a] > logits[b]; });
-        const auto actual_ids = read<int32_t>(arm, rank, "global", 10);
+        const auto actual_ids = read<int32_t>(arm, layer, rank, "global", 10);
         if (!std::equal(actual_ids.begin(), actual_ids.end(), ids.begin()))
             throw std::runtime_error("captured router IDs disagree with cutoff logits");
         std::cout << arm.filename().string() << " rank=" << rank << " expert10=" << actual_ids.back()
@@ -126,6 +131,9 @@ void compare(const fs::path& root) {
 }
 
 void self_test() {
+    if (capture_path("tp4", 0, 3, "dn-projection-input") != "tp4/l0-p361-r3-dn-projection-input.bin" ||
+        capture_path("pp4", 1, 0, "logits") != "pp4/l1-p361-r0-logits.bin")
+        throw std::runtime_error("capture filenames must carry the selected layer");
     const std::vector<float> pp{1, 2, 3, 4, 5, 6, 7, 8};
     if (delta(pp, {3, 4, 7, 8}, 2, 4, 2, 2).different != 0)
         throw std::runtime_error("rank slice was not compared within each row");
@@ -138,9 +146,10 @@ void self_test() {
 
 int main(int argc, char** argv) {
     try {
-        if (argc != 2) throw std::runtime_error("usage: qfn_compare_dn_prefix DIR|--self-test");
-        if (std::string(argv[1]) == "--self-test") self_test();
-        else compare(argv[1]);
+        if (argc == 2 && std::string(argv[1]) == "--self-test") self_test();
+        else if (argc == 3 && std::string(argv[2]) == "0") compare(argv[1], 0);
+        else if (argc == 2 || (argc == 3 && std::string(argv[2]) == "1")) compare(argv[1], 1);
+        else throw std::runtime_error("usage: qfn_compare_dn_prefix DIR [0|1] | --self-test");
         return 0;
     } catch (const std::exception& e) {
         std::cerr << e.what() << '\n';
