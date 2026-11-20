@@ -1,0 +1,601 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+// Opt-in Linux Intel Level Zero IPC transport. GPU payload stays on GPUs;
+// Unix sockets carry handles and, by default, readiness/consumption messages.
+// The TP4 event prototype uses Level Zero waits, not polling kernels or atomics.
+#pragma once
+#include "b70/ipc_socket.hpp"
+#include <sycl/sycl.hpp>
+#include <sycl/ext/oneapi/backend/level_zero.hpp>
+#include <level_zero/ze_api.h>
+#include <algorithm>
+#include <array>
+#include <chrono>
+#include <cstdint>
+#include <cstdio>
+#include <cstdlib>
+#include <dlfcn.h>
+#include <limits>
+#include <string>
+#include <vector>
+
+namespace b70 {
+class PeerCopy {
+    friend class PeerPush4;
+    struct Api {
+        void* library = nullptr;
+        decltype(&zeDeviceGetProperties) properties = nullptr;
+        decltype(&zeDeviceGetCommandQueueGroupProperties) groups = nullptr;
+        decltype(&zeMemAllocDevice) alloc = nullptr;
+        decltype(&zeMemFree) free = nullptr;
+        decltype(&zeContextMakeMemoryResident) resident = nullptr;
+        decltype(&zeMemGetIpcHandle) get = nullptr;
+        decltype(&zeMemPutIpcHandle) put = nullptr;
+        decltype(&zeMemOpenIpcHandle) open = nullptr;
+        decltype(&zeMemCloseIpcHandle) close = nullptr;
+        decltype(&zeCommandListCreateImmediate) create = nullptr;
+        decltype(&zeCommandListAppendMemoryCopy) copy = nullptr;
+        decltype(&zeCommandListHostSynchronize) sync = nullptr;
+        decltype(&zeCommandListDestroy) destroy = nullptr;
+        decltype(&zeCommandListAppendBarrier) barrier = nullptr;
+        decltype(&zeEventPoolCreate) pool_create = nullptr;
+        decltype(&zeEventPoolDestroy) pool_destroy = nullptr;
+        decltype(&zeEventPoolGetIpcHandle) pool_get = nullptr;
+        decltype(&zeEventPoolPutIpcHandle) pool_put = nullptr;
+        decltype(&zeEventPoolOpenIpcHandle) pool_open = nullptr;
+        decltype(&zeEventPoolCloseIpcHandle) pool_close = nullptr;
+        decltype(&zeEventCreate) event_create = nullptr;
+        decltype(&zeEventDestroy) event_destroy = nullptr;
+        decltype(&zeEventHostReset) event_reset = nullptr;
+        decltype(&zeEventQueryStatus) event_status = nullptr;
+        bool events_ready() const {
+            return barrier && pool_create && pool_destroy && pool_get && pool_put && pool_open && pool_close &&
+                   event_create && event_destroy && event_reset && event_status;
+        }
+        // Leave the default host path free of new loader activity.
+        void load() {
+            if(library) return;
+            library = ::dlopen("libze_loader.so.1", RTLD_NOW | RTLD_LOCAL);
+            if (!library) return;
+#define B70_PEER_SYMBOL(member, symbol) member = reinterpret_cast<decltype(member)>(::dlsym(library, #symbol))
+            B70_PEER_SYMBOL(properties, zeDeviceGetProperties);
+            B70_PEER_SYMBOL(groups, zeDeviceGetCommandQueueGroupProperties);
+            B70_PEER_SYMBOL(alloc, zeMemAllocDevice); B70_PEER_SYMBOL(free, zeMemFree);
+            B70_PEER_SYMBOL(resident, zeContextMakeMemoryResident);
+            B70_PEER_SYMBOL(get, zeMemGetIpcHandle); B70_PEER_SYMBOL(put, zeMemPutIpcHandle);
+            B70_PEER_SYMBOL(open, zeMemOpenIpcHandle); B70_PEER_SYMBOL(close, zeMemCloseIpcHandle);
+            B70_PEER_SYMBOL(create, zeCommandListCreateImmediate);
+            B70_PEER_SYMBOL(copy, zeCommandListAppendMemoryCopy);
+            B70_PEER_SYMBOL(sync, zeCommandListHostSynchronize);
+            B70_PEER_SYMBOL(destroy, zeCommandListDestroy);
+            B70_PEER_SYMBOL(barrier, zeCommandListAppendBarrier);
+            B70_PEER_SYMBOL(pool_create, zeEventPoolCreate); B70_PEER_SYMBOL(pool_destroy, zeEventPoolDestroy);
+            B70_PEER_SYMBOL(pool_get, zeEventPoolGetIpcHandle); B70_PEER_SYMBOL(pool_put, zeEventPoolPutIpcHandle);
+            B70_PEER_SYMBOL(pool_open, zeEventPoolOpenIpcHandle); B70_PEER_SYMBOL(pool_close, zeEventPoolCloseIpcHandle);
+            B70_PEER_SYMBOL(event_create, zeEventCreate); B70_PEER_SYMBOL(event_destroy, zeEventDestroy);
+            B70_PEER_SYMBOL(event_reset, zeEventHostReset); B70_PEER_SYMBOL(event_status, zeEventQueryStatus);
+#undef B70_PEER_SYMBOL
+        }
+        bool ready() const { return properties && groups && alloc && free && resident && get && put && open && close && create && copy && sync && destroy; }
+        ~Api() { if (library) ::dlclose(library); }
+    } api;
+    ze_context_handle_t context = nullptr;
+    ze_device_handle_t device = nullptr;
+    ze_command_list_handle_t copies = nullptr;
+    ze_ipc_mem_handle_t exported{};
+    bool exported_live = false;
+    void* owned = nullptr;
+    void* imported = nullptr;
+    size_t capacity = 0;
+    int socket = -1;
+    bool first = false, enabled = false;
+    uint64_t sequence = 0;
+    struct Hello { uint64_t magic = 0x4752494d50325031ULL; uint64_t bytes = 0; uint32_t mode = 0, available = 0; ze_device_uuid_t uuid{}; };
+    struct Packet { uint64_t seq, bytes; uint32_t kind, format; };
+    bool native_copy(void* dst, const void* src, size_t bytes) {
+        return api.copy(copies, dst, src, bytes, nullptr, 0, nullptr) == ZE_RESULT_SUCCESS &&
+               api.sync(copies, 120000000000ULL) == ZE_RESULT_SUCCESS;
+    }
+    bool exchange_packet(const Packet& own) {
+        Packet peer{};
+        return ipc::exchange(socket, first, own, peer) && peer.seq == own.seq && peer.bytes == own.bytes &&
+               peer.kind == own.kind && peer.format == own.format;
+    }
+    struct Operation {
+        int fd; bool done=false;
+        ~Operation() { if(!done) ::shutdown(fd,SHUT_RDWR); }
+    };
+public:
+    PeerCopy() = default;
+    PeerCopy(const PeerCopy&) = delete;
+    PeerCopy& operator=(const PeerCopy&) = delete;
+    ~PeerCopy() { reset(); }
+    bool active() const { return enabled; }
+    // unset / 0: retain existing host path; auto: use IPC if both imports
+    // succeed; 1 / required: require it. A new backend stays opt-in until
+    // tested on a physically P2P-capable host. No P2P traffic is needed to
+    // decide that a driver's import is unsupported.
+    static int requested_mode() {
+        const char* e = std::getenv("GRIMOIRE_P2P");
+        if (!e || !*e || std::string(e) == "0") return 0;
+        if (std::string(e) == "auto") return 1;
+        if (std::string(e) == "1" || std::string(e) == "required") return 2;
+        return -1;
+    }
+    static size_t requested_capacity() {
+        const char* e = std::getenv("GRIMOIRE_P2P_CHUNK_MB");
+        return size_t(e ? std::clamp(std::atoi(e), 1, 64) : 4) << 20;
+    }
+    // Returns false only for a protocol error or a required but unavailable
+    // path. Both endpoints exchange every decision before choosing fallback.
+    // Each process retains its per-worker ZE_AFFINITY_MASK. The remote device
+    // may be invisible to enumeration; a successful peer IPC import is the
+    // capability check enforced by Level Zero / the kernel in that case.
+    bool setup(sycl::queue& q, int fd, bool initiator, std::string& reason, bool allow_same_device = false) {
+        reset(); socket = fd; first = initiator;
+        Hello own{}, peer{};
+        const int mode = requested_mode(); own.mode = mode < 0 ? 3u : uint32_t(mode);
+        own.bytes = requested_capacity();
+        try {
+            if(mode>0) api.load();
+            if (mode > 0 && api.ready() && q.get_backend() == sycl::backend::ext_oneapi_level_zero) {
+                context = sycl::get_native<sycl::backend::ext_oneapi_level_zero>(q.get_context());
+                device = sycl::get_native<sycl::backend::ext_oneapi_level_zero>(q.get_device());
+                ze_device_properties_t p{}; p.stype = ZE_STRUCTURE_TYPE_DEVICE_PROPERTIES;
+                if (api.properties(device, &p) == ZE_RESULT_SUCCESS && p.vendorId == 0x8086) {
+                    own.uuid = p.uuid; own.available = 1;
+                }
+            }
+        } catch (const std::exception&) { own.available = 0; }
+        if (!ipc::exchange(fd, first, own, peer) || peer.magic != own.magic) { reason = "P2P hello failed"; return false; }
+        if (peer.bytes < (size_t(1) << 20) || peer.bytes > (size_t(64) << 20)) { reason = "P2P invalid chunk size"; return false; }
+        const bool required = own.mode == 2 || peer.mode == 2;
+        if (own.mode == 3 || peer.mode > 2) { reason = "GRIMOIRE_P2P must be 0, auto, or 1 (required)"; return false; }
+        auto unavailable = [&](const char* why) { reason = why; reset(); return !required; };
+        if (!own.mode || !peer.mode) return unavailable("disabled on one or both ranks");
+        if (!own.available || !peer.available) return unavailable("Level Zero IPC API unavailable");
+        if (!allow_same_device && std::memcmp(&own.uuid, &peer.uuid, sizeof own.uuid) == 0)
+            return unavailable("ranks select the same physical GPU");
+        capacity = size_t(std::min(own.bytes, peer.bytes));
+        uint32_t ok = 0, peer_ok = 0;
+        ze_device_mem_alloc_desc_t md{}; md.stype = ZE_STRUCTURE_TYPE_DEVICE_MEM_ALLOC_DESC;
+        if (api.alloc(context, &md, capacity * 2, 65536, device, &owned) == ZE_RESULT_SUCCESS &&
+            api.get(context, owned, &exported) == ZE_RESULT_SUCCESS) {
+            exported_live = true;
+            ok = api.resident(context, device, owned, capacity * 2) == ZE_RESULT_SUCCESS;
+        }
+        if (!ipc::exchange(fd, first, ok, peer_ok)) { reason = "P2P export agreement failed"; return false; }
+        if (!ok || !peer_ok) return unavailable("device allocation export unavailable");
+        // On Intel's Linux Level Zero backend, the first int of the opaque
+        // IPC handle is a dma-buf fd. SCM_RIGHTS translates it to the receiver's
+        // fd table; the remaining opaque bytes are preserved verbatim.
+        ze_ipc_mem_handle_t peer_handle{}; int export_fd = -1, received_fd = -1;
+        std::memcpy(&export_fd, &exported, sizeof export_fd);
+        auto send_handle = [&] { return export_fd >= 0 && ipc::send_fd(fd, export_fd) && ipc::write_all(fd, &exported, sizeof exported); };
+        auto recv_handle = [&] { return ipc::recv_fd(fd, received_fd) && ipc::read_all(fd, &peer_handle, sizeof peer_handle); };
+        const bool handles_ok = first ? send_handle() && recv_handle() : recv_handle() && send_handle();
+        if (!handles_ok) { if (received_fd >= 0) ::close(received_fd); reason = "P2P handle exchange failed"; return false; }
+        std::memcpy(&peer_handle, &received_fd, sizeof received_fd);
+        // Flags 0, not ZE_IPC_MEMORY_FLAG_BIAS_UNCACHED: MEASURED 2026-11-13 (two-process Level Zero test, both
+        // cards enumerated, P2PDMA kernel) -- the uncached import is never resident (0x70000003), the default one
+        // is and 64 KB pushes land correctly (39-47 us).  The copy engine only WRITES through this mapping.
+        ok = api.open(context, device, peer_handle, 0, &imported) == ZE_RESULT_SUCCESS;
+        ::close(received_fd);
+        // The import must be mappable here.  MEASURED 2026-11-13 (Tower, P2PDMA kernel): with one card per
+        // process (ZE_AFFINITY_MASK=r) zeMemOpenIpcHandle succeeds but residency fails (0x70000003) and copies
+        // into the import never run -- both ranks stalled.  With both cards enumerated it maps and works
+        // (docker-entrypoint.sh: GRIMOIRE_MULTI_SEE_ALL=1).  Checked here so that case falls back instead.
+        bool not_resident = false;
+        if (ok && api.resident(context, device, imported, capacity * 2) != ZE_RESULT_SUCCESS) { ok = false; not_resident = true; }
+        if (ok) {
+            uint32_t n = 0; ok = api.groups(device, &n, nullptr) == ZE_RESULT_SUCCESS && n;
+            std::vector<ze_command_queue_group_properties_t> groups(n);
+            for (auto& p : groups) p.stype = ZE_STRUCTURE_TYPE_COMMAND_QUEUE_GROUP_PROPERTIES;
+            if (ok) ok = api.groups(device, &n, groups.data()) == ZE_RESULT_SUCCESS;
+            uint32_t ordinal = n;
+            for (uint32_t i = 0; ok && i < n; ++i)
+                if ((groups[i].flags & ZE_COMMAND_QUEUE_GROUP_PROPERTY_FLAG_COPY) && groups[i].numQueues) { ordinal = i; break; }
+            ze_command_queue_desc_t cd{}; cd.stype = ZE_STRUCTURE_TYPE_COMMAND_QUEUE_DESC;
+            cd.ordinal = ordinal; cd.mode = ZE_COMMAND_QUEUE_MODE_ASYNCHRONOUS;
+            ok = ok && ordinal < n && api.create(context, device, &cd, &copies) == ZE_RESULT_SUCCESS;
+        }
+        if (!ipc::exchange(fd, first, ok, peer_ok)) { reason = "P2P import agreement failed"; return false; }
+        if (!ok || !peer_ok)
+            return unavailable(not_resident ? "peer memory import not resident here (each rank must see both cards: "
+                                              "GRIMOIRE_MULTI_SEE_ALL=1)"
+                                            : "peer IPC import unsupported by driver/topology");
+        enabled = true; reason = "direct Level Zero IPC peer copies";
+        return true;
+    }
+    // Two-rank all-reduce. Each rank snapshots before either reads its peer,
+    // and both acknowledge completion before either reuses the exported slot.
+    // Only owned local memory is accessed by kernels; the copy engine reads
+    // the peer's IPC mapping. No peer-visible flags share the data allocation.
+    bool allreduce(sycl::queue& q, float* data, size_t elems, int rank, bool bf16, const float* host_add = nullptr) {
+        if (!enabled) return false;
+        Operation op{socket};
+        const size_t width = bf16 ? 2 : 4, limit = capacity / width;
+        for (size_t at = 0; at < elems; at += limit) {
+            const size_t n = std::min(limit, elems - at); float* src = data + at;
+            q.wait_and_throw();
+            const float* extra = host_add ? host_add + at : nullptr;
+            auto own = static_cast<uint8_t*>(owned);
+            auto other = own + capacity;
+            if (bf16) {
+                auto out = reinterpret_cast<uint16_t*>(own);
+                q.parallel_for(sycl::range<1>(n), [=](sycl::id<1> i) {
+                    const float v = extra ? src[i] + extra[i] : src[i];
+                    uint32_t u = sycl::bit_cast<uint32_t>(v);
+                    out[i] = uint16_t((u & 0x7fffffffu) > 0x7f800000u ? (u >> 16) | 0x40u :
+                                     (u + 0x7fffu + ((u >> 16) & 1u)) >> 16);
+                }).wait_and_throw();
+            } else if (extra) {
+                auto out = reinterpret_cast<float*>(own);
+                q.parallel_for(sycl::range<1>(n), [=](sycl::id<1> i) { out[i] = src[i] + extra[i]; }).wait_and_throw();
+            }
+            // PUSH (2026-11-13): this rank's copy engine WRITES its partial into the peer's receive half
+            // (imported + capacity) instead of reading the peer's send half.  MEASURED on the Tower (Core
+            // Ultra 200H root complex, custom P2PDMA kernel): peer writes work (64 KB checked, 2.43 GB/s), the
+            // old pull (a P2P read) stalled both ranks in the warm-up with the engines idle.  An fp32 partial
+            // with nothing to add goes straight from src.
+            const void* payload = (bf16 || extra) ? static_cast<const void*>(own) : static_cast<const void*>(src);
+            if (!native_copy(static_cast<uint8_t*>(imported) + capacity, payload, n * width)) return false;
+            const Packet ready{++sequence, n * width, 1, uint32_t(bf16)};
+            if (!exchange_packet(ready)) return false;   // both partials have landed in the receive halves
+            const bool rank0 = rank == 0;
+            if (bf16) {
+                const auto a = reinterpret_cast<const uint16_t*>(rank0 ? own : other);
+                const auto b = reinterpret_cast<const uint16_t*>(rank0 ? other : own);
+                q.parallel_for(sycl::range<1>(n), [=](sycl::id<1> i) {
+                    src[i] = sycl::bit_cast<float>(uint32_t(a[i]) << 16) + sycl::bit_cast<float>(uint32_t(b[i]) << 16);
+                }).wait_and_throw();
+            } else {
+                // fp32 a + b == b + a, so reading this rank's partial in place (src, or own when a CPU partial
+                // was added) gives both ranks the same bits
+                const float* mine = extra ? reinterpret_cast<const float*>(own) : src;
+                const auto peer_part = reinterpret_cast<const float*>(other);
+                q.parallel_for(sycl::range<1>(n), [=](sycl::id<1> i) { src[i] = mine[i] + peer_part[i]; }).wait_and_throw();
+            }
+            // both ranks have read their receive half: the next chunk / call may overwrite it
+            const Packet consumed{sequence, n * width, 2, uint32_t(bf16)};
+            if (!exchange_packet(consumed)) return false;
+        }
+        op.done=true; return true;
+    }
+    bool send(sycl::queue& q, const float* src, size_t elems) {
+        if (!enabled || elems > std::numeric_limits<size_t>::max() / sizeof(float)) return false;
+        Operation op{socket};
+        const size_t bytes = elems * sizeof(float);
+        q.wait_and_throw();
+        for (size_t at = 0; at < bytes; at += capacity) {
+            const size_t n = std::min(capacity, bytes - at);
+            // push into the receiver's buffer (a P2P write; reads of the peer stalled on the Tower, 11-13)
+            if (!native_copy(imported, reinterpret_cast<const uint8_t*>(src) + at, n)) return false;
+            Packet msg{++sequence, n, 3, 0}, ack{};
+            if (!ipc::write_all(socket, &msg, sizeof msg) || !ipc::read_all(socket, &ack, sizeof ack) ||
+                ack.seq != msg.seq || ack.bytes != n || ack.kind != 4 || ack.format != 0) return false;
+        }
+        op.done=true; return true;
+    }
+    bool recv(sycl::queue& q, float* dst, size_t elems) {
+        if (!enabled || elems > std::numeric_limits<size_t>::max() / sizeof(float)) return false;
+        Operation op{socket};
+        const size_t bytes = elems * sizeof(float);
+        q.wait_and_throw();
+        for (size_t at = 0; at < bytes; at += capacity) {
+            const size_t n = std::min(capacity, bytes - at); Packet msg{};
+            if (!ipc::read_all(socket, &msg, sizeof msg) || msg.seq != ++sequence || msg.bytes != n ||
+                msg.kind != 3 || msg.format != 0 || !native_copy(reinterpret_cast<uint8_t*>(dst) + at, owned, n)) return false;
+            const Packet ack{sequence, n, 4, 0};
+            if (!ipc::write_all(socket, &ack, sizeof ack)) return false;
+        }
+        op.done=true; return true;
+    }
+    // Call only after queues have drained and before the owning context dies.
+    void reset() {
+        enabled = false;
+        if (copies) { api.sync(copies, std::numeric_limits<uint64_t>::max()); api.destroy(copies); copies = nullptr; }
+        if (imported) { api.close(context, imported); imported = nullptr; }
+        if (exported_live) { api.put(context, exported); exported_live = false; }
+        if (owned) { api.free(context, owned); owned = nullptr; }
+        capacity = 0; sequence = 0;
+    }
+};
+
+// A receive slot belongs to exactly one sender, and only its owning GPU
+// reads it. The rank-zero hub brokers descriptors but never stages payloads.
+class PeerPush4 {
+    static constexpr uint64_t event_timeout_ns = 3000000000ULL;
+    struct EventLink {
+        // A bounded, one-shot diagnostic. Never reset/reuse a signaled
+        // epoch: a faster rank might arm a wait before its peer resets it.
+        static constexpr unsigned epochs = 4096;
+        struct Epoch { ze_event_handle_t ready{}, consumed{}; };
+        std::vector<Epoch> own, peer;
+        ze_event_pool_handle_t pool{}, imported{};
+        ze_ipc_event_pool_handle_t handle{};
+        bool exported = false;
+
+        bool setup(PeerCopy& l, std::string& why) {
+            auto& a = l.api;
+            auto agree = [&](bool present) {
+                uint32_t other = 0;
+                return ipc::exchange(l.socket, l.first, uint32_t(present), other) && present && other == 1;
+            };
+            why = "IPC event pool export unavailable";
+            const ze_event_pool_desc_t pd{ZE_STRUCTURE_TYPE_EVENT_POOL_DESC, nullptr,
+                                          ZE_EVENT_POOL_FLAG_IPC | ZE_EVENT_POOL_FLAG_HOST_VISIBLE, 2 * epochs};
+            if (a.events_ready() && a.pool_create(l.context, &pd, 0, nullptr, &pool) == ZE_RESULT_SUCCESS)
+                exported = a.pool_get(pool, &handle) == ZE_RESULT_SUCCESS;
+            int export_fd = -1;
+            if (exported) std::memcpy(&export_fd, &handle, sizeof export_fd);
+            if (!agree(export_fd >= 0)) return false;
+
+            why = "IPC event pool handle exchange or import failed";
+            ze_ipc_event_pool_handle_t ph{};
+            int received = -1;
+            const auto send = [&] { return ipc::send_fd(l.socket, export_fd) && ipc::write_all(l.socket, &handle, sizeof handle); };
+            const auto recv = [&] { return ipc::recv_fd(l.socket, received) && ipc::read_all(l.socket, &ph, sizeof ph); };
+            const bool exchanged = l.first ? send() && recv() : recv() && send();
+            if (exchanged) std::memcpy(&ph, &received, sizeof received);
+            bool ok = exchanged && a.pool_open(l.context, ph, &imported) == ZE_RESULT_SUCCESS;
+            if (received >= 0) ::close(received);
+            const auto create = [&](ze_event_pool_handle_t p, auto& out) {
+                ze_event_desc_t ed{ZE_STRUCTURE_TYPE_EVENT_DESC, nullptr, 0,
+                                   ZE_EVENT_SCOPE_FLAG_DEVICE | ZE_EVENT_SCOPE_FLAG_HOST, ZE_EVENT_SCOPE_FLAG_DEVICE};
+                out.resize(epochs);
+                for (auto& epoch : out) {
+                    if (a.event_create(p, &ed, &epoch.ready) != ZE_RESULT_SUCCESS) return false;
+                    ++ed.index;
+                    if (a.event_create(p, &ed, &epoch.consumed) != ZE_RESULT_SUCCESS) return false;
+                    ++ed.index;
+                }
+                return true;
+            };
+            if (!agree(ok && create(pool, own) && create(imported, peer))) return false;
+
+            // Check remote visibility of a GPU signal before cross-rank waits.
+            why = "IPC device-signal visibility probe failed";
+            ok = a.barrier(l.copies, own[0].ready, 0, nullptr) == ZE_RESULT_SUCCESS &&
+                 a.sync(l.copies, event_timeout_ns) == ZE_RESULT_SUCCESS;
+            if (!agree(ok) || !agree(a.event_status(peer[0].ready) == ZE_RESULT_SUCCESS)) return false;
+            return agree(a.event_reset(own[0].ready) == ZE_RESULT_SUCCESS);
+        }
+
+        void reset(PeerCopy& l) {
+            auto& a = l.api;
+            for (auto* events : {&peer, &own}) for (auto& e : *events) {
+                if (e.ready) a.event_destroy(e.ready);
+                if (e.consumed) a.event_destroy(e.consumed);
+                e = {};
+            }
+            peer.clear(); own.clear();
+            if (imported) { a.pool_close(imported); imported = nullptr; }
+            if (exported) { a.pool_put(l.context, handle); exported = false; }
+            if (pool) { a.pool_destroy(pool); pool = nullptr; }
+        }
+    };
+    std::array<PeerCopy, 4> links;
+    std::array<EventLink, 4> events;
+    ze_event_pool_handle_t bridge_pool{};
+    std::vector<ze_event_handle_t> bridge;
+    std::array<int, 4> fds{-1, -1, -1, -1};
+    uint64_t sequence_ = 0;
+    bool enabled = false, use_events = false, broken = false;
+    int rank_ = -1;
+
+    void disconnect() {
+        broken = true;
+        for (int fd : fds) if (fd >= 0) ::shutdown(fd, SHUT_RDWR);
+    }
+
+    sycl::event sum(sycl::queue& q, float* local, size_t n, const std::array<const float*, 4>& src,
+                    const std::vector<sycl::event>& deps = {}) {
+        return q.submit([&](sycl::handler& h) {
+            h.depends_on(deps);
+            // Preserve the socket/host arithmetic association exactly.
+            h.parallel_for(sycl::range<1>(n), [=](sycl::id<1> i) {
+                float acc = src[0][i] + src[1][i];
+                acc = acc + src[2][i];
+                local[i] = acc + src[3][i];
+            });
+        });
+    }
+
+    bool event_push(sycl::queue& q, float* local, size_t n, int rank,
+                    const std::array<const float*, 4>& src) {
+        constexpr auto backend = sycl::backend::ext_oneapi_level_zero;
+        if (sequence_ == EventLink::epochs) {
+            std::fprintf(stderr, "TP4 IPC event diagnostic exhausted its %u non-reusable chunk epochs\n", EventLink::epochs);
+            return false;
+        }
+        const size_t slot = sequence_;
+        const auto context = q.get_context();
+        std::array<ze_event_handle_t, 6> ready{};
+        size_t next_ready = 0;
+        for (int p = 0; p < 4; ++p) if (p != rank) {
+            auto& l = links[p];
+            auto& e = events[p];
+            auto& s = e.own[slot];
+            auto* dst = static_cast<uint8_t*>(l.imported) + l.capacity;
+            ze_event_handle_t* wait = slot ? &e.peer[slot - 1].consumed : nullptr;
+            if (l.api.copy(l.copies, dst, local, n * sizeof(float), s.ready, wait != nullptr, wait) != ZE_RESULT_SUCCESS)
+                return false;
+            ready[next_ready++] = s.ready;
+            ready[next_ready++] = e.peer[slot].ready;
+        }
+        // Keep the six IPC dependencies in Level Zero. The compute queue
+        // imports only the local event from the native join on the first list.
+        auto& signal = links[rank == 0 ? 1 : 0];
+        if (signal.api.barrier(signal.copies, bridge[slot], uint32_t(ready.size()), ready.data()) != ZE_RESULT_SUCCESS)
+            return false;
+        using sycl::ext::oneapi::level_zero::ownership;
+        auto gathered = sycl::make_event<backend>({bridge[slot], ownership::keep}, context);
+        auto sum_event = sum(q, local, n, src, {gathered});
+        auto native = sycl::get_native<backend>(sum_event);
+        for (int p = 0; p < 4; ++p) if (p != rank) {
+            if (signal.api.barrier(signal.copies, events[p].own[slot].consumed, 1, &native) != ZE_RESULT_SUCCESS)
+                return false;
+        }
+        // The native signal fence proves the sum retired; do not return a
+        // live reduction or reset its events while SYCL still uses them.
+        if (signal.api.sync(signal.copies, event_timeout_ns) != ZE_RESULT_SUCCESS) return false;
+        sum_event.wait_and_throw();
+        ++sequence_;
+        return true;
+    }
+public:
+    ~PeerPush4() { reset(); }
+    bool active() const { return enabled; }
+    uint64_t sequence() const { return sequence_; }
+    void enable() { enabled = true; }
+
+    bool setup(sycl::queue& q, const std::vector<int>& hub, int rank, std::string& reason,
+               bool ipc_events = false) {
+        reset();
+        rank_ = rank;
+        use_events = ipc_events;
+        // Rank 0 creates every pair in fixed order. Each other rank receives
+        // endpoints in peer order from its existing rank-zero connection.
+        if (rank == 0) {
+            for (int a = 0; a < 4; ++a) for (int b = a + 1; b < 4; ++b) {
+                int pair[2];
+                if (::socketpair(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0, pair) != 0) {
+                    reason = "cannot allocate TP4 peer socket pair";
+                    return false;
+                }
+                const bool sent_a = a == 0 || ipc::send_fd(hub[a], pair[0]);
+                if (a == 0) fds[b] = pair[0]; else ::close(pair[0]);
+                const bool sent_b = ipc::send_fd(hub[b], pair[1]);
+                ::close(pair[1]);
+                if (!sent_a || !sent_b) { reason = "cannot send TP4 peer socket"; return false; }
+            }
+        } else {
+            for (int peer = 0; peer < 4; ++peer) if (peer != rank && !ipc::recv_fd(hub[0], fds[peer])) {
+                reason = "cannot receive TP4 peer socket";
+                return false;
+            }
+        }
+        bool available = true;
+        for (int peer = 0; peer < 4; ++peer) if (peer != rank) {
+            std::string why;
+            if (!links[peer].setup(q, fds[peer], rank < peer, why) || !links[peer].active() ||
+                (use_events && !events[peer].setup(links[peer], why))) {
+                if (available) reason = "rank " + std::to_string(peer) + ": " + why;
+                available = false;
+            }
+        }
+        if (!available || !use_events) return available;
+        auto& signal = links[rank == 0 ? 1 : 0];
+        const ze_event_pool_desc_t pd{ZE_STRUCTURE_TYPE_EVENT_POOL_DESC, nullptr,
+                                      ZE_EVENT_POOL_FLAG_HOST_VISIBLE, EventLink::epochs};
+        reason = "cannot allocate local IPC ready join events";
+        if (signal.api.pool_create(signal.context, &pd, 1, &signal.device, &bridge_pool) != ZE_RESULT_SUCCESS)
+            return false;
+        bridge.resize(EventLink::epochs);
+        for (unsigned i = 0; i < EventLink::epochs; ++i) {
+            const ze_event_desc_t ed{ZE_STRUCTURE_TYPE_EVENT_DESC, nullptr, i,
+                                     ZE_EVENT_SCOPE_FLAG_DEVICE | ZE_EVENT_SCOPE_FLAG_HOST, ZE_EVENT_SCOPE_FLAG_DEVICE};
+            if (signal.api.event_create(bridge_pool, &ed, &bridge[i]) != ZE_RESULT_SUCCESS) return false;
+        }
+        return true;
+    }
+
+    struct Timing {
+        size_t calls = 0;
+        double drain_ms = 0, copy_ms = 0, ready_ms = 0, sum_ms = 0, reuse_ms = 0;
+    };
+    // When recording timings the caller has already drained the queue.
+    bool allreduce(sycl::queue& q, float* data, size_t elems, int rank, Timing* timing = nullptr,
+                   bool fanout = false) {
+        if (!enabled || broken || (use_events && timing)) return false;
+        const auto exchange = [&](const PeerCopy::Packet& own) {
+            if (fanout) return ipc::exchange_small_fanout(fds, rank, own, [](const auto& a, const auto& b) {
+                return a.seq == b.seq && a.bytes == b.bytes && a.kind == b.kind && a.format == b.format;
+            });
+            for (int peer = 0; peer < 4; ++peer)
+                if (peer != rank && !links[peer].exchange_packet(own)) return false;
+            return true;
+        };
+        using Clock = std::chrono::steady_clock;
+        auto lap = timing ? Clock::now() : Clock::time_point{};
+        auto record = [&](double Timing::*bucket) {
+            if (!timing) return;
+            const auto now = Clock::now();
+            timing->*bucket += std::chrono::duration<double, std::milli>(now - lap).count();
+            lap = now;
+        };
+        struct Guard {
+            PeerPush4& transport;
+            bool done = false;
+            ~Guard() { if (!done) transport.disconnect(); }
+        } guard{*this};
+        const size_t limit = links[rank == 0 ? 1 : 0].capacity / sizeof(float);
+        if (!timing) q.wait_and_throw();
+        for (size_t at = 0; at < elems; at += limit) {
+            const size_t n = std::min(limit, elems - at), bytes = n * sizeof(float);
+            float* const local = data + at;
+            std::array<const float*, 4> src{};
+            src[rank] = local;
+            for (int peer = 0; peer < 4; ++peer) if (peer != rank)
+                src[peer] = reinterpret_cast<const float*>(static_cast<uint8_t*>(links[peer].owned) + links[peer].capacity);
+            if (use_events) {
+                if (!event_push(q, local, n, rank, src)) {
+                    std::fprintf(stderr, "TP4 IPC event submission/completion failed: rank=%d chunk=%llu\n",
+                                 rank, static_cast<unsigned long long>(sequence_));
+                    return false;
+                }
+                continue;
+            }
+            bool copies_ok = true;
+            for (int peer = 0; peer < 4; ++peer) if (peer != rank) {
+                auto& link = links[peer];
+                auto* const dst = static_cast<uint8_t*>(link.imported) + link.capacity;
+                if (link.api.copy(link.copies, dst, local, bytes, nullptr, 0, nullptr) != ZE_RESULT_SUCCESS)
+                    copies_ok = false;
+            }
+            for (int peer = 0; peer < 4; ++peer) if (peer != rank) {
+                auto& link = links[peer];
+                if (link.api.sync(link.copies, 120000000000ULL) != ZE_RESULT_SUCCESS) copies_ok = false;
+            }
+            if (!copies_ok) return false;
+            record(&Timing::copy_ms);
+            const PeerCopy::Packet ready{++sequence_, bytes, 1, 0};
+            if (!exchange(ready)) return false;
+            record(&Timing::ready_ms);
+            sum(q, local, n, src).wait_and_throw();
+            record(&Timing::sum_ms);
+            const PeerCopy::Packet consumed{sequence_, bytes, 2, 0};
+            if (!exchange(consumed)) return false;
+            record(&Timing::reuse_ms);
+        }
+        if (timing) ++timing->calls;
+        guard.done = true;
+        return true;
+    }
+
+    void reset() {
+        if (enabled && use_events && !broken) {
+            // Don't release an export while a peer may still consume its
+            // final ready event. This is not on the reduction path.
+            const PeerCopy::Packet done{sequence_, 0, 3, 0};
+            if (!ipc::exchange_small_fanout(fds, rank_, done, [](const auto& a, const auto& b) {
+                    return a.seq == b.seq && a.kind == b.kind;
+                })) disconnect();
+        }
+        enabled = use_events = broken = false;
+        sequence_ = 0;
+        if (bridge_pool) {
+            auto& signal = links[rank_ == 0 ? 1 : 0];
+            for (auto e : bridge) if (e) signal.api.event_destroy(e);
+            bridge.clear();
+            signal.api.pool_destroy(bridge_pool);
+            bridge_pool = nullptr;
+        }
+        for (int p = 0; p < 4; ++p) {
+            events[p].reset(links[p]);
+            links[p].reset();
+        }
+        for (int& fd : fds) if (fd >= 0) { ::close(fd); fd = -1; }
+    }
+};
+} // namespace b70

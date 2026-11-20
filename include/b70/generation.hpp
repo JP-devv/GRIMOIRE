@@ -57,12 +57,21 @@ struct GenerationTiming {
     Clock::time_point start{}, prompt_ready{}, first_token{}, last_token{};
     size_t prefill_tokens = 0;
 };
+struct GreedySpecCommit {
+    int start, rows, next_token;
+    bool verified;
+};
 struct GenerationOptions {
     int max_tokens=0, eos=-1, eot=-1, draft_depth=0;
     bool dflash=false, mtp=false, graph=false;
     // Optional; nothing is recorded when null.
     SpecStats* stats=nullptr;
     GenerationTiming* timing=nullptr;
+    // Ranked engines agree before any live recurrent/KV state is committed.
+    std::function<bool(const GreedySpecCommit&)> agree_greedy_commit{};
+    // CLI diagnostics and host tests only. Substitute the proposal source,
+    // not the verifier, rank agreement, or recurrent commit.
+    std::function<int32_t(int32_t, int, bool)> diagnostic_draft{};
 };
 inline int generation_budget(const std::vector<int32_t>& ids, int requested, int capacity, int vocab) {
     if(ids.empty())throw std::invalid_argument("prompt must contain at least one token");
@@ -90,6 +99,8 @@ int generate_tokens(Engine& e, const std::vector<int32_t>& prompt,
                     const std::function<bool(int32_t)>& callback,
                     FinishReason& reason) {
     out.clear();reason=FinishReason::Length;
+    if(o.diagnostic_draft && (o.mtp || o.dflash))
+        throw std::invalid_argument("diagnostic proposals require real drafting off");
     o.max_tokens=generation_budget(prompt,o.max_tokens,e.max_seq,e.cfg.vocab);
     if(!o.max_tokens)return 0;
     if(o.timing) {
@@ -307,7 +318,7 @@ int generate_tokens(Engine& e, const std::vector<int32_t>& prompt,
         std::vector<int32_t> unused;
         if(!e.dflash_draft(0,e.pos,unused,true))throw std::runtime_error("DFlash context preparation failed");
     }
-    if(o.graph && !o.dflash && !o.mtp && !e.graph_ok)e.build_graph();
+    if(o.graph && !o.dflash && !o.mtp && !o.diagnostic_draft && !e.graph_ok)e.build_graph();
     int tok=e.argmax_token();
     auto stop=[&](int t){return (o.eos>=0&&t==o.eos)||(o.eot>=0&&t==o.eot);};
     auto emit=[&](int t) {
@@ -325,7 +336,7 @@ int generate_tokens(Engine& e, const std::vector<int32_t>& prompt,
         // The verified anchor is immediately available, including at TTFT.
         if(!emit(tok))break;
         const int k=std::min({o.draft_depth,e.max_seq-e.pos-1,o.max_tokens-int(out.size())});
-        if((o.dflash||o.mtp)&&k>0) {
+        if((o.dflash||o.mtp||o.diagnostic_draft)&&k>0) {
             const int saved=e.pos;
             bool degraded=false;   // draft discarded unjudged, see below
             const bool timed=o.stats&&o.stats->fence;
@@ -349,8 +360,9 @@ int generate_tokens(Engine& e, const std::vector<int32_t>& prompt,
             } else {
                 int d=tok;
                 for(int j=1;j<=k;++j) {
-                    d=e.mtp_draft(d,saved+j-1,j>1);
-                    if(d<0||d>=e.cfg.vocab)throw std::runtime_error("MTP draft failed");
+                    d=o.diagnostic_draft ? o.diagnostic_draft(d,saved+j-1,j>1)
+                                         : e.mtp_draft(d,saved+j-1,j>1);
+                    if(d<0||d>=e.cfg.vocab)throw std::runtime_error("MTP or diagnostic draft failed");
                     candidates.push_back(d);
                 }
             }
@@ -359,6 +371,12 @@ int generate_tokens(Engine& e, const std::vector<int32_t>& prompt,
             std::vector<int32_t> verified;
             const bool batched_ok=e.prefill(candidates,&verified);
             if(timed)lap(&o.stats->verify_ms);
+            if (!batched_ok && o.agree_greedy_commit) {
+                // Join the decision exchange, but do not run a target step
+                // or mutate live state on only a subset of the ranks.
+                o.agree_greedy_commit({saved, 0, -1, false});
+                throw std::runtime_error("ranked greedy batch verification declined");
+            }
             if(!batched_ok) {
                 // The batched verify declined.  prefill() returns false
                 // only BEFORE it submits any work -- an unavailable
@@ -398,6 +416,9 @@ int generate_tokens(Engine& e, const std::vector<int32_t>& prompt,
                 throw std::runtime_error("speculative verification failed");
             int accepted=1;
             while(accepted<int(candidates.size())&&candidates[accepted]==verified[accepted-1])++accepted;
+            const GreedySpecCommit decision{saved, accepted, verified[accepted-1], batched_ok && !degraded};
+            if (o.agree_greedy_commit && !o.agree_greedy_commit(decision))
+                throw std::runtime_error("greedy verifier ranks disagree on the commit");
             // Counted BEFORE the emit loop below, which can return early on
             // a stop token or a cancelled callback: the round happened and
             // its proposals were judged either way, and dropping it would
@@ -438,7 +459,7 @@ int generate_tokens(Engine& e, const std::vector<int32_t>& prompt,
             }
             if(timed)lap(&o.stats->commit_ms);
             for(int i=1;i<accepted;++i)if(!emit(candidates[i]))return int(out.size());
-            tok=verified[accepted-1];
+            tok=decision.next_token;
         } else {
             if(e.pos>=e.max_seq)break;
             if(!(e.graph_ok?e.step():e.forward(tok)))throw std::runtime_error("decode step failed");

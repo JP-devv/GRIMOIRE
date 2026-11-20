@@ -50,7 +50,9 @@
 #include "b70/gguf_qwen35.hpp"
 #include "b70/dflash_config.hpp"
 #include "b70/qwen4_exp.hpp"
-#include "b70/qfn_moe_routes.hpp"
+#include "qfn_device_routes.hpp"
+#include "b70/qfn_mtp_experts.hpp"
+#include "b70/qfn_mtp_hc.hpp"
 #include "b70/qfn_layer0_projection.hpp"
 #include "b70/qgate_layout.hpp"
 #include "b70/moe_route_remap.hpp"
@@ -2310,7 +2312,7 @@ struct Grimoire {
     // property is only requested when the timeline is asked for.
     static sycl::property_list queue_props() {
         if (std::getenv("GRIMOIRE_TIMELINE") ||
-            std::getenv("GRIMOIRE_PROFILE_PREFILL"))
+            std::getenv("GRIMOIRE_PROFILE_PREFILL") || std::getenv("GRIMOIRE_QFN_GROUPED_PROFILE"))
             return {sycl::property::queue::in_order(),
                     sycl::property::queue::enable_profiling()};
         return {sycl::property::queue::in_order()};
@@ -2496,6 +2498,7 @@ struct Grimoire {
     std::vector<int> tp_peer_fd;
     PeerCopy tp_peer_copy, pp_prev_copy, pp_next_copy;
     PeerPush4 tp_peer_push4;
+    bool qfn_decode_fanout = false, qfn_all_fanout = false;
     bool peer_copy_setup(std::string& err);
     std::string pp_socket;
     bool pp_enabled() const { return pp_rank >= 0; }
@@ -2758,10 +2761,10 @@ struct Grimoire {
     void power_gov_tick();
     // Megatron TP: sum this block's partial output over the ranks, in place.
     // A no-op on one GPU and under the legacy algorithm.
-    bool tp_block_reduce(float* dev, size_t elems) {
+    bool tp_block_reduce(float* dev, size_t elems, PeerPush4::Timing* timing = nullptr, bool fanout = false) {
         if (!tp_mega) return true;
         if(tp_peer_copy.active()) return tp_peer_copy.allreduce(q,dev,elems,tp_rank,false);
-        return tshm.base ? tp_shm_allreduce(dev, elems) : tp_allreduce_sum(dev, int(elems));
+        return tshm.base ? tp_shm_allreduce(dev, elems) : tp_allreduce_sum(dev, int(elems), timing, fanout);
     }
     int  tp_sync_token(int token);
     bool tp_sync_tokens(std::vector<int32_t>& toks);
@@ -2940,7 +2943,7 @@ struct Grimoire {
     // call sites below do it for each weight in the group, then call this
     // once).  See its definition for the measured win.
     bool tp_allgather_multi(const std::vector<std::pair<float*,int>>& specs);
-    bool tp_allreduce_sum(float* dev, int elems);
+    bool tp_allreduce_sum(float* dev, int elems, PeerPush4::Timing* timing = nullptr, bool fanout = false);
     // Every TP rank contributes `value`; every rank gets back the common
     // value if all were equal, else -1.  One int each way, on the control
     // sockets, so it is only safe where every rank reaches it in step.
@@ -3060,6 +3063,11 @@ struct Grimoire {
     void ple_ram_start(size_t bytes);
     // GRIMOIRE_Q4_TIMING decode totals: ple, hc, deltanet, full attn, moe, head
     double    q4d_ms[6] = {0, 0, 0, 0, 0, 0};  long q4d_tokens = 0;
+    PeerPush4::Timing qfn_decode_reduce[4]; // PLE, DeltaNet, full attention, MoE
+    size_t qfn_decode_tokens = 0;
+    size_t qfn_decode_bytes[4]{}, qfn_decode_min_bytes[4]{}, qfn_decode_max_bytes[4]{};
+    double qfn_decode_gu_ms = 0, qfn_decode_down_ms = 0;
+    double qfn_decode_hc_down_ms = 0, qfn_decode_hc_up_ms = 0;
 
     // Quantized-at-load projections, per layer.
     struct LayerDev {
@@ -3463,7 +3471,7 @@ struct Grimoire {
     // hyper-connections and the projections are whole on every rank.  The routed experts are
     // MXFP4 by default (GRIMOIRE_MTP_HEAD_FMT): the head only drafts, it never decides a token.
     struct MtpHead4 {
-        bool ok = false;
+        bool ok = false, external = false;
         DevQuant fc_emb, fc_hid;
         bf16_t *pre_e = nullptr, *pre_h = nullptr;   // [H], [hc*H], applied as (1 + w)
         LayerDev::HCDev mixer;                        // the final mixer (no inject)
@@ -3691,6 +3699,13 @@ struct Grimoire {
     float* spec_ple_rows = nullptr;
     float* spec_multi = nullptr;
     bool   spec_multi_valid = false;
+    // Only the one-shot CLI can request verifier scratch without a draft head.
+    bool qfn_verify_diagnostic = false;
+    bool qfn_mtp3_diagnostic = false; // CLI only; GRIMOIRE_MTP remains off
+    static constexpr int kQfnVerifyCheckpointRow = 1; // anchor is row 0; 1156 is row 1
+    float* qfn_verify_direct_dn = nullptr;
+    float* qfn_verify_direct_conv = nullptr;
+    std::vector<float> qfn_verify_logits;
     float* spec_hidden_steps = nullptr;
     // Whether spec_hidden_steps actually HOLDS this round's hidden states.
     // Only the BATCHED verify writes it.  The pointer is allocated as soon
@@ -4686,8 +4701,26 @@ bool Grimoire::peer_copy_setup(std::string& err) {
             err = "TP4 P2P: ranks disagree on GRIMOIRE_P2P_CHUNK_MB";
             return false;
         }
+        const char* fanout_env = std::getenv("GRIMOIRE_QFN_TP_DECODE_FANOUT");
+        qfn_decode_fanout = qfn_tp4_plan && fanout_env && std::strcmp(fanout_env, "1") == 0;
+        int fanout = int(qfn_decode_fanout);
+        if (!tp_agree(fanout) || fanout != int(qfn_decode_fanout)) {
+            err = "TP4 P2P: ranks disagree on GRIMOIRE_QFN_TP_DECODE_FANOUT";
+            return false;
+        }
+        int sync = 0;
+        if (const char* env = std::getenv("GRIMOIRE_QFN_TP_SYNC")) {
+            sync = qfn_tp4_plan && std::strcmp(env, "fanout") == 0 ? 1 :
+                   qfn_tp4_plan && std::strcmp(env, "ipc-events") == 0 ? 2 : -1;
+        }
+        int sync_agreed = sync;
+        if (!tp_agree(sync_agreed) || sync_agreed != sync || sync < 0) {
+            err = "TP4 P2P: GRIMOIRE_QFN_TP_SYNC must agree on all ranks: fanout or ipc-events on native QFN TP4";
+            return false;
+        }
+        qfn_all_fanout = sync == 1;
         std::string why;
-        int available = tp_peer_push4.setup(q, tp_peer_fd, tp_rank, why) ? 1 : 0;
+        int available = tp_peer_push4.setup(q, tp_peer_fd, tp_rank, why, sync == 2) ? 1 : 0;
         if (!tp_agree_min(available) || !available) {
             err = "TP4 P2P: " + (why.empty() ? std::string("peer setup failed on another rank") : why);
             tp_peer_push4.reset();
@@ -4695,6 +4728,9 @@ bool Grimoire::peer_copy_setup(std::string& err) {
         }
         tp_peer_push4.enable();
         std::printf("  TP4 P2P: direct peer-push, FP32 payloads and rank-order sum\n");
+        if (sync == 2) std::printf("  QFN TP4 synchronization: Level Zero IPC device events\n");
+        if (qfn_all_fanout) std::printf("  QFN TP4 synchronization: socket fan-out\n");
+        if (qfn_decode_fanout) std::printf("  QFN TP4 decode: fan-out control packets\n");
     } else if(tp_ranked()) {
         if(!tp_mega || tp_world!=2) {
             if(mode<0 || mode==2) { err="P2P requires Megatron TP with two ranks, or pipeline parallel"; return false; }
@@ -5050,8 +5086,26 @@ bool Grimoire::tp_allgather_multi(const std::vector<std::pair<float*,int>>& spec
     return true;
 }
 
-bool Grimoire::tp_allreduce_sum(float* dev,int elems){
-    if (tp_peer_push4.active()) return elems >= 0 && tp_peer_push4.allreduce(q, dev, size_t(elems), tp_rank);
+bool Grimoire::tp_allreduce_sum(float* dev, int elems, PeerPush4::Timing* timing, bool fanout) {
+    if (tp_peer_push4.active()) {
+        if (elems < 0) return false;
+        if (timing) {
+            const auto enter = std::chrono::steady_clock::now();
+            q.wait_and_throw();
+            timing->drain_ms += std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - enter).count();
+        }
+        // The fan-out handshake is three socket round-trips per call. It was
+        // introduced for the 10 KB decode reduction; OR-ing it in for every
+        // payload also made prefill (20.97 MB per call) pay it 194 times.
+        // GRIMOIRE_QFN_FANOUT_MAX_BYTES bounds it by payload size; the sum
+        // order is identical either way.
+        static const size_t fanout_max = [] {
+            const char* e = std::getenv("GRIMOIRE_QFN_FANOUT_MAX_BYTES");
+            return e && *e ? size_t(std::strtoull(e, nullptr, 10)) : size_t(65536);
+        }();
+        const bool use_fanout = (fanout || qfn_all_fanout) && size_t(elems) * sizeof(float) <= fanout_max;
+        return tp_peer_push4.allreduce(q, dev, size_t(elems), tp_rank, timing, use_fanout);
+    }
     if(tp_peer_copy.active()) return elems>=0 && tp_peer_copy.allreduce(q,dev,size_t(elems),tp_rank,false);
     if(!tp_ranked()||tp_peer_fd.empty())return false;
     const size_t n=size_t(elems);
@@ -8579,21 +8633,41 @@ bool Grimoire::build(const std::string& dir, const UploadOptions& requested_opt,
         }
     }
     // ---- Qwen4-Exp (Flash-Next) MTP head (MtpHead4) -------------------
-    if (mtp_enabled() && cfg.is_qwen4_exp && !pp_enabled()) {
+    // Only the isolated CLI may load this head with GRIMOIRE_MTP off. The
+    // normal TP4 serving admission above still rejects real speculation.
+    const char* mtp4_source = std::getenv("GRIMOIRE_QFN_MTP_SOURCE");
+    if (qfn_mtp3_diagnostic && (!qfn_tp4_plan || mtp_enabled() || !mtp4_source || !*mtp4_source)) {
+        err = "QFN MTP3 diagnostic requires native TP4, GRIMOIRE_MTP=0 and an external draft snapshot";
+        return false;
+    }
+    if ((mtp_enabled() || qfn_mtp3_diagnostic) && cfg.is_qwen4_exp && !pp_enabled()) {
         std::printf("\n  mtp4 head     ");
         std::fflush(stdout);
+        Qwen35Model draft;
+        QfnMtpExperts packed;
+        const bool external = mtp4_source && *mtp4_source;
+        if (external) {
+            if (!packed.open(mtp4_source, err) || !draft.load(mtp4_source, err, true, true)) return false;
+            if (packed.expert_count() != cfg.n_experts || packed.hidden_size() != cfg.hidden ||
+                packed.intermediate_size() != cfg.moe_inter || draft.cfg.vocab != cfg.vocab) {
+                err = "external MTP4 draft geometry does not match target";
+                return false;
+            }
+            draft.unmap_all();
+        }
+        const Qwen35Model& source = external ? draft : ck;
         auto ref = [&](const std::string& n) -> TensorRef {
             const std::string suf(".weight");
             if (n.size() > suf.size() && n.compare(n.size() - suf.size(), suf.size(), suf) == 0) {
-                TensorRef r = ck.linear_ref(n.substr(0, n.size() - suf.size()));
+                TensorRef r = source.linear_ref(n.substr(0, n.size() - suf.size()));
                 if (r.ok()) return r;
             }
-            auto it = ck.index.find(n);
-            return it == ck.index.end() ? TensorRef{} : it->second;
+            auto it = source.index.find(n);
+            return it == source.index.end() ? TensorRef{} : it->second;
         };
         // the head only drafts: MXFP4 by default (GRIMOIRE_MTP_HEAD_FMT=bf16|int4|fp8|mxfp4);
         // the hyper-connections, router, indexer and norms stay BF16 as in the target layers
-        static const Fmt hf = [] {
+        const Fmt hf = external ? Fmt::BF16 : [] {
             const char* e = std::getenv("GRIMOIRE_MTP_HEAD_FMT");
             const std::string v = e ? e : "mxfp4";
             return v == "bf16" ? Fmt::BF16 : v == "int4" ? Fmt::INT4 :
@@ -8628,11 +8702,12 @@ bool Grimoire::build(const std::string& dir, const UploadOptions& requested_opt,
         const TensorRef t_sd = ref(b + "mlp.shared_expert.down_proj.weight");
         const TensorRef t_sgw = ref(b + "mlp.shared_expert_gate.weight");
         const std::string ep = b + "mlp.experts.";
-        const TensorRef t_e0 = resolve_expert(ck, ep.c_str(), 0, E, I, H)[0];
+        const bool qsa = t_ix.ok() && t_ixq.ok() && t_ixk.ok();
+        const bool sparse_valid = external ? qsa == (t_ix.ok() || t_ixq.ok() || t_ixk.ok()) : qsa;
         bool all = t_fce.ok() && t_fch.ok() && t_pre.ok() && t_prh.ok() && t_mn.ok() && t_md.ok() &&
-                   t_mu.ok() && t_q.ok() && t_k.ok() && t_v.ok() && t_o.ok() && t_ix.ok() &&
-                   t_ixq.ok() && t_ixk.ok() && t_router.ok() && t_e0.ok() && t_sg.ok() &&
-                   t_su.ok() && t_sd.ok();
+                   t_mu.ok() && t_q.ok() && t_k.ok() && t_v.ok() && t_o.ok() && sparse_valid &&
+                   t_router.ok() && (external || resolve_expert(ck, ep.c_str(), 0, E, I, H)[0].ok()) &&
+                   t_sg.ok() && t_su.ok() && t_sd.ok();
         for (int k = 0; k < 4; ++k) all = all && t_ha[k].ok() && t_hm[k].ok();
         const LayerDev* fa = nullptr;            // the model's full-attention geometry
         for (const auto& d : L) if (d.kind == LayerKind::FULL_ATTN) { fa = &d; break; }
@@ -8640,14 +8715,35 @@ bool Grimoire::build(const std::string& dir, const UploadOptions& requested_opt,
             err = "GRIMOIRE_MTP=1 on Qwen4-Exp, but the checkpoint's mtp.* head is incomplete";
             return false;
         }
+        if (external) {
+            const int LR = cfg.hc_lowrank, D = fa->head_dim;
+            const int Q = (tp_mega ? tps.qh : cfg.n_heads) * D;
+            const int K = (tp_mega ? tps.kvh : cfg.n_kv_heads) * D;
+            auto shape = [](const TensorRef& r, std::initializer_list<int64_t> dims) {
+                return r.ok() && r.t.dtype == STDtype::BF16 && r.t.shape == std::vector<int64_t>(dims);
+            };
+            auto hc_shape = [&](const TensorRef* hc) {
+                return shape(hc[0], {WIDE}) && shape(hc[1], {LR, WIDE}) &&
+                       shape(hc[2], {HC, WIDE}) && shape(hc[3], {WIDE, LR});
+            };
+            if (!shape(t_fce, {H, H}) || !shape(t_fch, {H, H}) || !shape(t_pre, {H}) || !shape(t_prh, {WIDE}) ||
+                !shape(t_mn, {WIDE}) || !shape(t_md, {LR, WIDE}) || !shape(t_mu, {WIDE, LR}) ||
+                !hc_shape(t_ha) || !hc_shape(t_hm) || !shape(t_q, {2 * Q, H}) || !shape(t_k, {K, H}) ||
+                !shape(t_v, {K, H}) || !shape(t_o, {H, Q}) || !shape(t_qn, {D}) || !shape(t_kn, {D}) ||
+                !shape(t_router, {E, H}) || !shape(t_sg, {cfg.shared_inter, H}) ||
+                !shape(t_su, {cfg.shared_inter, H}) || !shape(t_sd, {H, cfg.shared_inter}) || !shape(t_sgw, {1, H})) {
+                err = "external MTP4 dense tensor shape or dtype mismatch";
+                return false;
+            }
+        }
         bool mok = true;
-        mtp4.fc_emb = quantize_upload_t(q, ck, t_fce, hf, "mtp4.fc_embedding", &mok);
-        mtp4.fc_hid = quantize_upload_t(q, ck, t_fch, hf, "mtp4.fc_hidden", &mok);
-        mtp4.pre_e  = dev_copy_t<bf16_t>(q, ck, t_pre, "mtp4.pre_fc_norm_embedding", &mok);
-        mtp4.pre_h  = dev_copy_t<bf16_t>(q, ck, t_prh, "mtp4.pre_fc_norm_hidden", &mok);
-        mtp4.mixer.norm = dev_copy_t<bf16_t>(q, ck, t_mn, "mtp4.mixer.hc_norm", &mok);
-        mtp4.mixer.down = quantize_upload_t(q, ck, t_md, Fmt::BF16, "mtp4.mixer.down", &mok);
-        mtp4.mixer.up   = quantize_upload_t(q, ck, t_mu, Fmt::BF16, "mtp4.mixer.up", &mok);
+        mtp4.fc_emb = quantize_upload_t(q, source, t_fce, hf, "mtp4.fc_embedding", &mok);
+        mtp4.fc_hid = quantize_upload_t(q, source, t_fch, hf, "mtp4.fc_hidden", &mok);
+        mtp4.pre_e  = dev_copy_t<bf16_t>(q, source, t_pre, "mtp4.pre_fc_norm_embedding", &mok);
+        mtp4.pre_h  = dev_copy_t<bf16_t>(q, source, t_prh, "mtp4.pre_fc_norm_hidden", &mok);
+        mtp4.mixer.norm = dev_copy_t<bf16_t>(q, source, t_mn, "mtp4.mixer.hc_norm", &mok);
+        mtp4.mixer.down = quantize_upload_t(q, source, t_md, Fmt::BF16, "mtp4.mixer.down", &mok);
+        mtp4.mixer.up   = quantize_upload_t(q, source, t_mu, Fmt::BF16, "mtp4.mixer.up", &mok);
         LayerDev& m = mtp4.L;
         m.kind = LayerKind::FULL_ATTN;
         m.kv_heads = fa->kv_heads;       // this rank's (Megatron), as every target layer
@@ -8655,47 +8751,54 @@ bool Grimoire::build(const std::string& dir, const UploadOptions& requested_opt,
         m.rope_theta = fa->rope_theta;
         m.partial_rope = fa->partial_rope;
         auto up_hc = [&](LayerDev::HCDev& dst, const TensorRef* r4, const std::string& tag) {
-            dst.norm   = dev_copy_t<bf16_t>(q, ck, r4[0], (tag + ".hc_norm").c_str(), &mok);
-            dst.down   = quantize_upload_t(q, ck, r4[1], Fmt::BF16, (tag + ".down").c_str(), &mok);
-            dst.inject = quantize_upload_t(q, ck, r4[2], Fmt::BF16, (tag + ".inject").c_str(), &mok);
-            dst.up     = quantize_upload_t(q, ck, r4[3], Fmt::BF16, (tag + ".up").c_str(), &mok);
+            dst.norm   = dev_copy_t<bf16_t>(q, source, r4[0], (tag + ".hc_norm").c_str(), &mok);
+            dst.down   = quantize_upload_t(q, source, r4[1], Fmt::BF16, (tag + ".down").c_str(), &mok);
+            dst.inject = quantize_upload_t(q, source, r4[2], Fmt::BF16, (tag + ".inject").c_str(), &mok);
+            dst.up     = quantize_upload_t(q, source, r4[3], Fmt::BF16, (tag + ".up").c_str(), &mok);
         };
         up_hc(m.hc_attn, t_ha, "mtp4.attn_hyper_connection");
         up_hc(m.hc_mlp,  t_hm, "mtp4.mlp_hyper_connection");
-        m.q_proj = quantize_upload_t(q, ck, t_q, hf, "mtp4.q_proj", &mok);
-        m.k_proj = quantize_upload_t(q, ck, t_k, hf, "mtp4.k_proj", &mok);
-        m.v_proj = quantize_upload_t(q, ck, t_v, hf, "mtp4.v_proj", &mok);
-        m.o_proj = quantize_upload_t(q, ck, t_o, hf, "mtp4.o_proj", &mok);
-        if (t_qn.ok()) m.q_norm = dev_copy_t<bf16_t>(q, ck, t_qn, "mtp4.q_norm", &mok);
-        if (t_kn.ok()) m.k_norm = dev_copy_t<bf16_t>(q, ck, t_kn, "mtp4.k_norm", &mok);
+        m.q_proj = quantize_upload_t(q, source, t_q, hf, "mtp4.q_proj", &mok);
+        m.k_proj = quantize_upload_t(q, source, t_k, hf, "mtp4.k_proj", &mok);
+        m.v_proj = quantize_upload_t(q, source, t_v, hf, "mtp4.v_proj", &mok);
+        m.o_proj = quantize_upload_t(q, source, t_o, hf, "mtp4.o_proj", &mok);
+        if (t_qn.ok()) m.q_norm = dev_copy_t<bf16_t>(q, source, t_qn, "mtp4.q_norm", &mok);
+        if (t_kn.ok()) m.k_norm = dev_copy_t<bf16_t>(q, source, t_kn, "mtp4.k_norm", &mok);
         if (mok) mega_attn(m, q, true);          // Megatron: this rank's heads, as the target's
-        if (!ok) return false;
-        m.qsa = true;
-        m.ix_qk = quantize_upload_t(q, ck, t_ix, Fmt::BF16, "mtp4.indexer.index_qk_proj", &mok);
-        m.ix_qn = dev_copy_t<bf16_t>(q, ck, t_ixq, "mtp4.indexer.q_layernorm", &mok);
-        m.ix_kn = dev_copy_t<bf16_t>(q, ck, t_ixk, "mtp4.indexer.k_layernorm", &mok);
-        const int IHD = cfg.indexer_head_dim, nblk = max_seq / cfg.indexer_compress_ratio + 1;
-        m.ix_raw_base = m.ix_kraw = sycl::malloc_device<float>(size_t(max_seq) * IHD, q);
-        m.ix_cmp_base = m.ix_kcmp = sycl::malloc_device<float>(size_t(nblk) * IHD, q);
+        if (!mok || !ok) { if (err.empty()) err = "MTP4 attention loading failed"; return false; }
+        m.qsa = qsa;
+        const int IHD = qsa ? cfg.indexer_head_dim : 0;
+        const int nblk = qsa ? max_seq / cfg.indexer_compress_ratio + 1 : 0;
+        if (qsa) {
+            m.ix_qk = quantize_upload_t(q, source, t_ix, Fmt::BF16, "mtp4.indexer.index_qk_proj", &mok);
+            m.ix_qn = dev_copy_t<bf16_t>(q, source, t_ixq, "mtp4.indexer.q_layernorm", &mok);
+            m.ix_kn = dev_copy_t<bf16_t>(q, source, t_ixk, "mtp4.indexer.k_layernorm", &mok);
+            m.ix_raw_base = m.ix_kraw = sycl::malloc_device<float>(size_t(max_seq) * IHD, q);
+            m.ix_cmp_base = m.ix_kcmp = sycl::malloc_device<float>(size_t(nblk) * IHD, q);
+        }
         const size_t kv_elems = size_t(m.kv_heads) * m.head_dim * max_seq;
         m.kv_slot = kv_elems;
-        m.k_base = m.k_cache = sycl::malloc_device<uint8_t>(kv_elems, q);
+        const size_t draft_k_bytes = kv_cache_k_bytes(m.kv_heads, m.head_dim, max_seq, kv_k8_requested());
+        m.k_base = m.k_cache = sycl::malloc_device<uint8_t>(draft_k_bytes, q);
         m.v_base = m.v_cache = sycl::malloc_device<uint8_t>(kv_elems, q);
-        // routed experts: whole on every rank, the layout of the target's non-tiered MoE
-        const Fmt EF = hf;
+        const bool expert_parallel = external && qfn_tp4_plan.has_value();
+        m.expert_begin = expert_parallel ? int(qfn_tp4_plan->routed_experts.begin) : 0;
+        m.expert_count = expert_parallel ? int(qfn_tp4_plan->routed_experts.count) : E;
+        const Fmt EF = external ? Fmt::INT4 : hf;
+        const int gu_groups = external ? H / 32 : scales_per_row(EF, H);
+        const int dn_groups = external ? I / 32 : scales_per_row(EF, I);
         const size_t gu_row = bytes_per_row(EF, H), dn_row = bytes_per_row(EF, I);
-        const size_t gu_srow = scales_per_row(EF, H) * scale_element_bytes(EF);
-        const size_t dn_srow = scales_per_row(EF, I) * scale_element_bytes(EF);
-        const size_t gu_zrow = EF == Fmt::INT4 ? scales_per_row(EF, H) : 0;
-        const size_t dn_zrow = EF == Fmt::INT4 ? scales_per_row(EF, I) : 0;
-        const size_t gu_rows = size_t(E) * 2 * I, dn_rows = size_t(E) * H;
-        m.router = quantize_upload_t(q, ck, t_router, Fmt::BF16, "mtp4.router", &mok);
+        const size_t gu_srow = gu_groups * scale_element_bytes(EF), dn_srow = dn_groups * scale_element_bytes(EF);
+        const size_t gu_zrow = EF == Fmt::INT4 ? gu_groups : 0;
+        const size_t dn_zrow = EF == Fmt::INT4 ? dn_groups : 0;
+        const size_t gu_rows = size_t(m.expert_count) * 2 * I, dn_rows = size_t(m.expert_count) * H;
+        m.router = quantize_upload_t(q, source, t_router, Fmt::BF16, "mtp4.router", &mok);
         auto alloc = [&](size_t n) { return n ? sycl::malloc_device<uint8_t>(n, q) : nullptr; };
         m.gu_pack = alloc(gu_rows * gu_row); m.dn_pack = alloc(dn_rows * dn_row);
         m.gu_scale = alloc(gu_rows * gu_srow); m.dn_scale = alloc(dn_rows * dn_srow);
         m.gu_zero = alloc(gu_rows * gu_zrow); m.dn_zero = alloc(dn_rows * dn_zrow);
         if (!m.gu_pack || !m.dn_pack || (gu_srow && !m.gu_scale) || (dn_srow && !m.dn_scale) ||
-            (gu_zrow && !m.gu_zero) || (dn_zrow && !m.dn_zero) || !m.ix_kraw || !m.ix_kcmp ||
+            (gu_zrow && !m.gu_zero) || (dn_zrow && !m.dn_zero) || (qsa && (!m.ix_kraw || !m.ix_kcmp)) ||
             !m.k_cache || !m.v_cache) {
             err = "MTP4 head allocation failed"; return false;
         }
@@ -8711,24 +8814,41 @@ bool Grimoire::build(const std::string& dir, const UploadOptions& requested_opt,
             if (zb) q.memcpy((down ? m.dn_zero : m.gu_zero) + row * zb, t.w.zeros, size_t(n) * zb);
             q.wait_and_throw(); t.release(q);
         };
-        for (int e = 0; e < E && mok; ++e) {
-            const auto r = resolve_expert(ck, ep.c_str(), e, E, I, H);
-            copy_expert(r[0], size_t(e) * 2 * I, I, H, false);
-            copy_expert(r[1], (size_t(e) * 2 + 1) * I, I, H, false);
-            copy_expert(r[2], size_t(e) * H, H, I, true);
+        auto copy_packed = [&](const PackedWeight& p, size_t row, bool down) {
+            const size_t rb = down ? dn_row : gu_row, sb = down ? dn_srow : gu_srow, zb = down ? dn_zrow : gu_zrow;
+            q.memcpy((down ? m.dn_pack : m.gu_pack) + row * rb, p.payload.data(), p.payload.size());
+            q.memcpy((down ? m.dn_scale : m.gu_scale) + row * sb, p.scales_raw.data(), p.scales_raw.size());
+            q.memcpy((down ? m.dn_zero : m.gu_zero) + row * zb, p.zeros.data(), p.zeros.size());
+        };
+        for (int e = 0; e < m.expert_count && mok; ++e) {
+            if (external) {
+                QfnMtpExpert p;
+                if (!packed.read_expert(m.expert_begin + e, p, err)) return false;
+                copy_packed(p.gate, size_t(e) * 2 * I, false);
+                copy_packed(p.up, (size_t(e) * 2 + 1) * I, false);
+                copy_packed(p.down, size_t(e) * H, true);
+                q.wait_and_throw();   // packed host bytes remain alive until upload completes
+            } else {
+                const auto r = resolve_expert(ck, ep.c_str(), e, E, I, H);
+                copy_expert(r[0], size_t(e) * 2 * I, I, H, false);
+                copy_expert(r[1], (size_t(e) * 2 + 1) * I, I, H, false);
+                copy_expert(r[2], size_t(e) * H, H, I, true);
+            }
         }
-        m.moe.cfg.hidden = H; m.moe.cfg.inter = I; m.moe.cfg.num_experts = E;
+        m.moe.cfg.hidden = H; m.moe.cfg.inter = I; m.moe.cfg.num_experts = m.expert_count;
         m.moe.cfg.top_k = cfg.top_k; m.moe.cfg.shared_inter = cfg.shared_inter;
-        m.moe.gate_up = QuantWeight{EF, E * 2 * I, H, m.gu_pack, m.gu_scale, m.gu_zero, int64_t(gu_row),
-                                    scales_per_row(EF, H)};
-        m.moe.down = QuantWeight{EF, E * H, I, m.dn_pack, m.dn_scale, m.dn_zero, int64_t(dn_row),
-                                 scales_per_row(EF, I)};
+        m.moe.gate_up = QuantWeight{EF, m.expert_count * 2 * I, H, m.gu_pack, m.gu_scale, m.gu_zero,
+                                    int64_t(gu_row), gu_groups};
+        m.moe.down = QuantWeight{EF, m.expert_count * H, I, m.dn_pack, m.dn_scale, m.dn_zero,
+                                 int64_t(dn_row), dn_groups};
         m.moe_layer = true;
-        m.sh_gu = concat_upload_t(q, ck, t_sg, t_su, hf, "mtp4.shared.gate_up", &mok);
-        m.sh_down = quantize_upload_t(q, ck, t_sd, hf, "mtp4.shared.down", &mok);
-        if (t_sgw.ok()) {
-            m.sh_gate_q = quantize_upload_t(q, ck, t_sgw, Fmt::BF16, "mtp4.shared.gate", &mok);
-            m.has_sh_gate = true;
+        if (!expert_parallel || tp_rank == 0) {
+            m.sh_gu = concat_upload_t(q, source, t_sg, t_su, hf, "mtp4.shared.gate_up", &mok);
+            m.sh_down = quantize_upload_t(q, source, t_sd, hf, "mtp4.shared.down", &mok);
+            if (t_sgw.ok()) {
+                m.sh_gate_q = quantize_upload_t(q, source, t_sgw, Fmt::BF16, "mtp4.shared.gate", &mok);
+                m.has_sh_gate = true;
+            }
         }
         mtp4.sh_inter = m.sh_gu.w.N / 2;
         auto fdev = [&](size_t n) { return sycl::malloc_device<float>(n, q); };
@@ -8746,14 +8866,16 @@ bool Grimoire::build(const std::string& dir, const UploadOptions& requested_opt,
         const size_t mb = mtp4.fc_emb.w.bytes() + mtp4.fc_hid.w.bytes() + m.q_proj.w.bytes() +
             m.k_proj.w.bytes() + m.v_proj.w.bytes() + m.o_proj.w.bytes() + m.ix_qk.w.bytes() +
             gu_rows * (gu_row + gu_srow + gu_zrow) + dn_rows * (dn_row + dn_srow + dn_zrow) +
-            m.router.w.bytes() + m.sh_gu.w.bytes() + m.sh_down.w.bytes() + 2 * kv_elems +
+            m.router.w.bytes() + m.sh_gu.w.bytes() + m.sh_down.w.bytes() + draft_k_bytes + kv_elems +
             (size_t(max_seq) + nblk) * IHD * 4 + size_t(kMtp4WarmRows + 4) * WIDE * 4 +
             3 * size_t(WIDE) * 320 * 2 * 2;
         acct(mb);
         if (!mok) { err = "MTP4 head loading failed"; return false; }
+        mtp4.external = external;
         mtp4.ok = true;
-        std::printf("ok (%.2f GiB, %s experts, whole on every rank; attention %s)\n",
-                    double(mb) / 1073741824.0, fmt_name(EF), tp_mega ? "this rank's heads" : "whole");
+        std::printf("ok (%.2f GiB, %s experts [%d,%d), attention %s)\n",
+                    double(mb) / 1073741824.0, fmt_name(EF), m.expert_begin, m.expert_begin + m.expert_count,
+                    tp_mega ? "this rank's heads" : "whole");
     }
     // The last pipeline stage loaded the embedding table only so a drafter
     // could embed the tokens it proposes.  If no drafter needs it, give it
@@ -9728,8 +9850,12 @@ bool Grimoire::build(const std::string& dir, const UploadOptions& requested_opt,
     // mtp.ok, because mtp.ok is false on the early stages by design -- and
     // pp_connect, which publishes the pipeline's answer, has not run yet.
     // If the last stage then fails to load a head, these go unused.
-    if (mtp.ok || dflash2.ok || mtp4.ok || (pp_enabled() && mtp_enabled())) {
-        if (mtp4.ok) {
+    if (qfn_verify_diagnostic && (!qfn_tp4_plan || mtp_enabled() || !cfg.is_qwen4_exp)) {
+        err = "QFN verifier diagnostic requires native TP4 with MTP off";
+        return false;
+    }
+    if (mtp.ok || dflash2.ok || mtp4.ok || (pp_enabled() && mtp_enabled()) || qfn_verify_diagnostic) {
+        if (mtp4.ok || qfn_verify_diagnostic) {
             const int slen = (cfg.ple_conv_kernel - 1) * cfg.ngram_size;
             const size_t wide = size_t(cfg.hc_count) * cfg.hidden;
             size_t npl = 0;
@@ -9756,6 +9882,14 @@ bool Grimoire::build(const std::string& dir, const UploadOptions& requested_opt,
             spec_dn_state = sycl::malloc_device<float>(spec_dn_elems, q);
         if (spec_conv_elems)
             spec_conv_ring = sycl::malloc_device<float>(spec_conv_elems, q);
+        if (qfn_verify_diagnostic) {
+            qfn_verify_direct_dn = sycl::malloc_device<float>(spec_dn_elems, q);
+            qfn_verify_direct_conv = sycl::malloc_device<float>(spec_conv_elems, q);
+            if (!qfn_verify_direct_dn || !qfn_verify_direct_conv) {
+                err = "QFN same-batch checkpoint allocation failed"; return false;
+            }
+            acct((spec_dn_elems + spec_conv_elems) * sizeof(float));
+        }
         // GRIMOIRE_DN_VERIFY_FUSED=0: the old per-row step loop with a full state
         // snapshot per row (kSpecBatch copies of every DeltaNet state, ~2.4 GB on
         // Qwen3.8-27B).  Default: the fused verify + replay, ~25 MB of saved inputs.
@@ -12095,7 +12229,7 @@ void Grimoire::commit_spec_prefix(int saved_pos, int accepted) {
     // Qwen4-Exp MTP (mtp4): each PLE layer's history = the window after the accepted rows of
     // the verify's [history | rows] (prefill_qwen4_exp, the same walk over L), and the head's
     // next backbone input = the last accepted row's multi-stream state
-    if (cfg.is_qwen4_exp && mtp4.ok && spec_multi_valid) {
+    if (cfg.is_qwen4_exp && spec_multi_valid) {
         const int slen = (cfg.ple_conv_kernel - 1) * cfg.ngram_size;
         const size_t wide = size_t(cfg.hc_count) * cfg.hidden;
         size_t poff = 0;
@@ -12106,7 +12240,7 @@ void Grimoire::commit_spec_prefix(int saved_pos, int accepted) {
                          size_t(slen) * wide * sizeof(float));
             poff += size_t(std::max(0, slen) + kSpecBatch) * wide;
         }
-        q.memcpy(mtp4.back, spec_multi + size_t(step) * wide, wide * sizeof(float));
+        if (mtp4.ok) q.memcpy(mtp4.back, spec_multi + size_t(step) * wide, wide * sizeof(float));
         spec_multi_valid = false;
     }
     pos = saved_pos + accepted;
@@ -12321,6 +12455,26 @@ void Grimoire::release() {
     if (cx_calls)
         std::fprintf(stderr, "  CPU experts: %ld layer calls, %.1f ms total (%.3f ms each)\n",
                      cx_calls, cx_ms, cx_ms / double(cx_calls));
+    if (qfn_decode_reduce[3].calls) {
+        const char* const phase[] = {"ple", "deltanet", "attention", "moe"};
+        for (size_t i = 0; i < 4; ++i) {
+            const auto& b = qfn_decode_reduce[i];
+            std::fprintf(stderr, "QFN TP decode payload rank=%d kind=%s calls=%zu bytes=%zu min_bytes=%zu max_bytes=%zu\n",
+                         tp_rank, phase[i], b.calls, qfn_decode_bytes[i],
+                         qfn_decode_min_bytes[i], qfn_decode_max_bytes[i]);
+            std::fprintf(stderr, "QFN TP decode reduce rank=%d kind=%s calls=%zu drain_ms=%.3f copy_ms=%.3f "
+                         "ready_ms=%.3f sum_ms=%.3f reuse_ms=%.3f\n",
+                         tp_rank, phase[i], b.calls, b.drain_ms, b.copy_ms, b.ready_ms, b.sum_ms, b.reuse_ms);
+        }
+        std::fprintf(stderr, "QFN TP decode projections rank=%d tokens=%zu int4_gu_ms=%.3f int4_down_ms=%.3f "
+                     "hc_down_inject_ms=%.3f hc_up_mean_ms=%.3f (fenced)\n",
+                     tp_rank, qfn_decode_tokens, qfn_decode_gu_ms, qfn_decode_down_ms,
+                     qfn_decode_hc_down_ms, qfn_decode_hc_up_ms);
+        if (q4d_tokens) std::fprintf(stderr, "QFN TP decode profile rank=%d tokens=%ld routed_ms=%.3f ple_ms=%.3f hc_ms=%.3f "
+                     "deltanet_ms=%.3f attention_ms=%.3f moe_ms=%.3f head_ms=%.3f\n",
+                     tp_rank, q4d_tokens, qfn_decode_gu_ms + qfn_decode_down_ms, q4d_ms[0], q4d_ms[1],
+                     q4d_ms[2], q4d_ms[3], q4d_ms[4], q4d_ms[5]);
+    }
     if (q4d_tokens)
         std::fprintf(stderr, "  qwen4_exp decode per token (%ld tokens, synced): PLE %.2f  HC %.2f  "
                      "DeltaNet %.2f  full-attn %.2f  MoE %.2f  head %.2f ms\n", q4d_tokens,
@@ -12465,6 +12619,10 @@ void Grimoire::release() {
     if (spec_dn_inputs) sycl::free(spec_dn_inputs, q);
     if (spec_conv_inputs) sycl::free(spec_conv_inputs, q);
     if (spec_hidden_steps) sycl::free(spec_hidden_steps, q);
+    if (spec_ple_rows) sycl::free(spec_ple_rows, q);
+    if (spec_multi) sycl::free(spec_multi, q);
+    if (qfn_verify_direct_dn) sycl::free(qfn_verify_direct_dn, q);
+    if (qfn_verify_direct_conv) sycl::free(qfn_verify_direct_conv, q);
     // Every slot, not just one.  N slots is N full copies of the KV and
     // recurrent state, so a server reloading a model and freeing only the
     // first would leak the rest -- and the rest is where the memory is.
@@ -13990,6 +14148,29 @@ const float* Grimoire::forward_qwen4_exp(int token) {
 
     bool pending = false;          // is a deferred combine outstanding?
     static const bool q4t = std::getenv("GRIMOIRE_Q4_TIMING") != nullptr;
+    static const bool tp_profile = [] {
+        const char* e = std::getenv("GRIMOIRE_QFN_TP_DECODE_REDUCE_TIMING");
+        return e && std::strcmp(e, "1") == 0;
+    }();
+    const bool tp_timing = tp_profile && qfn_tp4_plan && tp_peer_push4.active();
+    if (tp_timing) ++qfn_decode_tokens;
+    const auto project = [&](double& ms, auto&& submit) {
+        if (!tp_timing) { submit(); return; }
+        q.wait_and_throw();
+        const auto start = std::chrono::steady_clock::now();
+        submit();
+        q.wait_and_throw();
+        ms += std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start).count();
+    };
+    const auto reduce = [&](float* data, size_t elems, int kind) {
+        if (!tp_timing) return tp_block_reduce(data, elems, nullptr, qfn_decode_fanout);
+        const size_t bytes = elems * sizeof(float);
+        auto& bucket = qfn_decode_reduce[kind];
+        if (!bucket.calls || bytes < qfn_decode_min_bytes[kind]) qfn_decode_min_bytes[kind] = bytes;
+        qfn_decode_max_bytes[kind] = std::max(qfn_decode_max_bytes[kind], bytes);
+        qfn_decode_bytes[kind] += bytes;
+        return tp_block_reduce(data, elems, &bucket, qfn_decode_fanout);
+    };
     auto q4clk = std::chrono::steady_clock::now();
     auto q4lap = [&](int k) {
         if (!q4t) return;
@@ -14067,12 +14248,16 @@ const float* Grimoire::forward_qwen4_exp(int token) {
             launch_hc_combine_norm1(q, q4_hyper, pend, pinj, hc.norm, q4_normed,
                                     HC, H, cfg.rms_eps, none);
             tld(tl_cur, ".hc-norm");
-            launch_hc_down_inject1(q, reinterpret_cast<const bf16_t*>(hc.down.w.payload),
-                want_inj ? reinterpret_cast<const bf16_t*>(hc.inject.w.payload) : nullptr,
-                q4_normed, q4_lora, inj_out, LR, HC, WIDE, none);
+            project(qfn_decode_hc_down_ms, [&] {
+                launch_hc_down_inject1(q, reinterpret_cast<const bf16_t*>(hc.down.w.payload),
+                    want_inj ? reinterpret_cast<const bf16_t*>(hc.inject.w.payload) : nullptr,
+                    q4_normed, q4_lora, inj_out, LR, HC, WIDE, none);
+            });
             tld(tl_cur, ".hc-down");
-            launch_hc_up_mean1(q, reinterpret_cast<const bf16_t*>(hc.up.w.payload), q4_lora,
-                               q4_normed, block_out, HC, H, LR, none);
+            project(qfn_decode_hc_up_ms, [&] {
+                launch_hc_up_mean1(q, reinterpret_cast<const bf16_t*>(hc.up.w.payload), q4_lora,
+                                   q4_normed, block_out, HC, H, LR, none);
+            });
             // GRIMOIRE_HC_CHECK=1: the first 8 mixes also run the kernels
             // before 10-27 into q4_gate and print the largest differences
             static const bool hc_check = std::getenv("GRIMOIRE_HC_CHECK") != nullptr;
@@ -14107,12 +14292,12 @@ const float* Grimoire::forward_qwen4_exp(int token) {
                                     1, HC, H, none);
         launch_hc_norm(q, q4_hyper, hc.norm, q4_normed, 1, HC, H,
                        cfg.rms_eps, none);
-        gemv_any(hc.down, q4_normed, q4_lora, none);
+        project(qfn_decode_hc_down_ms, [&] { gemv_any(hc.down, q4_normed, q4_lora, none); });
         launch_hc_silu(q, q4_lora, LR, HC, none);
-        gemv_any(hc.up, q4_lora, q4_gate, none);
+        project(qfn_decode_hc_up_ms, [&] { gemv_any(hc.up, q4_lora, q4_gate, none); });
         launch_hc_gated_mean(q, q4_gate, q4_normed, block_out, 1, HC, H, none);
         if (inj_out && hc.inject.w.N)
-            gemv_any(hc.inject, q4_normed, inj_out, none);
+            project(qfn_decode_hc_down_ms, [&] { gemv_any(hc.inject, q4_normed, inj_out, none); });
     };
 
     for (int i = pp_enabled() ? pp_begin : 0; i < (pp_enabled() ? pp_end : cfg.n_layers); ++i) {
@@ -14151,7 +14336,7 @@ const float* Grimoire::forward_qwen4_exp(int token) {
             launch_ple_embed_gather(q, d.ple_table, d.ple_fp8, d.ple_scale,
                                     q4_ids, q4_emb, 1, NH, HD, d.ple_rows, none);
             }
-            if (tp_mega && !tp_block_reduce(q4_emb, size_t(NH) * HD)) {
+            if (tp_mega && !reduce(q4_emb, size_t(NH) * HD, 0)) {
                 std::fprintf(stderr, "TP: PLE row broadcast failed\n");
                 return nullptr;
             }
@@ -14383,7 +14568,8 @@ const float* Grimoire::forward_qwen4_exp(int token) {
             tld(i, ".o");
         }
         // Megatron TP: out_proj / o_proj ran on this rank's heads only
-        if (tp_mega && !tp_block_reduce(s.moe_y, size_t(H))) {
+        const int mixer_kind = d.kind == LayerKind::LINEAR_ATTN ? 1 : 2;
+        if (tp_mega && !reduce(s.moe_y, size_t(H), mixer_kind)) {
             std::fprintf(stderr, "TP: mixer all-reduce failed\n");
             return nullptr;
         }
@@ -14462,8 +14648,12 @@ const float* Grimoire::forward_qwen4_exp(int token) {
                     const int begin = d.expert_begin, end = begin + d.expert_count;
                     launch_remap_moe_routes(q, s.d_expert, size_t(cfg.top_k), begin, end);
                 }
-                launch_moe_gate_up(q, d.moe, s.d_expert, s.h2, s.moe_h, none);
-                launch_moe_down(q, d.moe, s.d_expert, s.d_weight, s.moe_h, q4_pend, none);
+                project(qfn_decode_gu_ms, [&] {
+                    launch_moe_gate_up(q, d.moe, s.d_expert, s.h2, s.moe_h, none);
+                });
+                project(qfn_decode_down_ms, [&] {
+                    launch_moe_down(q, d.moe, s.d_expert, s.d_weight, s.moe_h, q4_pend, none);
+                });
             }
             (void)I;
             if (d.sh_gu.w.N) {
@@ -14537,7 +14727,7 @@ const float* Grimoire::forward_qwen4_exp(int token) {
         }
         // Megatron TP: this rank's experts and half of the shared expert
         if (tp_mega && !(ar_tag ? tp_small_allreduce(q4_pend, size_t(H), ar_tag, ar_add)
-                                : tp_block_reduce(q4_pend, size_t(H)))) {
+                                : reduce(q4_pend, size_t(H), 3))) {
             std::fprintf(stderr, "TP: MoE all-reduce failed\n");
             return nullptr;
         }
@@ -15831,6 +16021,37 @@ void Grimoire::mtp4_hc_mix(const LayerDev::HCDev& hc, const float* pend, const f
                            float* inj_out, float* block_out) {
     const int H = cfg.hidden, HC = cfg.hc_count, WIDE = HC * H, LR = cfg.hc_lowrank;
     const std::vector<sycl::event> none{};
+    if (mtp4.external) {
+        float* hyper = mtp4.hyper;
+        float* normed = q4_normed;
+        float* lo = q4_lora;
+        float* gate = mtp4.hn;
+        if (pend) {
+            q.parallel_for(sycl::range<1>(WIDE), [=](sycl::id<1> id) {
+                const size_t i = id[0];
+                // No previous injection at the first HC: the embedding projection
+                // is added to each of the contiguous projected hidden streams.
+                const float gain = pinj ? qfn_mtp_injection_gain(pinj[i / H], HC,
+                    [](float x) { return sycl::exp(x); }) : 1.0f;
+                hyper[i] = qfn_mtp_combine(hyper[i], pend[i % H], gain);
+            });
+        }
+        launch_hc_norm(q, hyper, hc.norm, normed, 1, HC, H, cfg.rms_eps, none);
+        q.parallel_for(sycl::range<1>(WIDE), [=](sycl::id<1> i) { normed[i] = qfn_mtp_bf16(normed[i]); });
+        if (inj_out && hc.inject.w.N) {
+            gemv_any(hc.inject, normed, inj_out, none);
+            q.parallel_for(sycl::range<1>(HC), [=](sycl::id<1> i) { inj_out[i] = qfn_mtp_bf16(inj_out[i]); });
+        }
+        gemv_any(hc.down, normed, lo, none);
+        q.parallel_for(sycl::range<1>(LR), [=](sycl::id<1> i) {
+            lo[i] = qfn_mtp_input_mix_silu(lo[i], HC, [](float x) { return sycl::exp(x); });
+        });
+        gemv_any(hc.up, lo, gate, none);
+        q.parallel_for(sycl::range<1>(WIDE), [=](sycl::id<1> i) { gate[i] = qfn_mtp_bf16(gate[i]); });
+        launch_hc_gated_mean(q, gate, normed, block_out, 1, HC, H, none);
+        q.parallel_for(sycl::range<1>(H), [=](sycl::id<1> i) { block_out[i] = qfn_mtp_bf16(block_out[i]); });
+        return;
+    }
     const bool want_inj = inj_out && hc.inject.w.N;
     launch_hc_combine_norm1(q, mtp4.hyper, pend, pinj, hc.norm, q4_normed, HC, H, cfg.rms_eps, none);
     launch_hc_down_inject1(q, reinterpret_cast<const bf16_t*>(hc.down.w.payload),
@@ -15846,6 +16067,31 @@ void Grimoire::mtp4_hc_mix(const LayerDev::HCDev& hc, const float* pend, const f
 void Grimoire::mtp4_front(const float* backbone, int next_token, bool from_mtp_hidden) {
     const int H = cfg.hidden, HC = cfg.hc_count, WIDE = HC * H;
     const std::vector<sycl::event> none{};
+    if (mtp4.external) {
+        const float* src = from_mtp_hidden ? mtp4.multi : backbone;
+        float* emb = mtp4.emb;
+        float* en = mtp4.en;
+        float* hn = mtp4.hn;
+        float* hyper = mtp4.hyper;
+        embed_single_event(next_token, emb, none);
+        q.parallel_for(sycl::range<1>(WIDE), [=](sycl::id<1> i) {
+            if (i[0] < size_t(H)) emb[i] = qfn_mtp_bf16(emb[i]);
+            hn[i] = qfn_mtp_bf16(src[i]);
+        });
+        // Pre-FC norms are full-row: one H-wide embedding and one HC*H-wide
+        // backbone. Only the subsequent hc_norm uses H-wide groups.
+        launch_hc_norm(q, emb, mtp4.pre_e, en, 1, 1, H, cfg.rms_eps, none);
+        launch_hc_norm(q, hn, mtp4.pre_h, hn, 1, 1, WIDE, cfg.rms_eps, none);
+        q.parallel_for(sycl::range<1>(WIDE), [=](sycl::id<1> i) {
+            if (i[0] < size_t(H)) en[i] = qfn_mtp_bf16(en[i]);
+            hn[i] = qfn_mtp_bf16(hn[i]);
+        });
+        gemv_any(mtp4.fc_emb, en, mtp4.pend, none);
+        for (int c = 0; c < HC; ++c)
+            gemv_any(mtp4.fc_hid, hn + size_t(c) * H, hyper + size_t(c) * H, none);
+        q.parallel_for(sycl::range<1>(WIDE), [=](sycl::id<1> i) { hyper[i] = qfn_mtp_bf16(hyper[i]); });
+        return;
+    }
     embed_single_event(next_token, mtp4.emb, none);
     launch_rmsnorm_residual(q, mtp4.emb, nullptr, mtp4.pre_e, mtp4.en, H, cfg.rms_eps, none);
     gemv_any(mtp4.fc_emb, mtp4.en, mtp4.pend, none);
@@ -15874,6 +16120,7 @@ void Grimoire::mtp4_warm_row(const float* backbone, int next_token, int position
     launch_rope_dev(q, s.zbuf, d.kv_heads, d.head_dim, s.d_pos, d.rope_theta, d.partial_rope, none);
     launch_kv_append_dev(q, s.zbuf, s.bbuf, d.k_cache, d.v_cache, s.d_pos, d.kv_heads,
                          d.head_dim, max_seq, none);
+    if (!d.qsa) return;
     const int IH = cfg.indexer_n_heads, IHD = cfg.indexer_head_dim, RAT = cfg.indexer_compress_ratio;
     gemv_any(d.ix_qk, s.h2, q4_ixqk, none);
     q.memcpy(d.ix_kraw + int64_t(position) * IHD, q4_ixqk + int64_t(IH) * IHD,
@@ -15915,7 +16162,7 @@ int Grimoire::mtp4_draft(int next_token, int position, bool from_mtp_hidden) {
                         s.d_pos, d.rope_theta, d.partial_rope, cfg.rms_eps, none);
     launch_kv_append_dev(q, s.zbuf, s.bbuf, d.k_cache, d.v_cache, s.d_pos, d.kv_heads,
                          d.head_dim, max_seq, none);
-    {
+    if (d.qsa) {
         const int IH = cfg.indexer_n_heads, IHD = cfg.indexer_head_dim;
         const int RAT = cfg.indexer_compress_ratio, BTK = cfg.indexer_budget / RAT;
         gemv_any(d.ix_qk, s.h2, q4_ixqk, none);
@@ -15964,15 +16211,28 @@ int Grimoire::mtp4_draft(int next_token, int position, bool from_mtp_hidden) {
         if (ap_list) launch_flash_decode_qsa(q, ap, ap_list, ap_n, none);
         else launch_flash_decode(q, ap, none);
         launch_flash_merge(q, ap, none);
+    } else {
+        AttnParams ap{};
+        ap.q = qvec; ap.k_cache = d.k_cache; ap.v_cache = d.v_cache; ap.out = s.attn_out;
+        ap.seq_len = position + 1; ap.seq_cap = max_seq; ap.head_dim = d.head_dim;
+        ap.num_heads = qheads; ap.num_kv_heads = d.kv_heads;
+        ap.softmax_scale = cfg.attn_softmax_scale(d.head_dim);
+        ap.partials = s.part; ap.part_m = s.pm; ap.part_l = s.pl;
+        ap.splits = GRAPH_SPLITS; ap.d_seq_len = s.d_seq_len;
+        launch_flash_decode(q, ap, none);
+        launch_flash_merge(q, ap, none);
     }
     if (gated) launch_gate_sigmoid_mul(q, s.attn_out, s.gsplit, cfg.n_heads * d.head_dim, none);
     gemv_any(d.o_proj, s.attn_out, s.moe_y, none);
     if (tp_mega && !tp_block_reduce(s.moe_y, size_t(H))) return -1;
 
-    // ---- MoE block: mix, router, experts (whole on every rank), shared expert --
+    // The external TP4 head has a replicated router and rank-local experts.
     mtp4_hc_mix(d.hc_mlp, s.moe_y, q4_inj, q4_pinj, s.h2);
     gemv_any(d.router, s.h2, s.rlogits, none);
     launch_router_topk(q, s.rlogits, cfg.n_experts, cfg.top_k, s.d_expert, s.d_weight, true, none);
+    const bool local_experts = d.expert_count != cfg.n_experts;
+    if (local_experts)
+        launch_remap_moe_routes(q, s.d_expert, size_t(cfg.top_k), d.expert_begin, d.expert_begin + d.expert_count);
     launch_moe_gate_up(q, d.moe, s.d_expert, s.h2, s.moe_h, none);
     launch_moe_down(q, d.moe, s.d_expert, s.d_weight, s.moe_h, q4_pend, none);
     if (d.sh_gu.w.N) {
@@ -15986,6 +16246,7 @@ int Grimoire::mtp4_draft(int next_token, int position, bool from_mtp_hidden) {
         }
         launch_add(q, q4_pend, mtp4.sh_out, H, none);
     }
+    if (local_experts && !tp_block_reduce(q4_pend, size_t(H))) return -1;
 
     // ---- final mixer: the pending MoE combine, the head input, and the multi-stream
     //      state (combined) the next chained draft starts from
@@ -18754,9 +19015,17 @@ bool Grimoire::prefill_qwen4_exp(const std::vector<int32_t>& tokens,
     // commit_spec_prefix (which replays the accepted rows and rebuilds conv ring and PLE
     // history).  Declines -- before any work -- when that state was not allocated.
     const bool verify = next_tokens && !seqb;
-    if (verify && !(mtp4.ok && dn_verify_fused && spec_dn_inputs && spec_conv_inputs &&
+    if (verify && !((mtp4.ok || qfn_verify_diagnostic) && dn_verify_fused && spec_dn_inputs && spec_conv_inputs &&
                     spec_multi && M <= kSpecBatch && !pp_enabled()))
         return false;
+    const bool same_batch_tap = verify && qfn_verify_diagnostic;
+    if (same_batch_tap) {
+        if (M != 4 || tokens[kQfnVerifyCheckpointRow] != 1156)
+            throw std::runtime_error("QFN verifier checkpoint requires the frozen proposal row");
+        const float nan = std::numeric_limits<float>::quiet_NaN();
+        q.fill(qfn_verify_direct_dn, nan, spec_dn_elems);
+        q.fill(qfn_verify_direct_conv, nan, spec_conv_elems);
+    }
     // Pipeline: prompts are batched across stages (the multi-stream residual
     // crosses each boundary, every pending combine landed first); batched
     // DECODE steps are not, so a pipeline runs one sequence at a time.
@@ -18953,19 +19222,54 @@ bool Grimoire::prefill_qwen4_exp(const std::vector<int32_t>& tokens,
     const char* qfn_xmx_env = std::getenv("GRIMOIRE_QFN_MOE_XMX");
     const bool qfn_grouped = qfn_xmx_env && std::strcmp(qfn_xmx_env, "2") == 0;
     const bool qfn_ranked_xmx = tp_mega && tp_world == 4 && qfn_grouped;
+    const char* wide_n_env = std::getenv("GRIMOIRE_QFN_GROUPED_WIDE_N");
+    const bool qfn_wide_n = qfn_ranked_xmx && wide_n_env && std::strcmp(wide_n_env, "1") == 0;
+    const bool qfn_grouped_profile = qfn_grouped && std::getenv("GRIMOIRE_QFN_GROUPED_PROFILE");
+    const char* prefetch_env = std::getenv("GRIMOIRE_QFN_GROUPED_K_PREFETCH");
+    const bool qfn_k_prefetch = qfn_ranked_xmx && prefetch_env && std::strcmp(prefetch_env, "1") == 0;
+    unsigned prefetched_gate_up_calls = 0, offset_gate_up_calls = 0;
+    std::array<uint64_t, 2> grouped_ns{};
+    std::array<unsigned, 2> grouped_calls{};
+    const auto grouped_gemm = [&](bool down, const QuantWeight& w, int width, const sycl_bf16* x,
+                                  float* y, const QfnMoeTile* tiles, int count, const int32_t* live = nullptr,
+                                  const int32_t* offsets = nullptr, int workers = 0) {
+        const bool prefetch = qfn_k_prefetch && !down; // measured slower projection
+        auto event = offsets ? launch_qfn_int4_offset_grouped(q, w, width, x, y, offsets, workers)
+                             : launch_qfn_int4_grouped(q, w, width, x, y, tiles, count, {}, qfn_wide_n, live, prefetch);
+        if (offsets) ++offset_gate_up_calls;
+        if (prefetch && count > 0) ++prefetched_gate_up_calls;
+        if (qfn_grouped_profile && count > 0) {
+            using namespace sycl::info::event_profiling;
+            const uint64_t start = event.get_profiling_info<command_start>();
+            const uint64_t end = event.get_profiling_info<command_end>();
+            if (end <= start) throw std::runtime_error("invalid grouped MoE device timestamps");
+            grouped_ns[down] += end - start;
+            ++grouped_calls[down];
+        }
+    };
     const int xmx_experts = qfn_ranked_xmx ? E / 4 : E;
     const bool qfn_xmx = qfn_xmx_env && (qfn_grouped || std::strcmp(qfn_xmx_env, "1") == 0) &&
         !noxmx && !verify && !seqb && (!tp_ranked() || qfn_ranked_xmx) && !ck.gguf_file && SUB >= 32 &&
         E == 512 && TK == 10 && H == 2560 && MI == 640 && q.is_in_order();
     const size_t route_capacity = qfn_xmx ? size_t(SUB) * TK : 0;
+    const char* device_routes_env = std::getenv("GRIMOIRE_QFN_DEVICE_ROUTES");
+    const bool qfn_device_routes = qfn_xmx && qfn_ranked_xmx && device_routes_env &&
+        std::strcmp(device_routes_env, "1") == 0;
+    const char* offset_env = std::getenv("GRIMOIRE_QFN_GROUPED_OFFSET_SCHED");
+    const bool qfn_offset_sched = qfn_device_routes && !qfn_wide_n && !qfn_k_prefetch &&
+                                  offset_env && std::strcmp(offset_env, "1") == 0;
+    const int offset_workers = qfn_offset_sched ? int(q.get_device().get_info<sycl::info::device::max_compute_units>()) : 0;
     int32_t* xmx_pt = nullptr;
     int32_t* xmx_inv = nullptr;
+    int32_t* xmx_counts = nullptr;
+    int32_t* xmx_offsets = nullptr;
+    int32_t* xmx_live_tiles = nullptr;
     sycl_bf16* xmx_x = nullptr;
     float* xmx_gu = nullptr;
     float* xmx_y = nullptr;
     QfnMoeTile* xmx_tiles = nullptr;
     size_t xmx_batches = 0, xmx_launches = 0;
-    std::vector<int32_t> xmx_ids(route_capacity);
+    std::vector<int32_t> xmx_ids(qfn_device_routes ? 0 : route_capacity);
     if (qfn_xmx) {
         xmx_pt = sycl::malloc_device<int32_t>(route_capacity, q);
         xmx_inv = sycl::malloc_device<int32_t>(route_capacity, q);
@@ -18976,6 +19280,12 @@ bool Grimoire::prefill_qwen4_exp(const std::vector<int32_t>& tokens,
         if (qfn_grouped) {
             xmx_tiles = sycl::malloc_device<QfnMoeTile>(xmx_experts + route_capacity / qfn_moe_tile_rows, q);
             mem.push_back(xmx_tiles);
+        }
+        if (qfn_device_routes) {
+            xmx_counts = sycl::malloc_device<int32_t>(xmx_experts, q);
+            xmx_offsets = sycl::malloc_device<int32_t>(xmx_experts + 1, q);
+            xmx_live_tiles = sycl::malloc_device<int32_t>(1, q);
+            mem.insert(mem.end(), {xmx_counts, xmx_offsets, xmx_live_tiles});
         }
     }
     auto cleanup = [&]() { for (void* p : mem) if (p) sycl::free(p, q); };
@@ -19219,7 +19529,9 @@ bool Grimoire::prefill_qwen4_exp(const std::vector<int32_t>& tokens,
     const bool hct = std::getenv("GRIMOIRE_HC_TIMING") != nullptr;
     const char* hf = std::getenv("GRIMOIRE_QFN_HC_FUSED_PREFILL");
     const bool fuse_prefill_hc = hf && std::strcmp(hf, "1") == 0 && qfn_ranked_xmx && qfn_xmx;
-    size_t hc_fused_calls = 0;
+    const char* tile_hc = std::getenv("GRIMOIRE_QFN_HC_DOWN_TILED");
+    const bool tiled_prefill_hc = tile_hc && std::strcmp(tile_hc, "1") == 0 && qfn_ranked_xmx && qfn_xmx;
+    size_t hc_fused_calls = 0, hc_tiled_calls = 0;
     double hcms[7] = {0, 0, 0, 0, 0, 0, 0};   // combine norm down silu up mean inject
     auto hclap = [&](int k, std::chrono::steady_clock::time_point& t) {
         if (!hct) return;
@@ -19284,7 +19596,16 @@ bool Grimoire::prefill_qwen4_exp(const std::vector<int32_t>& tokens,
             traced("hc.norm", [&] { launch_hc_norm(q, HY, hc.norm, normed, MR, HC, H, eps, none); });
             hclap(1, ht);
         }
-        mm(hc.down, normed, lora);
+        if (tiled_prefill_hc && MR >= 32 && hc.down.w.fmt == Fmt::BF16 &&
+            hc.down.w.N == 320 && hc.down.w.K == 10240 && gemm_fast_shape_ok(hc.down.w, MR)) {
+            traced("hc.down.activation_bf16", [&] {
+                launch_f32_to_bf16(q, normed, xb, size_t(MR) * WIDE, none);
+            });
+            traced("hc.down.tiled", [&] { launch_qfn_hc_down_tiled(q, hc.down.w, xb, lora, MR, none); });
+            ++hc_tiled_calls;
+        } else {
+            mm(hc.down, normed, lora);
+        }
         hclap(2, ht);
         traced("hc.silu", [&] { launch_hc_silu(q, lora, MR * LR, HC, none); });
         hclap(3, ht);
@@ -19327,7 +19648,9 @@ bool Grimoire::prefill_qwen4_exp(const std::vector<int32_t>& tokens,
     const char* reduce_env = std::getenv("GRIMOIRE_QFN_TP_PREFILL_REDUCE_TIMING");
     const bool profile = reduce_env && std::strcmp(reduce_env, "1") == 0 && tp_mega && !verify && !seqb;
     using ProfileClock = std::chrono::steady_clock;
-    struct ReduceBucket { size_t calls = 0; double drain = 0, ms = 0; };
+    // The transport's own buckets (copy/ready/sum/reuse) only exist when a
+    // PeerPush4::Timing is handed to allreduce, which until now only decode did.
+    struct ReduceBucket { size_t calls = 0; double drain = 0, ms = 0; PeerPush4::Timing t; };
     enum ReduceKind { PLE, DELTANET, ATTENTION, MOE };
     std::map<std::pair<ReduceKind, size_t>, ReduceBucket> profile_reduce;
     const auto elapsed = [](auto from, auto to) {
@@ -19338,9 +19661,11 @@ bool Grimoire::prefill_qwen4_exp(const std::vector<int32_t>& tokens,
         const auto enter = ProfileClock::now();
         q.wait_and_throw();
         const auto start = ProfileClock::now();
-        const bool success = tp_block_reduce(dev, elems);
-        q.wait_and_throw();
         auto& bucket = profile_reduce[{kind, elems}];
+        // Caller has already drained the queue above, which is what
+        // allreduce(timing) requires.
+        const bool success = tp_block_reduce(dev, elems, &bucket.t);
+        q.wait_and_throw();
         ++bucket.calls;
         bucket.drain += elapsed(enter, start);
         bucket.ms += elapsed(start, ProfileClock::now());
@@ -19515,9 +19840,15 @@ bool Grimoire::prefill_qwen4_exp(const std::vector<int32_t>& tokens,
                     seqb?d.conv_base+size_t(seqb->slot[r])*d.conv_slot:d.conv_ring,
                     nullptr,qkv_ch,cfg.conv_kernel};
                 traced("gdn.conv", [&] {
+                    VerifyRowCheckpoint tap;
+                    if (same_batch_tap) {
+                        const size_t channels_before = vx_xoff[size_t(i)] / kSpecBatch;
+                        tap = {qfn_verify_direct_conv + channels_before * (cfg.conv_kernel - 1),
+                               kQfnVerifyCheckpointRow};
+                    }
                     launch_causal_conv1d_split_prefill(q,cp,seqb?1:MR,
                         t1+int64_t(r)*Hk*Dk,t2+int64_t(r)*Hk*Dk,
-                        t3+int64_t(r)*Hv*Dv,nullptr,Hk*Dk,Hv*Dv);
+                        t3+int64_t(r)*Hv*Dv,nullptr,Hk*Dk,Hv*Dv,{},tap);
                 });
             }
             traced("gdn.q_norm", [&] { launch_l2norm_heads(q, t1, MR * Hk, Dk, none); });
@@ -19538,7 +19869,10 @@ bool Grimoire::prefill_qwen4_exp(const std::vector<int32_t>& tokens,
                 g.row0[0] = 0; g.nrows[0] = MR; g.slot[0] = 0; g.n = 1;
                 const size_t dn_n = size_t(Hv) * Dv * Dk;
                 float* saved = spec_dn_inputs + (vx_doff[size_t(i)] / dn_n) * kSpecBatch * spec_dn_row_floats;
-                launch_deltanet_verify_rows(q, sp, g, 0, saved, {});
+                const VerifyRowCheckpoint tap = same_batch_tap
+                    ? VerifyRowCheckpoint{qfn_verify_direct_dn + vx_doff[size_t(i)], kQfnVerifyCheckpointRow}
+                    : VerifyRowCheckpoint{};
+                launch_deltanet_verify_rows(q, sp, g, 0, saved, {}, tap);
             } else
             if (MR <= 16) {
                 for (int t = 0; t < MR; ++t) {
@@ -19832,6 +20166,10 @@ bool Grimoire::prefill_qwen4_exp(const std::vector<int32_t>& tokens,
             }
             q4xlap(2);
             bool sh_done = false;           // the shared expert already added (verify, below)
+            const bool packed_xmx = qfn_xmx && MR >= 32 && d.expert_count == xmx_experts &&
+                d.moe.gate_up.fmt == Fmt::INT4 && d.moe.down.fmt == Fmt::INT4 &&
+                d.moe.gate_up.N == xmx_experts * 2 * MI && d.moe.gate_up.K == H &&
+                d.moe.down.N == xmx_experts * H && d.moe.down.K == MI;
             if (moe_full) {
                 // the routed experts run below, once over every row
             } else if (moe_cpu) {           // M <= cpu_rows_max: one sub-chunk
@@ -19853,10 +20191,33 @@ bool Grimoire::prefill_qwen4_exp(const std::vector<int32_t>& tokens,
                 }
                 launch_tmoe_gate_up(q, tm_view(d), RX, BI, mh, MR, none);
                 launch_tmoe_down(q, tm_view(d), RX, RW, mh, PE, MR, none);
-            } else if (qfn_xmx && MR >= 32 && d.expert_count == xmx_experts &&
-                       d.moe.gate_up.fmt == Fmt::INT4 && d.moe.down.fmt == Fmt::INT4 &&
-                       d.moe.gate_up.N == xmx_experts * 2 * MI && d.moe.gate_up.K == H &&
-                       d.moe.down.N == xmx_experts * H && d.moe.down.K == MI) {
+            } else if (packed_xmx && qfn_device_routes) {
+                const int slots = MR * TK;
+                const int max_tiles = xmx_experts + slots / qfn_moe_tile_rows;
+                if (profile) q.wait_and_throw();
+                const auto route_start = profile ? ProfileClock::now() : ProfileClock::time_point{};
+                launch_qfn_device_routes(q, RX, slots, TK, d.expert_begin, xmx_experts,
+                                         xmx_counts, xmx_offsets, xmx_inv, xmx_pt,
+                                         xmx_live_tiles, xmx_tiles);
+                if (profile) q.wait_and_throw();
+                const auto expert_start = profile ? ProfileClock::now() : ProfileClock::time_point{};
+                if (profile) route_plan_ms += elapsed(route_start, expert_start);
+                // The in-order queue carries the device-produced live sizes.
+                // No readback is needed, even when this rank owns no routes.
+                const auto* const live_rows = xmx_offsets + xmx_experts;
+                launch_permute_rows_bf16(q, BI, xmx_pt, xmx_x, slots, H, none, live_rows);
+                grouped_gemm(false, d.moe.gate_up, 2 * MI, xmx_x, xmx_gu, xmx_tiles, max_tiles, xmx_live_tiles,
+                             qfn_offset_sched ? xmx_offsets : nullptr, offset_workers);
+                launch_swiglu_bf16_out(q, xmx_gu, xmx_x, slots, MI, none, live_rows);
+                grouped_gemm(true, d.moe.down, H, xmx_x, xmx_y, xmx_tiles, max_tiles, xmx_live_tiles);
+                launch_moe_unpermute(q, xmx_y, xmx_inv, RW, PE, MR, TK, H);
+                ++xmx_batches;
+                xmx_launches += 2;
+                if (profile) {
+                    q.wait_and_throw();
+                    routed_device_ms += elapsed(expert_start, ProfileClock::now());
+                }
+            } else if (packed_xmx) {
                 if (profile) q.wait_and_throw();
                 const auto route_start = profile ? ProfileClock::now() : ProfileClock::time_point{};
                 const size_t slots = size_t(MR) * TK;
@@ -19875,8 +20236,7 @@ bool Grimoire::prefill_qwen4_exp(const std::vector<int32_t>& tokens,
                 if (rows) {
                     launch_permute_rows_bf16(q, BI, xmx_pt, xmx_x, rows, H);
                     if (qfn_grouped) {
-                        launch_qfn_int4_grouped(q, d.moe.gate_up, 2 * MI, xmx_x, xmx_gu,
-                                                xmx_tiles, int(tiles.size()));
+                        grouped_gemm(false, d.moe.gate_up, 2 * MI, xmx_x, xmx_gu, xmx_tiles, int(tiles.size()));
                         xmx_launches += 2;
                     } else for (int e = 0; e < E; ++e) if (plan.counts[e]) {
                         const size_t off = size_t(plan.offsets[e]);
@@ -19887,8 +20247,7 @@ bool Grimoire::prefill_qwen4_exp(const std::vector<int32_t>& tokens,
                     }
                     launch_swiglu_bf16_out(q, xmx_gu, xmx_x, rows, MI);
                     if (qfn_grouped)
-                        launch_qfn_int4_grouped(q, d.moe.down, H, xmx_x, xmx_y,
-                                                xmx_tiles, int(tiles.size()));
+                        grouped_gemm(true, d.moe.down, H, xmx_x, xmx_y, xmx_tiles, int(tiles.size()));
                     else for (int e = 0; e < E; ++e) if (plan.counts[e]) {
                         const size_t off = size_t(plan.offsets[e]);
                         const auto w = slice_quant_rows(d.moe.down, e * H, H);
@@ -19994,8 +20353,10 @@ bool Grimoire::prefill_qwen4_exp(const std::vector<int32_t>& tokens,
             const auto [kind, elems] = key;
             calls += bucket.calls;
             comm += bucket.ms;
-            std::fprintf(stderr, "QFN TP prefill reduce rank=%d pos=%d rows=%d kind=%s elems=%zu calls=%zu comm_ms=%.3f drain_ms=%.3f\n",
-                         tp_rank, start_pos, M, names[kind], elems, bucket.calls, bucket.ms, bucket.drain);
+            std::fprintf(stderr, "QFN TP prefill reduce rank=%d pos=%d rows=%d kind=%s elems=%zu calls=%zu comm_ms=%.3f drain_ms=%.3f "
+                         "copy_ms=%.3f ready_ms=%.3f sum_ms=%.3f reuse_ms=%.3f\n",
+                         tp_rank, start_pos, M, names[kind], elems, bucket.calls, bucket.ms, bucket.drain,
+                         bucket.t.copy_ms, bucket.t.ready_ms, bucket.t.sum_ms, bucket.t.reuse_ms);
         }
         std::fprintf(stderr, "QFN TP prefill profile rank=%d pos=%d rows=%d calls=%zu grouped=%zu span_ms=%.3f communication_ms=%.3f "
                      "routed_plan_ms=%.3f routed_device_ms=%.3f rest_ms=%.3f\n",
@@ -20007,12 +20368,26 @@ bool Grimoire::prefill_qwen4_exp(const std::vector<int32_t>& tokens,
         if (!act) throw std::runtime_error("close of QFN activation capture failed");
     }
     R0 = 0; MR = M; HY = hyper;             // the whole call again (seqb tail)
+    if (tiled_prefill_hc && std::getenv("GRIMOIRE_BUDGET_DEBUG"))
+        std::fprintf(stderr, "QFN HC prefill tiled rank=%d pos=%d rows=%d calls=%zu\n",
+                     tp_rank, start_pos, M, hc_tiled_calls);
     if (fuse_prefill_hc && std::getenv("GRIMOIRE_BUDGET_DEBUG"))
         std::fprintf(stderr, "QFN HC prefill fused rank=%d pos=%d rows=%d calls=%zu\n",
                      tp_rank, start_pos, M, hc_fused_calls);
-    if (xmx_batches && std::getenv("GRIMOIRE_QFN_MOE_TRACE"))
-        std::fprintf(stderr, "  QFN MoE XMX mode=%d prefill_rows=%d dispatches=%zu gemm_launches=%zu\n",
-                     qfn_grouped ? 2 : 1, M, xmx_batches, xmx_launches);
+    if (qfn_grouped_profile && xmx_batches)
+        std::fprintf(stderr, "QFN grouped projection: rank=%d rows=%d gu_calls=%u gu_ms=%.3f down_calls=%u down_ms=%.3f\n",
+                     tp_rank, M, grouped_calls[0], double(grouped_ns[0]) / 1e6,
+                     grouped_calls[1], double(grouped_ns[1]) / 1e6);
+    if (xmx_batches && std::getenv("GRIMOIRE_QFN_MOE_TRACE")) {
+        std::fprintf(stderr, "  QFN MoE XMX mode=%d prefill_rows=%d dispatches=%zu gemm_launches=%zu device_routes=%d wide_n=%d\n",
+                     qfn_grouped ? 2 : 1, M, xmx_batches, xmx_launches, int(qfn_device_routes), int(qfn_wide_n));
+        if (prefetched_gate_up_calls)
+            std::fprintf(stderr, "QFN grouped K prefetch: projection=gate_up rows=%d calls=%u\n",
+                         M, prefetched_gate_up_calls);
+        if (offset_gate_up_calls)
+            std::fprintf(stderr, "QFN grouped offset scheduler: projection=gate_up rows=%d calls=%u workers=%d\n",
+                         M, offset_gate_up_calls, offset_workers);
+    }
     if (q4t) {
         std::fprintf(stderr, "  qwen4_exp prefill M=%d (sub-chunks of %d): PLE %.1f  HC %.1f  DeltaNet %.1f  "
                      "full-attn %.1f  MoE %.1f ms  (PLE rows read %ld in %.1f ms)\n",
@@ -20095,10 +20470,15 @@ bool Grimoire::prefill_qwen4_exp(const std::vector<int32_t>& tokens,
                 else launch_mxfp4_smallm_fast(q,lm_head.w,xb,vlog,M);
             }
         }
+        const int valid_logits = tp_head_split ? head_valid : cfg.vocab;
+        if (verify && qfn_verify_diagnostic) qfn_verify_logits.resize(size_t(M) * valid_logits);
         for(int r=0;r<M;++r) {
             float* row=vlog?vlog+int64_t(r)*HN:s.logits;
             if(!vlog) gemv_any(lm_head,blk_in+int64_t(r)*H,s.logits,none);
-            launch_argmax(q,row,tp_head_split?head_valid:cfg.vocab,s.d_tok,s.d_val,none);
+            if (verify && qfn_verify_diagnostic)
+                q.memcpy(qfn_verify_logits.data() + size_t(r) * valid_logits, row,
+                         size_t(valid_logits) * sizeof(float));
+            launch_argmax(q,row,valid_logits,s.d_tok,s.d_val,none);
             q.memcpy(next_tokens->data()+r,s.d_tok,sizeof(int32_t));
             if(tp_head_split)q.memcpy(hv.data()+r,s.d_val,sizeof(float));
         }
@@ -20115,7 +20495,7 @@ bool Grimoire::prefill_qwen4_exp(const std::vector<int32_t>& tokens,
             }
             // the head's caches for the candidate rows, each with the candidate after it; a
             // rejected row's entries are rewritten when that position is decoded for real
-            for(int r=0;r+1<M;++r)
+            if (mtp4.ok) for(int r=0;r+1<M;++r)
                 mtp4_warm_row(spec_multi+int64_t(r)*WIDE,tokens[size_t(r+1)],start_pos+r);
             set_cursor(start_pos);
             q.wait_and_throw();
@@ -20129,15 +20509,22 @@ bool Grimoire::prefill_qwen4_exp(const std::vector<int32_t>& tokens,
     // MTP head (mtp4): the last rows' multi-stream states after their combine fill the
     // head's caches, each with the token after it; the last row's is its backbone input
     if (mtp4.ok) {
-        const int W = std::min(M, kMtp4WarmRows), r0 = M - W;
-        if (pending)
-            launch_hc_combine(q, hyper + int64_t(r0) * WIDE, pinj + int64_t(r0) * HC,
-                              pend + int64_t(r0) * H, mtp4.rows, W, HC, H, none);
-        else
-            q.memcpy(mtp4.rows, hyper + int64_t(r0) * WIDE, size_t(W) * WIDE * sizeof(float));
-        for (int r = r0; r < M - 1; ++r)
-            mtp4_warm_row(mtp4.rows + int64_t(r - r0) * WIDE, tokens[size_t(r + 1)], start_pos + r);
-        q.memcpy(mtp4.back, mtp4.rows + int64_t(W - 1) * WIDE, size_t(WIDE) * sizeof(float));
+        // The isolated TP4 gate reads the complete draft context. Fill every
+        // visible row, tiling the existing scratch instead of leaving holes
+        // when a prompt chunk exceeds kMtp4WarmRows. Ordinary MTP is unchanged.
+        for (int r0 = qfn_mtp3_diagnostic ? 0 : std::max(0, M - kMtp4WarmRows);
+             r0 < M; r0 += kMtp4WarmRows) {
+            const int W = std::min(M - r0, kMtp4WarmRows);
+            if (pending)
+                launch_hc_combine(q, hyper + int64_t(r0) * WIDE, pinj + int64_t(r0) * HC,
+                                  pend + int64_t(r0) * H, mtp4.rows, W, HC, H, none);
+            else
+                q.memcpy(mtp4.rows, hyper + int64_t(r0) * WIDE, size_t(W) * WIDE * sizeof(float));
+            for (int r = r0; r < std::min(r0 + W, M - 1); ++r)
+                mtp4_warm_row(mtp4.rows + int64_t(r - r0) * WIDE, tokens[size_t(r + 1)], start_pos + r);
+            if (r0 + W == M)
+                q.memcpy(mtp4.back, mtp4.rows + int64_t(W - 1) * WIDE, size_t(WIDE) * sizeof(float));
+        }
     }
     // prefill()'s contract includes s.logits for the LAST row: the caller
     // takes the first generated token from it and does not re-run the
@@ -23861,6 +24248,176 @@ static int qfn_tp4_peer_regression() {
     }
 }
 
+// Frozen target-only replay uses the same prompt chunking and one-token
+// target path. No replay is used to implement the speculative commit itself.
+static int qfn_verify_frozen(Grimoire& e, const std::vector<int32_t>& prompt) {
+    constexpr int start = 2706, anchor = 760, correction = 16561, next = 864;
+    constexpr std::array<int32_t, 3> proposals{1156, 16562, 16563};
+    if (prompt.size() != start || !e.qfn_tp4_plan || e.mtp4.ok || e.mtp.ok || e.dflash2.ok ||
+        !e.dn_verify_fused || e.prefix_cache_usable())
+        throw std::runtime_error("frozen verifier requires the 2706-token native TP4 prompt, verifier scratch, MTP and prefix cache off");
+    int draft_calls = 0, decisions = 0;
+    GenerationOptions opt;
+    opt.max_tokens = 4; // allow three proposals after the anchor
+    opt.draft_depth = int(proposals.size());
+    opt.diagnostic_draft = [&](int32_t prev, int at, bool advance) {
+        const int j = draft_calls++;
+        if (j >= int(proposals.size()) || at != start + j || advance != (j > 0) ||
+            prev != (j ? proposals[size_t(j-1)] : anchor))
+            throw std::runtime_error("frozen verifier draft input differs from fixture");
+        return proposals[size_t(j)];
+    };
+    opt.agree_greedy_commit = [&](const GreedySpecCommit& c) {
+        ++decisions;
+        std::fprintf(stderr, "QFN verify decision rank=%d start=%d rows=%d next=%d batched=%d\n",
+                     e.tp_rank, c.start, c.rows, c.next_token, int(c.verified));
+        int at = c.start, rows = c.verified ? c.rows : 0, token = c.next_token;
+        return e.tp_agree(at) && e.tp_agree(rows) && e.tp_agree(token) &&
+               at == start && rows == 2 && token == correction;
+    };
+    FinishReason reason{};
+    std::vector<int32_t> out, reference;
+    const int valid_logits = e.tp_head_split ? e.head_valid : e.cfg.vocab;
+    const auto verify_once = [&] {
+        draft_calls = decisions = 0;
+        generate_tokens(e, prompt, opt, out, [&](int32_t) { return out.size() < 3; }, reason);
+        int commit_ok = out == std::vector<int32_t>{anchor, proposals[0], correction} &&
+            draft_calls == 3 && decisions == 1 && e.pos == start + 2 &&
+            e.qfn_verify_logits.size() == 4 * size_t(valid_logits);
+        if (!e.tp_agree_min(commit_ok) || !commit_ok)
+            throw std::runtime_error("frozen verifier did not commit exactly the anchor and proposal one");
+    };
+    verify_once();
+
+    struct State {
+        int32_t device_pos = -1, read_length = -1;
+        std::vector<int32_t> prefix;
+        std::vector<float> recurrent, conv, logits;
+    };
+    const auto visit_state = [&](auto&& visit) {
+        const size_t dn = size_t(e.cfg.lin_v_heads) * e.cfg.lin_v_dim * e.cfg.lin_k_dim;
+        const size_t cv = (2 * size_t(e.cfg.lin_k_heads) * e.cfg.lin_k_dim +
+                           size_t(e.cfg.lin_v_heads) * e.cfg.lin_v_dim) * (e.cfg.conv_kernel - 1);
+        size_t di = 0, ci = 0;
+        for (const auto& layer : e.L) {
+            if (layer.dn_state) {
+                visit(layer.dn_state, di, dn, true);
+                di += dn;
+            }
+            if (layer.conv_ring) {
+                visit(layer.conv_ring, ci, cv, false);
+                ci += cv;
+            }
+        }
+    };
+    const auto capture = [&](const float* device_logits, bool direct = false) {
+        State state;
+        state.prefix.resize(size_t(e.pos));
+        state.recurrent.resize(e.spec_dn_elems);
+        state.conv.resize(e.spec_conv_elems);
+        if (direct) {
+            e.q.memcpy(state.recurrent.data(), e.qfn_verify_direct_dn, state.recurrent.size() * sizeof(float));
+            e.q.memcpy(state.conv.data(), e.qfn_verify_direct_conv, state.conv.size() * sizeof(float));
+        } else visit_state([&](float* src, size_t off, size_t n, bool recurrent) {
+            auto& values = recurrent ? state.recurrent : state.conv;
+            e.q.memcpy(values.data() + off, src, n * sizeof(float));
+        });
+        e.q.memcpy(&state.device_pos, e.s.d_pos, sizeof(int32_t));
+        e.q.memcpy(&state.read_length, e.s.d_seq_len, sizeof(int32_t));
+        e.q.memcpy(state.prefix.data(), e.q4_tok, state.prefix.size() * sizeof(int32_t));
+        if (device_logits) {
+            state.logits.resize(size_t(valid_logits));
+            e.q.memcpy(state.logits.data(), device_logits, state.logits.size() * sizeof(float));
+        }
+        e.sync();
+        return state;
+    };
+    const auto compare = [&](const char* control, const State& got, const State& want, int pos, bool logits) {
+        const bool prefix_ok = got.prefix == want.prefix && want.prefix.size() == size_t(pos) &&
+            std::equal(prompt.begin(), prompt.end(), want.prefix.begin()) &&
+            want.prefix[start] == anchor && want.prefix[start + 1] == proposals[0] &&
+            (pos == start + 2 || want.prefix[start + 2] == correction);
+        const bool cursor_ok = got.device_pos == pos && want.device_pos == pos &&
+            got.read_length == pos + 1 && want.read_length == pos + 1;
+        std::fprintf(stderr, "QFN verify prefix rank=%d control=%s pos=%d prefix=%d cursor=%d\n",
+                     e.tp_rank, control, pos, int(prefix_ok), int(cursor_ok));
+        bool same = prefix_ok && cursor_ok;
+        const auto compare_values = [&](const char* kind, const std::vector<float>& a,
+                                        const std::vector<float>& b) {
+            if (a.size() != b.size() || a.empty()) return false;
+            size_t differs = 0, nonfinite = 0;
+            double max_abs = 0, squared = 0;
+            for (size_t i = 0; i < a.size(); ++i) {
+                differs += std::memcmp(a.data() + i, b.data() + i, sizeof(float)) != 0;
+                if (!std::isfinite(a[i]) || !std::isfinite(b[i])) { ++nonfinite; continue; }
+                const double delta = std::abs(double(a[i]) - double(b[i]));
+                max_abs = std::max(max_abs, delta);
+                squared += delta * delta;
+            }
+            std::fprintf(stderr, "QFN verify compare rank=%d control=%s pos=%d kind=%s elems=%zu different=%zu "
+                         "nonfinite=%zu max_abs=%.9g rms=%.9g\n", e.tp_rank, control, pos, kind, a.size(),
+                         differs, nonfinite, max_abs, std::sqrt(squared / double(a.size())));
+            return !differs && !nonfinite;
+        };
+        same = compare_values("recurrent", got.recurrent, want.recurrent) && same;
+        same = compare_values("conv_ring", got.conv, want.conv) && same;
+        if (logits) same = compare_values("next_logits", got.logits, want.logits) && same;
+        return same;
+    };
+    auto verified = capture(nullptr);
+    // Compare the accepted row's logits in the sequential control; s.logits
+    // holds the last rejected row, so it is not a commit-boundary readout.
+    const float* accepted_logits = e.qfn_verify_logits.data() +
+        size_t(Grimoire::kQfnVerifyCheckpointRow) * valid_logits;
+    verified.logits.assign(accepted_logits, accepted_logits + valid_logits);
+    const auto direct = capture(nullptr, true);
+    const bool same_commit = compare("same-batch", verified, direct, start + 2, false);
+    if (!e.forward(correction)) throw std::runtime_error("frozen restored-state correction step failed");
+    const int verified_next = e.argmax_token();
+    const auto corrected = capture(e.s.logits);
+
+    // Start from a fresh copy of the same committed verifier context, rather
+    // than re-entering the already-written correction row. PLE and KV are
+    // common to both verifier branches; replace only the recurrent and conv
+    // state under test with the independent checkpoint from the first pass.
+    verify_once();
+    const bool repeat_commit = compare("same-batch-repeat", direct, capture(nullptr, true), start + 2, false);
+    visit_state([&](float* dst, size_t off, size_t n, bool recurrent) {
+        const auto& vals = recurrent ? direct.recurrent : direct.conv;
+        e.q.memcpy(dst, vals.data() + off, n * sizeof(float));
+    });
+    if (!e.forward(correction)) throw std::runtime_error("frozen direct-checkpoint correction step failed");
+    const int direct_next = e.argmax_token();
+    const bool same_correction = compare("same-batch", corrected, capture(e.s.logits), start + 3, true);
+    const bool same_batch = same_commit && repeat_commit && same_correction && verified_next == next && direct_next == next;
+    std::fprintf(stderr, "QFN verify same-batch result rank=%d prefix_tokens=%d restored_next=%d direct_next=%d "
+                 "commit_exact=%d repeat_checkpoint_exact=%d correction_exact=%d pass=%d\n", e.tp_rank, start + 2,
+                 verified_next, direct_next, int(same_commit), int(repeat_commit), int(same_correction), int(same_batch));
+
+    GenerationOptions plain;
+    plain.max_tokens = 3; // emits the correction but does not consume it
+    generate_tokens(e, prompt, plain, reference, {}, reason);
+    auto target = capture(e.s.logits);
+    const bool sequential_commit = compare("sequential", verified, target, start + 2, true);
+    if (!e.forward(correction)) throw std::runtime_error("frozen target-only correction step failed");
+    const int target_next = e.argmax_token();
+    target = capture(e.s.logits);
+    const bool sequential_correction = compare("sequential", corrected, target, start + 3, true);
+    const bool tokens_match = out == reference && verified_next == next && target_next == next;
+    const bool sequential = sequential_commit && sequential_correction && tokens_match;
+    std::fprintf(stderr, "QFN verify sequential result rank=%d prefix_tokens=%d restored_next=%d target_next=%d "
+                 "tokens_match=%d exact_state_and_logits=%d pass=%d\n", e.tp_rank, start + 2,
+                 verified_next, target_next, int(tokens_match), int(sequential_commit && sequential_correction), int(sequential));
+    int gates = same_batch ? (sequential ? 2 : 1) : 0;
+    if (!e.tp_agree_min(gates) || !gates) return 1;
+    return gates == 2 ? 0 : 2;
+}
+
+static int generate_ranked(Grimoire& e, const std::vector<int32_t>& prompt_ids,
+                           int n_predict, int eos_id, std::vector<int32_t>& out_ids, int eot_id,
+                           const std::function<bool(int32_t)>& on_token, FinishReason* finish,
+                           bool diagnostic_mtp3);
+
 int grimoire_generate(const std::string& dir, Fmt proj_fmt, int max_seq,
                       const std::string& prompt, int n_predict) {
     std::setvbuf(stdout,nullptr,_IONBF,0);
@@ -23868,6 +24425,9 @@ int grimoire_generate(const std::string& dir, Fmt proj_fmt, int max_seq,
     Tokenizer tk;std::string err;
     if(!tk.load(dir,err)){std::fprintf(stderr,"tokenizer: %s\n",err.c_str());return 1;}
     Grimoire e;
+    const char* verify = std::getenv("GRIMOIRE_QFN_TP4_VERIFY_DIAGNOSTIC");
+    e.qfn_verify_diagnostic = verify && std::strcmp(verify, "1") == 0;
+    e.qfn_mtp3_diagnostic = verify && std::strcmp(verify, "mtp3") == 0;
     if(!grimoire_load(e,dir,proj_fmt,max_seq,err)) {
         std::fprintf(stderr,"load: %s\n",err.c_str());e.release();return 1;
     }
@@ -23889,6 +24449,11 @@ int grimoire_generate(const std::string& dir, Fmt proj_fmt, int max_seq,
             for(int32_t t:ids)std::fprintf(stderr," %d",t);
             std::fprintf(stderr,"\n");
         }
+        if (e.qfn_verify_diagnostic) {
+            const int rc = qfn_verify_frozen(e, ids);
+            e.release();
+            return rc;
+        }
         if (std::getenv("GRIMOIRE_QFN_MOE_ROW_STOP")) {
             if (!e.cfg.is_qwen4_exp) throw std::runtime_error("QFN router stop requires Flash-Next");
             e.reset();
@@ -23905,8 +24470,8 @@ int grimoire_generate(const std::string& dir, Fmt proj_fmt, int max_seq,
         };
         FinishReason reason;
         const auto start=std::chrono::steady_clock::now();
-        int n=grimoire_serve_generate(e,ids,n_predict,tk.eos(),out,tk.eos2(),
-            [&](int32_t t){return decoder.push(t,emit);},&reason);
+        int n=generate_ranked(e,ids,n_predict,tk.eos(),out,tk.eos2(),
+            [&](int32_t t){return decoder.push(t,emit);},&reason,e.qfn_mtp3_diagnostic);
         decoder.finish(emit);
         std::printf("\n");
         if(std::getenv("GRIMOIRE_PRINT_IDS")){
@@ -23950,12 +24515,10 @@ bool grimoire_load(Grimoire& e, const std::string& dir, Fmt proj_fmt,
     return e.build(dir, opt, err);
 }
 
-// Persistent OpenAI server generation. Speculative decode and the direct
-// greedy fallback share the same resident engine state.
-int grimoire_serve_generate(Grimoire& e, const std::vector<int32_t>& prompt_ids,
-                             int n_predict, int eos_id, std::vector<int32_t>& out_ids,
-                             int eot_id, const std::function<bool(int32_t)>& on_token,
-                             FinishReason* finish) {
+static int generate_ranked(Grimoire& e, const std::vector<int32_t>& prompt_ids,
+                           int n_predict, int eos_id, std::vector<int32_t>& out_ids, int eot_id,
+                           const std::function<bool(int32_t)>& on_token, FinishReason* finish,
+                           bool diagnostic_mtp3) {
     GenerationOptions o;
     o.max_tokens=n_predict; o.eos=eos_id; o.eot=eot_id;
     // Under PP the drafter lives on the LAST stage only, so an earlier
@@ -23979,11 +24542,27 @@ int grimoire_serve_generate(Grimoire& e, const std::vector<int32_t>& prompt_ids,
     // only the last stage holds the head, and if the ranks disagreed
     // here they would run different decode loops and deadlock.
     o.mtp=e.spec_active() && o.draft_depth>0 && e.spec_verify_available();
+    if (diagnostic_mtp3) {
+        if (!e.qfn_mtp3_diagnostic || !e.qfn_tp4_plan || !e.mtp4.ok || !e.mtp4.external ||
+            !e.dn_verify_fused || !e.spec_verify_available() || o.dflash || e.prefix_cache_usable())
+            throw std::runtime_error("QFN MTP3 diagnostic requires the native external draft and batched verifier with prefix cache off");
+        o.draft_depth = 3;
+        o.mtp = true;
+    }
+    if (o.mtp && e.qfn_tp4_plan) {
+        o.agree_greedy_commit = [&e](const GreedySpecCommit& c) {
+            // All ranks must finish the same exchange even on a mismatch.
+            // Negative rows encode a verifier decline; do not commit them.
+            int pos = c.start, rows = c.verified ? c.rows : 0, next = c.next_token;
+            if (!e.tp_agree(pos) || !e.tp_agree(rows) || !e.tp_agree(next)) return false;
+            return pos == c.start && rows > 0 && rows == c.rows && next == c.next_token;
+        };
+    }
     // Graph replay by default (GRIMOIRE_DECODE_GRAPH=0 = direct submission).
     // MEASURED 2026-09-30, Ornith plain decode: 119.7 -> 122.0 tok/s, the
     // same 256 tokens.
     const char* graph=std::getenv("GRIMOIRE_DECODE_GRAPH");
-    o.graph=!graph || std::atoi(graph)!=0;
+    o.graph=!diagnostic_mtp3 && (!graph || std::atoi(graph)!=0);
     // GRIMOIRE_SPEC_STATS=1 prints accepted-per-step per request.  This is
     // the measurement an A/B needs and tok/s cannot give: a change that
     // makes the draft cheaper and a change that makes it more accurate both
@@ -24063,6 +24642,14 @@ int grimoire_serve_generate(Grimoire& e, const std::vector<int32_t>& prompt_ids,
         }
         e.sync();e.reset();throw;
     }
+}
+
+// Persistent serving cannot select the isolated CLI diagnostic.
+int grimoire_serve_generate(Grimoire& e, const std::vector<int32_t>& prompt_ids,
+                            int n_predict, int eos_id, std::vector<int32_t>& out_ids,
+                            int eot_id, const std::function<bool(int32_t)>& on_token,
+                            FinishReason* finish) {
+    return generate_ranked(e, prompt_ids, n_predict, eos_id, out_ids, eot_id, on_token, finish, false);
 }
 
 // Several conversations, answered together.

@@ -18,10 +18,20 @@ bin/test_http: tests/test_http.cpp include/b70/http_request.hpp include/b70/json
 	@mkdir -p bin
 	$(CXX) $(CXXFLAGS) $< -o $@
 
+bin/test_qfn_offset_scheduler: regressions/2026-11-20-qfn-offset-scheduler/test_qfn_offset_scheduler.cpp include/b70/qfn_moe_offset_schedule.hpp include/b70/qfn_moe_routes.hpp
+	@mkdir -p bin
+	$(CXX) $(CXXFLAGS) $< -o $@
+
 .PHONY: test-correctness
-test-correctness: bin/test_generation bin/test_http
+bin/test_qfn_qsa_reference: regressions/2026-11-21-qfn-qsa-dpas/test_qsa_attention_reference.cpp
+	@mkdir -p bin
+	$(CXX) -std=c++20 -O2 -Wall -Wextra -Werror $< -o $@
+
+test-correctness: bin/test_generation bin/test_http bin/test_qfn_offset_scheduler bin/test_qfn_qsa_reference
 	./bin/test_generation
 	./bin/test_http
+	./bin/test_qfn_offset_scheduler
+	./bin/test_qfn_qsa_reference
 
 HOST_MODEL_SRC = src/quantize.cpp src/qwen35_loader.cpp src/safetensors.cpp src/native_model.cpp src/gguf.cpp src/gguf_decode.cpp src/gguf_qwen35.cpp src/tokenizer.cpp
 tools: bin/grimoire-quantize bin/inspect_native_model bin/gguf_inspect bin/tok_dump
@@ -76,9 +86,9 @@ bin/test_qfn_k8v4: $(QFN_REG)-k8v4/test_qfn_k8v4.cpp
 	@mkdir -p bin
 	$(CXX) $(CXXFLAGS) $< -o $@
 
-bin/test_qfn_draft_int4: $(QFN_REG)-draft-int4/test_qfn_draft_int4.cpp include/b70/weights.hpp include/b70/formats.hpp
+bin/test_qfn_draft_int4: $(QFN_REG)-draft-int4/test_qfn_draft_int4.cpp $(HOST_MODEL_SRC) $(wildcard include/b70/*.hpp)
 	@mkdir -p bin
-	$(CXX) $(CXXFLAGS) $< -o $@
+	$(CXX) $(CXXFLAGS) $(filter %.cpp,$^) -o $@
 
 bin/test_qfn_qgate: $(QFN_REG)-qgate/test_qfn_qgate.cpp include/b70/qgate_layout.hpp include/b70/qfn_shard_plan.hpp
 	@mkdir -p bin
@@ -91,7 +101,7 @@ test-qfn: $(QFN_TESTS) $(QFN_TOOLS)
 	./bin/test_qfn_shard_plan
 	./bin/test_qfn_qgate $(QFN_REG)-qgate/vllm-qgate.i32 $(QFN_REG)-qgate/vllm-loader-rank-rows.i32
 	./bin/test_qfn_k8v4
-	./bin/test_qfn_draft_int4
+	env -u GRIMOIRE_MODEL_ROOT ./bin/test_qfn_draft_int4
 	./bin/qfn_parity_receipt --self-test
 	./bin/qfn_compare_dn_prefix --self-test
 	./bin/test_qfn_inputs

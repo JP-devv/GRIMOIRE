@@ -567,6 +567,30 @@ sycl::event launch_l2norm_heads(sycl::queue& q, float* x, int n_heads, int dim,
     });
 }
 
+// In-place FP32 q/k pair: one launch instead of two, identical arithmetic per
+// element (same fma order, same rsqrt on the same sum), no extra scaling.
+sycl::event launch_l2norm_heads_pair_f32(sycl::queue& q, float* a, float* b,
+                                         int n_heads, int dim,
+                                         const std::vector<sycl::event>& deps) {
+    return q.submit([&](sycl::handler& h) {
+        h.depends_on(deps);
+        h.parallel_for(
+            sycl::nd_range<1>(size_t(2) * n_heads * SG_SIZE, SG_SIZE),
+            [=](sycl::nd_item<1> it) [[sycl::reqd_sub_group_size(SG_SIZE)]] {
+                const auto sg = it.get_sub_group();
+                const int lane = int(sg.get_local_id()[0]);
+                const int g = int(it.get_group(0));
+                const int head = g >= n_heads ? g - n_heads : g;
+                float* p = (g >= n_heads ? b : a) + int64_t(head) * dim;
+                float ss = 0.0f;
+                for (int i = lane; i < dim; i += SG_SIZE) ss = sycl::fma(p[i], p[i], ss);
+                ss = sycl::reduce_over_group(sg, ss, sycl::plus<float>());
+                const float inv = sycl::rsqrt(ss + 1e-6f);
+                for (int i = lane; i < dim; i += SG_SIZE) p[i] *= inv;
+            });
+    });
+}
+
 sycl::event launch_l2norm_heads_pair_bf16(sycl::queue& q,const float* qsrc,
     const float* ksrc,sycl_bf16* qdst,sycl_bf16* kdst,int n_heads,int dim,
     const std::vector<sycl::event>& deps) {

@@ -1531,11 +1531,19 @@ static sycl::event launch_qsa_attention_impl(
     float softmax_scale, const std::vector<sycl::event>& deps) {
     return q.submit([&](sycl::handler& h) {
         h.depends_on(deps);
+        // 256-entry e4m3 decode table: one SLM load replaces the bit arithmetic
+        // in both inner loops, bitwise identical to e4m3_to_f32.
+        sycl::local_accessor<float, 1> lut(sycl::range<1>(256), h);
+        // GRIMOIRE_QSA_NO_LUT=1 keeps the original per-element converter, so one
+        // binary can A/B the table on the same gate.
+        const bool lut_on = std::getenv("GRIMOIRE_QSA_NO_LUT") == nullptr;
         h.parallel_for(
             sycl::nd_range<1>(size_t(rows) * n_heads * SG_SIZE, SG_SIZE),
             [=](sycl::nd_item<1> it) [[sycl::reqd_sub_group_size(SG_SIZE)]] {
                 const auto sg   = it.get_sub_group();
                 const int  lane = int(sg.get_local_id()[0]);
+                for (int e = lane; e < 256; e += SG_SIZE) lut[e] = e4m3_to_f32(uint8_t(e));
+                sycl::group_barrier(sg);
                 const int  gid  = int(it.get_group(0));
                 const int  row  = gid / n_heads;
                 const int  head = gid % n_heads;
@@ -1562,8 +1570,8 @@ static sycl::event launch_qsa_attention_impl(
                     if (s >= 0 && s < seq_cap) {
                         float dot = 0.0f;
                         for (int d = 0; d < head_dim; ++d)
-                            dot = sycl::fma(qh[d], e4m3_to_f32(
-                                kh[int64_t(d) * seq_cap + s]), dot);
+                            dot = sycl::fma(qh[d], lut_on ? lut[kh[int64_t(d) * seq_cap + s]]
+                                              : e4m3_to_f32(kh[int64_t(d) * seq_cap + s]), dot);
                         score = dot * softmax_scale;
                     }
                     const float mblk = sycl::reduce_over_group(
@@ -1587,8 +1595,8 @@ static sycl::event launch_qsa_attention_impl(
                         #pragma unroll
                         for (int d = 0; d < MAXD; ++d)
                             if (d < dpl)
-                                acc[d] = sycl::fma(pb, e4m3_to_f32(
-                                    vrow[lane + d * SG_SIZE]), acc[d]);
+                                acc[d] = sycl::fma(pb, lut_on ? lut[vrow[lane + d * SG_SIZE]]
+                                               : e4m3_to_f32(vrow[lane + d * SG_SIZE]), acc[d]);
                     }
                     m = mnew;
                 }

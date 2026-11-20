@@ -364,10 +364,10 @@ int64_t deltanet_saved_row_floats(const DeltaNetParams& p) {
     return int64_t(nk) * p.k_dim + int64_t(p.n_heads) * p.v_dim + 2 * int64_t(p.n_heads);
 }
 
-template <int PL>
+template <int PL, bool Capture>
 static sycl::event dn_verify_sg(sycl::queue& q_, const DeltaNetParams& p, const DnGroups& g,
                                 int64_t state_stride, float* saved,
-                                const std::vector<sycl::event>& deps) {
+                                const std::vector<sycl::event>& deps, VerifyRowCheckpoint checkpoint) {
     const int KD = p.k_dim, VD = p.v_dim;
     const int wg_threads   = kDnRowsPerWG * SG_SIZE;
     const int wgs_per_head = VD / kDnRowsPerWG;
@@ -440,6 +440,14 @@ static sycl::event dn_verify_sg(sycl::queue& q_, const DeltaNetParams& p, const 
                     o = sycl::reduce_over_group(sg, o, sycl::plus<float>());
                     if (lane == 0)
                         pp.out[(int64_t(r) * pp.n_heads + head) * VD + row] = o * sycl::rsqrt(float(KD));
+
+                    // Tap the live register state before processing the next row.
+                    // The diagnostic never reads the saved replay inputs below.
+                    if constexpr (Capture) if (r == checkpoint.row) {
+                        float* dst = checkpoint.data + (int64_t(head) * VD + row) * KD;
+                        #pragma unroll
+                        for (int u = 0; u < PL; ++u) dst[u * SG_SIZE + lane] = sv[u];
+                    }
 
                     // this row's inputs, for the commit's replay
                     float* sr = sv_base + int64_t(r) * srow;
@@ -601,12 +609,15 @@ sycl::event launch_deltanet_replay_groups(sycl::queue& q_, const DeltaNetParams&
 
 sycl::event launch_deltanet_verify_rows(sycl::queue& q_, const DeltaNetParams& p, const DnGroups& g,
                                         int64_t state_stride, float* saved,
-                                        const std::vector<sycl::event>& deps) {
-    switch (p.k_dim / SG_SIZE) {
-        case 4:  return dn_verify_sg<4> (q_, p, g, state_stride, saved, deps);
-        case 8:  return dn_verify_sg<8> (q_, p, g, state_stride, saved, deps);
-        default: return dn_verify_sg<16>(q_, p, g, state_stride, saved, deps);
-    }
+                                        const std::vector<sycl::event>& deps, VerifyRowCheckpoint checkpoint) {
+    auto dispatch = [&]<bool Capture>() {
+        switch (p.k_dim / SG_SIZE) {
+            case 4:  return dn_verify_sg<4, Capture> (q_, p, g, state_stride, saved, deps, checkpoint);
+            case 8:  return dn_verify_sg<8, Capture> (q_, p, g, state_stride, saved, deps, checkpoint);
+            default: return dn_verify_sg<16, Capture>(q_, p, g, state_stride, saved, deps, checkpoint);
+        }
+    };
+    return checkpoint.data ? dispatch.template operator()<true>() : dispatch.template operator()<false>();
 }
 
 sycl::event launch_deltanet_replay(sycl::queue& q_, const DeltaNetParams& p, const float* saved, int n,

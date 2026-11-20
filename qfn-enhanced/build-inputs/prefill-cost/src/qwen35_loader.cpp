@@ -1,0 +1,1979 @@
+// GRIMOIRE
+// Copyright (C) 2026 Ian Ernst
+//
+// This program is free software: you can redistribute it and/or modify
+// it under the terms of the GNU General Public License as published by
+// the Free Software Foundation, either version 3 of the License, or
+// (at your option) any later version.
+//
+// This program is distributed in the hope that it will be useful,
+// but WITHOUT ANY WARRANTY; without even the implied warranty of
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+// GNU General Public License for more details.
+//
+// You should have received a copy of the GNU General Public License
+// along with this program.  If not, see <https://www.gnu.org/licenses/>.
+//
+// SPDX-License-Identifier: GPL-3.0-or-later
+
+// =====================================================================
+//  qwen35_loader.cpp
+// =====================================================================
+#include "b70/qwen35.hpp"
+#include "b70/qfn_mtp_experts.hpp"
+#include "b70/k2_horizon.hpp"
+#include <cctype>
+#include <algorithm>
+#include "b70/tensor_layout.hpp"
+#include "b70/gguf_qwen35.hpp"
+#include "b70/tokenizer.hpp"
+#include "b70/json.hpp"
+#include <cstdio>
+#include <cstring>
+#include <cstdlib>
+#include <cmath>
+#include <cerrno>
+#include <filesystem>
+#include <sys/stat.h>
+#include <unistd.h>
+#include <dirent.h>
+
+namespace b70 {
+namespace {
+
+// config.json flattens text_config into the top level in HFModel::discover
+// only for scalars it recognises, so pull nested values by hand.
+std::string read_file(const std::string& p) {
+    FILE* f = std::fopen(p.c_str(), "rb");
+    if (!f) return {};
+    std::string out;
+    char buf[8192];
+    size_t n;
+    while ((n = std::fread(buf, 1, sizeof buf, f)) > 0) out.append(buf, n);
+    std::fclose(f);
+    return out;
+}
+
+using ShardMembers = std::map<std::string, std::vector<std::string>>;
+
+bool checkpoint_members(const std::string& dir, bool required,
+                        ShardMembers& shards, std::string& err) {
+    const std::string path = dir + "/model.safetensors.index.json";
+    struct stat st{};
+    if (::lstat(path.c_str(), &st) != 0 && errno == ENOENT && !required) return true;
+    try {
+        const auto doc = Json::parse(read_file(path));
+        const auto& map = doc.at("weight_map");
+        if (map.kind != Json::Kind::Object || map.object.empty())
+            throw std::invalid_argument("weight_map must be a nonempty object");
+        for (const auto& [name, value] : map.object) {
+            const auto file = value.text();
+            if (file.size() <= 12 || file.compare(file.size()-12, 12, ".safetensors") ||
+                file.find('/') != std::string::npos || file.find('\\') != std::string::npos ||
+                file.find('\0') != std::string::npos || name.empty())
+                throw std::invalid_argument("invalid shard filename or key for " + name);
+            shards[dir + "/" + file].push_back(name);
+        }
+    } catch (const std::invalid_argument& e) {
+        err = path + ": " + e.what();
+        return false;
+    }
+    return true;
+}
+
+bool open_indexed_shard(SafeTensors& st, const std::string& path,
+                        const std::filesystem::path& root, std::string& err) {
+    std::error_code ec;
+    const auto resolved = std::filesystem::canonical(path, ec);
+    if (ec) { err = path + ": " + ec.message(); return false; }
+    const auto relative = resolved.lexically_relative(root);
+    if (relative.empty() || *relative.begin() == "..") {
+        err = path + ": shard resolves outside model root " + root.string();
+        return false;
+    }
+    return st.open(resolved.string(), err);
+}
+
+// Minimal scalar extraction: find "key" then the next number/string/bool.
+// The safetensors header parser is strict; config.json only needs lookups.
+//
+// The SHALLOWEST occurrence wins, and among equally shallow ones the first.
+// Qwen3.8-Flash-Next's text_config nests "mtp": {"num_hidden_layers": 1}
+// alphabetically BEFORE its own "num_hidden_layers": 48, and taking the
+// first textual match built a one-layer model that loaded and ran.
+bool find_scalar(const std::string& j, const std::string& key, std::string& out) {
+    const std::string pat = "\"" + key + "\"";
+    size_t p = std::string::npos;
+    {
+        int depth = 0, best = 1 << 30;
+        bool in_str = false;
+        for (size_t i = 0; i < j.size(); ++i) {
+            const char c = j[i];
+            if (in_str) {
+                if (c == '\\') { ++i; continue; }
+                if (c == '"') in_str = false;
+                continue;
+            }
+            if (c == '{') { ++depth; continue; }
+            if (c == '}') { --depth; continue; }
+            if (c != '"') continue;
+            if (depth < best && j.compare(i, pat.size(), pat) == 0) {
+                size_t k = i + pat.size();
+                while (k < j.size() && isspace((unsigned char)j[k])) ++k;
+                if (k < j.size() && j[k] == ':') { best = depth; p = i; }
+            }
+            in_str = true;
+        }
+    }
+    if (p == std::string::npos) return false;
+    p = j.find(':', p + pat.size());
+    if (p == std::string::npos) return false;
+    ++p;
+    while (p < j.size() && isspace((unsigned char)j[p])) ++p;
+    if (p >= j.size()) return false;
+    if (j[p] == '"') {
+        const size_t e = j.find('"', p + 1);
+        if (e == std::string::npos) return false;
+        out = j.substr(p + 1, e - p - 1);
+        return true;
+    }
+    size_t e = p;
+    while (e < j.size() && j[e] != ',' && j[e] != '}' && j[e] != ']' &&
+           !isspace((unsigned char)j[e])) ++e;
+    out = j.substr(p, e - p);
+    return true;
+}
+
+int    cfg_i(const std::string& j, const char* k, int d) {
+    std::string v; return find_scalar(j, k, v) ? std::atoi(v.c_str()) : d;
+}
+float  cfg_f(const std::string& j, const char* k, float d) {
+    std::string v; return find_scalar(j, k, v) ? float(std::atof(v.c_str())) : d;
+}
+// eos_token_id is a LIST in several Qwen configs.  find_scalar stops at
+// the '[' and atoi then reads 0 -- which is a VALID token id, so the
+// sticky-EOS walk would silently treat token 0 as the document boundary
+// and never fire on the real one.  Take the first element.
+int    cfg_i_first(const std::string& j, const char* k, int d) {
+    std::string v;
+    if (!find_scalar(j, k, v)) return d;
+    size_t i = 0;
+    while (i < v.size() && (v[i] == '[' || isspace((unsigned char)v[i]))) ++i;
+    if (i >= v.size() || !(isdigit((unsigned char)v[i]) || v[i] == '-')) return d;
+    return std::atoi(v.c_str() + i);
+}
+bool   cfg_b(const std::string& j, const char* k, bool d) {
+    std::string v;
+    if (!find_scalar(j, k, v)) return d;
+    return v == "true" || v == "1";
+}
+
+} // namespace
+
+bool QfnMtpExperts::open(const std::string& dir, std::string& err) {
+    constexpr int group = 32;
+    const uint16_t endian_probe = 1;
+    uint8_t low_byte = 0;
+    std::memcpy(&low_byte, &endian_probe, 1);
+    if (low_byte != 1) { err = "QFN MTP INT4 requires a little-endian host"; return false; }
+
+    QfnMtpExperts next;
+    int count = 0;
+    const std::string config = dir + "/config.json";
+    try {
+        const auto doc = Json::parse(read_file(config));
+        const auto& text = doc.at("text_config");
+        next.hidden_ = text.at("hidden_size").integer();
+        next.inter_ = text.at("moe_intermediate_size").integer();
+        count = text.at("num_experts").integer();
+        if (doc.at("model_type").text() != "qwen4_exp" ||
+            text.at("model_type").text() != "qwen4_exp_text" ||
+            text.at("mtp").at("num_hidden_layers").integer() != 1 || count <= 0 ||
+            next.hidden_ <= 0 || next.inter_ <= 0 || next.hidden_ % group || next.inter_ % group)
+            throw std::invalid_argument("expected one Qwen4-Exp MTP layer with group-32 expert geometry");
+
+        const auto& quant = doc.at("quantization_config");
+        const auto& schemes = quant.at("config_groups");
+        const auto& routed = schemes.at("mtp_routed_experts");
+        const auto& targets = routed.at("targets").array;
+        const auto& w = routed.at("weights");
+        const auto* actorder = w.find("actorder");
+        const auto* block = w.find("block_structure");
+        if (quant.at("quant_method").text() != "compressed-tensors" ||
+            quant.at("format").text() != "pack-quantized" || schemes.object.size() != 1 ||
+            routed.at("format").text() != "pack-quantized" ||
+            targets.size() != 1 || targets.front().text() != "RoutedExperts" ||
+            routed.at("input_activations").kind != Json::Kind::Null ||
+            w.at("type").text() != "int" || w.at("num_bits").integer() != 4 ||
+            w.at("strategy").text() != "group" || w.at("group_size").integer() != group ||
+            !w.at("symmetric").flag() || w.at("dynamic").flag() ||
+            (actorder && actorder->kind != Json::Kind::Null) ||
+            (block && block->kind != Json::Kind::Null))
+            throw std::invalid_argument("expected static symmetric compressed-tensors INT4 group-32 routed weights");
+    } catch (const std::invalid_argument& e) {
+        err = config + ": " + e.what();
+        return false;
+    }
+
+    ShardMembers files;
+    if (!checkpoint_members(dir, true, files, err)) return false;
+    const char* configured_root = std::getenv("GRIMOIRE_MODEL_ROOT");
+    std::error_code ec;
+    const auto model_dir = std::filesystem::canonical(dir, ec);
+    if (ec) { err = dir + ": " + ec.message(); return false; }
+    const auto root = configured_root && *configured_root
+        ? std::filesystem::canonical(configured_root, ec) : model_dir.parent_path();
+    if (ec) { err = "cannot resolve model root: " + ec.message(); return false; }
+
+    const std::string prefix = "mtp.layers.0.mlp.experts.";
+    std::map<std::string, Tensor> indexed;
+    for (const auto& [path, names] : files) {
+        std::unique_ptr<SafeTensors> shard;
+        for (const auto& name : names) {
+            if (name.compare(0, prefix.size(), prefix) != 0) continue;
+            if (!shard) {
+                shard = std::make_unique<SafeTensors>();
+                if (!open_indexed_shard(*shard, path, root, err)) return false;
+            }
+            const auto* info = shard->find(name);
+            if (!info) { err = path + ": indexed MTP tensor not found: " + name; return false; }
+            indexed.emplace(name, Tensor{shard.get(), info});
+        }
+        if (shard) {
+            shard->unmap();  // Weight bytes are streamed through pread, one expert at a time.
+            next.shards_.push_back(std::move(shard));
+        }
+    }
+
+    auto take = [&](const std::string& name, STDtype dtype, std::vector<int64_t> shape, Tensor& out) {
+        const auto it = indexed.find(name);
+        if (it == indexed.end()) { err = "missing indexed MTP tensor: " + name; return false; }
+        if (it->second.info->dtype != dtype || it->second.info->shape != shape) {
+            err = name + ": incompatible dtype or shape; expected " + st_dtype_name(dtype) + " [";
+            for (size_t i = 0; i < shape.size(); ++i) {
+                if (i) err += ',';
+                err += std::to_string(shape[i]);
+            }
+            err += ']';
+            return false;
+        }
+        out = it->second;
+        indexed.erase(it);
+        return true;
+    };
+    constexpr std::array<const char*, 3> projections{"gate_proj", "up_proj", "down_proj"};
+    for (int e = 0; e < count; ++e) {
+        std::array<Projection, 3> expert{};
+        for (size_t p = 0; p < projections.size(); ++p) {
+            const int n = p == 2 ? next.hidden_ : next.inter_;
+            const int k = p == 2 ? next.inter_ : next.hidden_;
+            const auto base = prefix + std::to_string(e) + "." + projections[p];
+            Tensor shape;
+            if (!take(base + ".weight_packed", STDtype::I32, {n, k / 8}, expert[p].packed) ||
+                !take(base + ".weight_scale", STDtype::BF16, {n, k / group}, expert[p].scales) ||
+                !take(base + ".weight_shape", STDtype::I64, {2}, shape)) return false;
+            std::array<int64_t, 2> dims{};
+            if (!shape.shard->read_raw(*shape.info, dims.data(), err)) return false;
+            if (dims != std::array<int64_t, 2>{n, k}) {
+                err = shape.info->name + ": values do not match [out_features,in_features]";
+                return false;
+            }
+        }
+        next.experts_.push_back(expert);
+    }
+    if (!indexed.empty()) {
+        err = "unsupported indexed MTP routed tensor: " + indexed.begin()->first;
+        return false;
+    }
+    *this = std::move(next);
+    return true;
+}
+
+bool QfnMtpExperts::read_expert(int id, QfnMtpExpert& out, std::string& err) const {
+    if (id < 0 || id >= expert_count()) {
+        err = "MTP expert ID out of range: " + std::to_string(id);
+        return false;
+    }
+    QfnMtpExpert next;
+    const std::array<PackedWeight*, 3> weights{&next.gate, &next.up, &next.down};
+    const auto& expert = experts_[size_t(id)];
+    for (size_t p = 0; p < weights.size(); ++p) {
+        const auto& src = expert[p];
+        auto& dst = *weights[p];
+        dst.fmt = Fmt::INT4;
+        dst.N = p == 2 ? hidden_ : inter_;
+        dst.K = p == 2 ? inter_ : hidden_;
+        dst.row_bytes = dst.K / 2;
+        dst.row_scales = dst.K / 32;
+        dst.payload.resize(size_t(src.packed.info->end - src.packed.info->begin));
+        dst.scales_raw.resize(size_t(src.scales.info->end - src.scales.info->begin));
+        dst.zeros.assign(dst.scales_raw.size() / sizeof(bf16_t), 8);
+        if (!src.packed.shard->read_raw(*src.packed.info, dst.payload.data(), err) ||
+            !src.scales.shard->read_raw(*src.scales.info, dst.scales_raw.data(), err)) return false;
+    }
+    out = std::move(next);
+    return true;
+}
+
+bool keep_qwen_bf16(const std::string& name) {
+    auto ends=[&](const char* suffix){const size_t n=std::strlen(suffix);
+        return name.size()>=n && name.compare(name.size()-n,n,suffix)==0;};
+    // GRIMOIRE_QUANT_LM_HEAD=1 lets the output projection be packed.  It is
+    // the single largest per-token read that is not an expert -- 1.017 GB at
+    // BF16 for a 248320x2048 head, against 0.266 at int4, and test_ops puts
+    // that at ~1.6 ms per token, more than the whole fused MoE block.  It is
+    // read once per plain decode step and once per DRAFT step on top, so a
+    // k=6 speculative round pays it several times over.
+    //
+    // Off by default because it was never measured here, not because it was
+    // measured and rejected.  An independent B70 report (Qwen3.8-27B, GPTQ
+    // int4 + MTP) quantized this head and found perplexity and GSM8K
+    // largely unchanged -- worth reproducing on our own benchmark before
+    // making it the default.
+    static const bool quant_lm_head = [] {
+        const char* e = std::getenv("GRIMOIRE_QUANT_LM_HEAD");
+        return e && *e && std::atoi(e) != 0;
+    }();
+    const bool is_lm_head = name=="lm_head.weight" || ends(".lm_head.weight");
+    if (is_lm_head && quant_lm_head) return false;
+    return name.rfind("mtp.",0)==0 || name.find("embed_tokens")!=std::string::npos ||
+        is_lm_head ||
+        ends(".linear_attn.in_proj_a.weight") || ends(".linear_attn.in_proj_b.weight") ||
+        ends(".mlp.gate.weight") || ends(".mlp.shared_expert_gate.weight") ||
+        // K2-Horizon MoVA value router: [mova_num_experts, hidden] = [64,2560].
+        // N=64 is not a multiple of 256, so it must never reach a W4A8 tile
+        // (the B 2-D block loads do not clamp), and a router is the last
+        // place to spend precision -- it is 0.16 MB of a 36B model.
+        ends(".self_attn.v_router.weight");
+}
+
+bool Qwen35Model::load(const std::string& d, std::string& err, bool skip_vision,
+                       bool index_only) {
+    const bool explicit_gguf=d.size()>=5 && d.compare(d.size()-5,5,".gguf")==0;
+    dir = explicit_gguf ? (d.find_last_of('/')==std::string::npos ? "." :
+           d.substr(0,d.find_last_of('/'))) : d;
+    gguf_file.reset(); gguf_path.clear();
+    std::string selected;
+    const std::string sidecar=read_file(dir+"/config.json");
+    bool other=false;
+    if(DIR* dp=::opendir(dir.c_str())){
+        while(dirent* e=::readdir(dp)){
+            std::string n=e->d_name;
+            if((n.size()>=12&&n.compare(n.size()-12,12,".safetensors")==0)||
+               (n.rfind("model-v",0)==0&&n.size()>=4&&
+                n.compare(n.size()-4,4,".b70")==0))other=true;
+        }
+        ::closedir(dp);
+    }
+    if((explicit_gguf || !other) && !gguf_model_path(d,selected,err))return false;
+    const bool use_gguf=!selected.empty()&&(explicit_gguf||!other);
+    std::string j=sidecar;
+    if(use_gguf){
+        if(sidecar.empty()&&::access((dir+"/config.json").c_str(),F_OK)==0){
+            err="cannot read or empty "+dir+"/config.json";return false;
+        }
+        gguf_path=selected;gguf_file=std::make_unique<GGUFFile>();
+        if(!gguf_file->open(gguf_path,err))return false;
+        std::string arch;
+        if(!gguf_file->get_string("general.architecture",arch,err))return false;
+        if(!(arch=="gemma4" ? gguf_gemma4_config(*gguf_file,sidecar,j,err)
+             : (arch=="qwen3"||arch=="qwen3moe")
+               ? gguf_qwen3_config(*gguf_file,sidecar,j,err)
+               : gguf_qwen35_config(*gguf_file,sidecar,j,err)))return false;
+        {
+            Tokenizer tok;
+            const bool has_sidecar=::access((dir+"/tokenizer.json").c_str(),F_OK)==0;
+            if(has_sidecar ? !tok.load(dir,err) : !tok.load_gguf(*gguf_file,err))return false;
+            if(has_sidecar) {
+            const GGUFValue* tv=nullptr;
+            if(!gguf_file->get_array("tokenizer.ggml.tokens",tv,err))return false;
+            const auto* strings=std::get_if<std::vector<std::string>>(&tv->data);
+            if(!strings){err="GGUF tokenizer.ggml.tokens is not a string array";return false;}
+            // llama.cpp writes the token list out to vocab_size: ids the sidecar
+            // tokenizer.json does not define appear as extra CONTROL tokens from
+            // tokenizer_config (e.g. <|audio_start|>) and then [PADnnn] UNUSED
+            // entries (Ornith: 248320 GGUF vs 248070 tokenizer.json, verified
+            // 2026-10-15).  Every id the sidecar defines must match exactly; an
+            // extra id is accepted only as CONTROL(3)/UNUSED(5), never as text.
+            if(strings->size()<tok.vocab_size()){
+                err="GGUF has fewer tokens than tokenizer.json: "+std::to_string(strings->size())+
+                    " vs "+std::to_string(tok.vocab_size());return false;
+            }
+            if(strings->size()>tok.vocab_size()){
+                const GGUFValue* ty=nullptr;
+                if(!gguf_file->get_array("tokenizer.ggml.token_type",ty,err))return false;
+                const auto* types=std::get_if<std::vector<int32_t>>(&ty->data);
+                if(!types||types->size()!=strings->size()){
+                    err="GGUF tokenizer.ggml.token_type missing or wrong length";return false;
+                }
+                size_t control=0,unused=0;
+                for(size_t i=tok.vocab_size();i<strings->size();++i){
+                    const int32_t t=(*types)[i];
+                    if(t==3)++control;else if(t==5)++unused;
+                    else{err="GGUF token "+std::to_string(i)+" ("+(*strings)[i]+
+                        ") is beyond tokenizer.json and has type "+std::to_string(t)+
+                        " (only CONTROL/UNUSED padding is accepted)";return false;}
+                }
+                std::printf("  GGUF tokens %zu = tokenizer.json %zu + %zu control + %zu unused (padding to vocab)\n",
+                            strings->size(),size_t(tok.vocab_size()),control,unused);
+            }
+            int bad=0;std::string first;
+            for(size_t i=0;i<size_t(tok.vocab_size());++i)if((*strings)[i]!=tok.raw_token(i)){
+                if(bad<3){if(bad)first+="; ";first+="token "+std::to_string(i)+
+                    " GGUF="+(*strings)[i]+" tokenizer.json="+tok.raw_token(i);}
+                ++bad;
+            }
+            if(bad){err="GGUF/tokenizer.json mismatch ("+std::to_string(bad)+"): "+first;return false;}
+            if (const GGUFValue* merges=gguf_file->get("tokenizer.ggml.merges")) {
+                const auto* list=std::get_if<std::vector<std::string>>(&merges->data);
+                if (!list || list->size()!=tok.merge_count()) {
+                    err="GGUF/tokenizer.json merge count mismatch";return false;
+                }
+                for (size_t i=0;i<list->size();++i)
+                    if (tok.merge_rank((*list)[i])!=int32_t(i)) {
+                        err="GGUF/tokenizer.json merge rank mismatch at "+std::to_string(i);return false;
+                    }
+            }
+            uint32_t ge=0,gb=0;
+            if(!gguf_file->get_u32("tokenizer.ggml.eos_token_id",ge,err))return false;
+            const bool has_bos=gguf_file->get("tokenizer.ggml.bos_token_id")!=nullptr;
+            if(has_bos && !gguf_file->get_u32("tokenizer.ggml.bos_token_id",gb,err))return false;
+            std::printf("  GGUF tokenizer eos/bos %u/%s; tokenizer.json eos/bos %d/%d\n",
+                        ge,has_bos?std::to_string(gb).c_str():"<missing>",tok.eos(),tok.bos());
+            if(!sidecar.empty()){
+                try{
+                    Json hf=Json::parse(sidecar);
+                    const Json* tc=hf.find("text_config");if(!tc)tc=&hf;
+                    const Json* he=tc->find("eos_token_id");
+                    const Json* hb=tc->find("bos_token_id");
+                    if(he||hb)std::printf("  GGUF eos/bos %u/%s; HF config.json text_config eos/bos %s/%s\n",
+                        ge,has_bos?std::to_string(gb).c_str():"<missing>",
+                        he?he->dump().c_str():"<missing>",hb?hb->dump().c_str():"<missing>");
+                }catch(const std::exception& e){err=std::string("config.json parse: ")+e.what();return false;}
+            }
+            }
+        }
+    }
+    if(j.empty()) { err="cannot read "+dir+"/config.json";return false; }
+
+    // ---- config -----------------------------------------------------
+    // Muse Glimmer nests the text dims under "text_config"; parse from there.
+    std::string model_type; find_scalar(j, "model_type", model_type);
+    const bool muse = model_type.find("muse_glimmer") != std::string::npos
+                   || j.find("muse_glimmer_text") != std::string::npos;
+    const bool agnes = model_type == "agnes" || model_type.rfind("agnes", 0) == 0
+                    || j.find("\"agnes_text\"") != std::string::npos;
+    // gemma4 / gemma4_text.  Deliberately NOT a prefix match on "gemma":
+    // gemma, gemma2 and gemma3 are different architectures this engine
+    // does not implement, and claiming them would be the silent-wrong
+    // default the layer_types check above exists to remove.
+    const bool gemma4 = model_type == "gemma4" || model_type == "gemma4_text"
+                     || model_type == "gemma4_unified" ||
+                        j.find("\"gemma4_text\"") != std::string::npos ||
+                        j.find("\"gemma4_unified_text\"") != std::string::npos;
+    // Qwen4-Exp (Qwen3.8-Flash-Next).  "qwen4_exp" is the multimodal
+    // wrapper and "qwen4_exp_text" the text tower
+    // (ref/qwen4_exp_config.py:30,35), so match both and the nested
+    // spelling, exactly as the gemma-4 check above does.  NOT a prefix
+    // match on "qwen4": nothing else by that name is this architecture.
+    const bool qwen4_exp = model_type == "qwen4_exp"
+                        || model_type == "qwen4_exp_text"
+                        || j.find("\"qwen4_exp_text\"") != std::string::npos;
+    // Any multimodal config nests the language model under "text_config".
+    // This used to be extracted for Muse alone, so every other nested
+    // config was read by scanning the WHOLE file -- which finds whichever
+    // copy of a key comes first.  For Agnes that happens to land on the
+    // text tower for every key that matters, i.e. it worked by the order
+    // the file was written in.  Extract it whenever it exists instead.
+    std::string tj;
+    bool nested = false;
+    {
+        const size_t tp = j.find("\"text_config\"");
+        if (tp != std::string::npos) {
+            const size_t b = j.find('{', tp);
+            if (b != std::string::npos) {
+                int depth = 0; size_t e = b;
+                for (; e < j.size(); ++e) {
+                    if (j[e]=='{') ++depth;
+                    else if (j[e]=='}') { if(--depth==0){++e;break;} }
+                }
+                if (depth == 0) { tj = j.substr(b, e - b); nested = true; }
+            }
+        }
+    }
+    const std::string& cj = nested ? tj : j;
+    // Text-model keys live in the nested block when there is one, but not
+    // every checkpoint puts all of them there.  Look in the text block
+    // first and fall back to the whole file, so this can only ever find
+    // MORE than the old whole-file scan, never less.
+    auto tcfg_i = [&](const char* k, int d) {
+        std::string v;
+        return (nested && find_scalar(tj, k, v)) ? std::atoi(v.c_str()) : cfg_i(j, k, d);
+    };
+    auto tcfg_f = [&](const char* k, float d) {
+        std::string v;
+        return (nested && find_scalar(tj, k, v)) ? float(std::atof(v.c_str())) : cfg_f(j, k, d);
+    };
+    auto tcfg_b = [&](const char* k, bool d) {
+        std::string v;
+        if (nested && find_scalar(tj, k, v)) return v == "true" || v == "1";
+        return cfg_b(j, k, d);
+    };
+    cfg.hidden        = cfg_i(cj, "hidden_size", 0);
+    cfg.n_layers      = cfg_i(cj, "num_hidden_layers", 0);
+    if (use_gguf) cfg.mtp_n_layers = cfg_i(cj, "mtp_num_hidden_layers", 0);
+    cfg.vocab         = cfg_i(cj, "vocab_size", 0);
+    cfg.n_heads       = cfg_i(cj, "num_attention_heads", 0);
+    cfg.n_kv_heads    = cfg_i(cj, "num_key_value_heads", 0);
+    cfg.head_dim      = cfg_i(cj, "head_dim", 0);
+    cfg.rms_eps       = cfg_f(cj, "rms_norm_eps", 1e-6f);
+    cfg.post_norm_eps = cfg_f(cj, "post_norm_eps", cfg.rms_eps);
+    cfg.rope_theta    = cfg_f(cj, "rope_theta", 1e7f);
+    cfg.partial_rope  = tcfg_f("partial_rotary_factor", 1.0f);
+    cfg.attn_out_gate = tcfg_b("attn_output_gate", false);
+    cfg.is_qwen3 = model_type=="qwen3" || model_type=="qwen3_moe";
+    if (cfg.is_qwen3) {
+        cfg.sliding_window = cfg_i(cj, "sliding_window", 0);
+        cfg.qwen3_attention_bias = cfg_b(cj, "attention_bias", false);
+        try {
+            const Json parsed=Json::parse(cj);
+            if(const Json* rs=parsed.find("rope_scaling"))
+                cfg.qwen3_rope_scaled=rs->kind!=Json::Kind::Null;
+        }catch(const std::exception& e){err=std::string("config.json parse: ")+e.what();return false;}
+    }
+    cfg.tie_embeddings= cfg_b(j, "tie_word_embeddings", false);
+    cfg.is_gemma4     = gemma4;
+    if (gemma4) {
+        // Every projection in this engine is bias-free.  A checkpoint that
+        // declares biases would load and simply not apply them.
+        if (tcfg_b("attention_bias", false)) {
+            err = "gemma-4 attention_bias is set; this engine's projections "
+                  "carry no bias and would drop it silently";
+            return false;
+        }
+        // Per-LAYER-TYPE geometry.  Sliding layers use head_dim /
+        // num_key_value_heads; full-attention layers use global_head_dim /
+        // num_global_key_value_heads.  Nothing else in this engine has
+        // two geometries in one model, so cfg.layer_head_dim(i) and
+        // cfg.layer_kv_heads(i) exist for exactly this.
+        cfg.global_head_dim   = tcfg_i("global_head_dim", 0);
+        cfg.n_global_kv_heads = tcfg_i("num_global_key_value_heads", 0);
+        cfg.sliding_window    = tcfg_i("sliding_window", 0);
+        cfg.logit_softcap     = tcfg_f("final_logit_softcapping", 0.0f);
+        cfg.k_eq_v            = tcfg_b("attention_k_eq_v", false);
+        // ref/gemma4.py: `self.scaling = 1.0`, NOT 1/sqrt(head_dim).
+        cfg.attn_scale        = 1.0f;
+        // Gemma4TextScaledWordEmbedding(embed_scale = hidden_size ** 0.5)
+        cfg.embed_scale       = cfg.hidden > 0
+                              ? std::sqrt(float(cfg.hidden)) : 1.0f;
+        // Sandwich FFN norms, as Muse has.
+        cfg.is_muse           = false;   // NOT Muse; only the norm shape rhymes
+
+        // rope_parameters is keyed BY LAYER TYPE here, which no other
+        // checkpoint in this loader does:
+        //   "sliding_attention": {rope_theta 1e4, rope_type "default"}
+        //   "full_attention":    {rope_theta 1e6, rope_type "proportional",
+        //                         partial_rotary_factor 0.25}
+        // cfg.rope_theta keeps the SLIDING value because that is what the
+        // majority of layers use and what the generic path reads;
+        // global_* carries the full-attention pair.
+        auto block = [&](const std::string& src, const char* key,
+                         std::string& out) {
+            const size_t p0 = src.find(std::string("\"") + key + "\"");
+            if (p0 == std::string::npos) return false;
+            const size_t b0 = src.find('{', p0);
+            if (b0 == std::string::npos) return false;
+            int depth = 0; size_t e0 = b0;
+            for (; e0 < src.size(); ++e0) {
+                if (src[e0]=='{') ++depth;
+                else if (src[e0]=='}') { if(--depth==0){++e0;break;} }
+            }
+            if (depth != 0) return false;
+            out = src.substr(b0, e0 - b0);
+            return true;
+        };
+        std::string rp_all, rp_slide, rp_full;
+        if (block(cj, "rope_parameters", rp_all)) {
+            if (block(rp_all, "sliding_attention", rp_slide)) {
+                cfg.rope_theta   = cfg_f(rp_slide, "rope_theta", cfg.rope_theta);
+                cfg.partial_rope = cfg_f(rp_slide, "partial_rotary_factor", 1.0f);
+            }
+            if (block(rp_all, "full_attention", rp_full)) {
+                cfg.global_rope_theta   = cfg_f(rp_full, "rope_theta", 0.0f);
+                cfg.global_partial_rope = cfg_f(rp_full, "partial_rotary_factor", 1.0f);
+                // ref/gemma4_proportional_rope.py ends with
+                // `inv_freq /= factor`.  The 31B checkpoint does not set it
+                // (so it is 1.0 and changes nothing), but a config that did
+                // would rotate at the wrong frequencies while loading and
+                // generating perfectly well.
+                cfg.global_rope_factor  = cfg_f(rp_full, "factor", 1.0f);
+                if (cfg.global_rope_factor <= 0.0f) {
+                    err = "gemma-4 full_attention rope factor must be positive";
+                    return false;
+                }
+                std::string rt;
+                find_scalar(rp_full, "rope_type", rt);
+                cfg.global_rope_proportional = (rt == "proportional");
+                // Refuse a rope_type this engine does not implement rather
+                // than silently running the default one: the frequencies
+                // and the dimension pairing both differ, and the output
+                // would stay fluent.  See ref/gemma4_proportional_rope.py.
+                if (!rt.empty() && rt != "proportional" && rt != "default") {
+                    err = "gemma-4 full_attention rope_type \"" + rt +
+                          "\" is not implemented (only default and "
+                          "proportional are)";
+                    return false;
+                }
+            }
+        }
+        // Features this engine does not have.  Refuse by name; every one
+        // of them loads cleanly and produces the wrong model's output.
+        if (tcfg_b("enable_moe_block", false) || tcfg_i("num_experts", 0) > 0) {
+            err = "gemma-4 with enable_moe_block is not implemented";
+            return false;
+        }
+        if (tcfg_i("num_kv_shared_layers", 0) > 0) {
+            err = "gemma-4 num_kv_shared_layers > 0 (cross-layer KV sharing) "
+                  "is not implemented";
+            return false;
+        }
+        if (tcfg_i("hidden_size_per_layer_input", 0) > 0) {
+            err = "gemma-4 per-layer input embeddings "
+                  "(hidden_size_per_layer_input) are not implemented";
+            return false;
+        }
+        if (tcfg_b("use_double_wide_mlp", false)) {
+            err = "gemma-4 use_double_wide_mlp is not implemented";
+            return false;
+        }
+        // use_bidirectional_attention == "all" makes every layer
+        // NON-causal (ref/gemma4.py:1179, `is_causal = ... != "all"`).
+        // Every attention kernel here is causal, and a causal model reading
+        // a bidirectional checkpoint stays fluent.  "vision" only affects
+        // the image tower, which this engine does not run.
+        {
+            std::string bidir;
+            if ((nested && find_scalar(tj, "use_bidirectional_attention", bidir))
+                || (!nested && find_scalar(j, "use_bidirectional_attention", bidir))) {
+                if (bidir == "all") {
+                    err = "gemma-4 use_bidirectional_attention=\"all\" makes "
+                          "every layer non-causal; this engine's attention is "
+                          "causal only";
+                    return false;
+                }
+            }
+        }
+        // per_layer_config, when a checkpoint spells it out, OVERRIDES the
+        // head_dim / num_key_value_heads this loader derives from the layer
+        // type (ref/gemma4.py:1173).  Deriving them anyway would give some
+        // layers the wrong geometry with nothing to report it.
+        if (cj.find("\"per_layer_config\"") != std::string::npos) {
+            err = "gemma-4 per_layer_config is present; this loader derives "
+                  "per-layer geometry from layer_types and would ignore the "
+                  "explicit overrides";
+            return false;
+        }
+        // What this loader does NOT do here is decide whether the engine
+        // can RUN the model it just described.  That is a property of the
+        // forward paths, not of the file, and it lives in
+        // Grimoire::unsupported_reason() so this stays a pure reader and
+        // tests/test_gemma4_config can pin the parse either way.
+    }
+
+    cfg.lin_k_heads   = tcfg_i("linear_num_key_heads", 0);
+    cfg.lin_v_heads   = tcfg_i("linear_num_value_heads", 0);
+    cfg.lin_k_dim     = tcfg_i("linear_key_head_dim", 0);
+    cfg.lin_v_dim     = tcfg_i("linear_value_head_dim", 0);
+    cfg.conv_kernel   = tcfg_i("linear_conv_kernel_dim", 0);
+
+    cfg.n_experts     = cfg_i(j, "num_experts", 0);
+    cfg.top_k         = cfg_i(j, "num_experts_per_tok", 0);
+    cfg.moe_inter     = cfg_i(j, "moe_intermediate_size", 0);
+    cfg.shared_inter  = cfg_i(j, "shared_expert_intermediate_size", 0);
+    cfg.dense_inter   = cfg_i(cj, "intermediate_size", 0);
+    if (cfg.is_qwen3 && cfg.is_moe()) {
+        cfg.norm_topk_prob = cfg_b(j, "norm_topk_prob", true);
+        cfg.sparse_step = cfg_i(j, "decoder_sparse_step", 1);
+        cfg.mlp_only_layers.clear();
+        try {
+            const Json parsed = Json::parse(j);
+            if (const Json* v=parsed.find("mlp_only_layers")) {
+                if (v->kind==Json::Kind::Array)
+                    for (const Json& x:v->array) cfg.mlp_only_layers.push_back(x.integer());
+            }
+        } catch (const std::exception& e) { err=std::string("config.json parse: ")+e.what();return false; }
+    }
+
+    // ---- activation --------------------------------------------------
+    // The engine implements ONE gated MLP: swiglu, silu(gate) * up.  It
+    // has no GeGLU kernel.  Until now `hidden_act` was never read at all,
+    // so a checkpoint asking for gelu -- every Gemma, among others --
+    // loaded cleanly, ran silu in its place, and produced fluent text that
+    // is not the model's output.  That is the silent-wrong-answer class
+    // this loader keeps having to close.
+    //
+    // Accept the spellings that mean silu/swish; refuse anything else by
+    // name, so adding a model is a deliberate act rather than a default.
+    // NO WHOLE-FILE FALLBACK for this key.  A multimodal checkpoint
+    // declares hidden_act in its VISION tower too, and Agnes's says
+    // "gelu_pytorch_tanh" while its text config says "silu".  Falling back
+    // would read the vision tower's activation and refuse a text model
+    // that is perfectly runnable -- the same whichever-copy-comes-first
+    // trap that made text_config extraction necessary in the first place.
+    // When there is a text block it is authoritative: if it does not name
+    // an activation, the engine's default stands.
+    {
+        std::string act;
+        if (nested) {
+            if (!find_scalar(tj, "hidden_activation", act))
+                find_scalar(tj, "hidden_act", act);
+        } else {
+            if (!find_scalar(j, "hidden_activation", act))
+                find_scalar(j, "hidden_act", act);
+        }
+        // Which spellings mean the TANH approximation, which is the only
+        // gelu this engine has (launch_geglu).  In transformers' ACT2FN:
+        //   gelu_pytorch_tanh -> GELUTanh          tanh
+        //   gelu_new          -> NewGELUActivation tanh  <- same formula
+        //   gelu              -> GELUActivation    EXACT erf
+        // "gelu_new" is the tanh one despite the name giving no hint of
+        // it; an earlier comment here claimed the opposite and refused a
+        // checkpoint this engine can run exactly.  Plain "gelu" is erf and
+        // stays refused below -- running tanh there is the same silent
+        // substitution in the other direction.
+        cfg.geglu = act == "gelu_pytorch_tanh" || act == "gelu_tanh" ||
+                    act == "gelu_new";
+        if (!act.empty() && act != "silu" && act != "swish" &&
+            act != "silu_and_mul" && !cfg.geglu) {
+            err = "config.json asks for hidden activation \"" + act +
+                  "\", and this engine implements only swiglu "
+                  "(silu(gate) * up).  Running silu in its place would load "
+                  "cleanly and produce the wrong model's output, so refuse.";
+            return false;
+        }
+        // Recognising gelu is not the same as running it.  Whether any
+        // forward path dispatches GeGLU is an ENGINE question, refused in
+        // Grimoire::unsupported_reason(); recording the activation here is
+        // all a reader of the checkpoint can honestly do.
+    }
+
+    // ---- Agnes -------------------------------------------------------
+    if (agnes) {
+        cfg.is_agnes = true;
+        cfg.parallel_ffn_inter = tcfg_i("parallel_ffn_intermediate_size", 0);
+        // rope_theta and partial_rotary_factor live under
+        // text_config.rope_parameters here, not beside the other text keys.
+        const size_t rp = cj.find("\"rope_parameters\"");
+        if (rp != std::string::npos) {
+            const size_t b = cj.find('{', rp);
+            size_t e = b; int depth = 0;
+            for (; b != std::string::npos && e < cj.size(); ++e) {
+                if (cj[e]=='{') ++depth;
+                else if (cj[e]=='}') { if(--depth==0){++e;break;} }
+            }
+            if (b != std::string::npos && depth == 0) {
+                const std::string rj = cj.substr(b, e - b);
+                cfg.rope_theta   = cfg_f(rj, "rope_theta", cfg.rope_theta);
+                cfg.partial_rope = cfg_f(rj, "partial_rotary_factor", cfg.partial_rope);
+                // mrope_section splits the rotary dims into t/h/w groups,
+                // each indexed by its own position.  For TEXT-ONLY input
+                // all three positions are the token index, so every group
+                // rotates by the same angle and the result is identical to
+                // plain RoPE -- interleaved or not.  That equivalence is
+                // why this loader can run an mRoPE checkpoint at all, and
+                // it holds only while no image is in the prompt.
+                const size_t ms = rj.find("\"mrope_section\"");
+                if (ms != std::string::npos) {
+                    cfg.mrope = true;
+                    const size_t a2 = rj.find('[', ms), b2 = rj.find(']', a2);
+                    if (a2 != std::string::npos && b2 != std::string::npos) {
+                        const std::string arr = rj.substr(a2 + 1, b2 - a2 - 1);
+                        size_t q = 0;
+                        while (q < arr.size()) {
+                            while (q < arr.size() && !std::isdigit((unsigned char)arr[q])) ++q;
+                            if (q >= arr.size()) break;
+                            size_t e2 = q;
+                            while (e2 < arr.size() && std::isdigit((unsigned char)arr[e2])) ++e2;
+                            cfg.mrope_section.push_back(std::atoi(arr.substr(q, e2 - q).c_str()));
+                            q = e2;
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    if (qwen4_exp) {
+        cfg.is_qwen4_exp = true;
+        // Defaults are the reference's own (ref/qwen4_exp_config.py:41-49),
+        // so a config that omits one resolves the way vLLM would rather
+        // than to zero.
+        cfg.ngram_seed       = cfg_i(cj, "seed", 1234);
+        // eos_token_id can be a LIST in a Qwen config; take the first.
+        cfg.eos_token_id     = cfg_i_first(cj, "eos_token_id", 0);
+        cfg.hc_count         = cfg_i(cj, "hc_count", 4);
+        {
+            std::string ogt;
+            cfg.dn_gate_sigmoid = find_scalar(cj, "output_gate_type", ogt) && ogt == "sigmoid";
+        }
+        cfg.hc_lowrank       = cfg_i(cj, "hc_lowrank", 320);
+        cfg.ngram_size       = cfg_i(cj, "ngram_size", 3);
+        cfg.heads_per_ngram  = cfg_i(cj, "heads_per_ngram", 8);
+        cfg.ple_conv_kernel  = cfg_i(cj, "ple_conv_kernel_size", 4);
+        cfg.ngram_vocab_base = cfg_i(cj, "ngram_vocab_size_base", 20000000);
+        // ple_embed_dim defaults to hidden_size in the reference when the
+        // config omits it (ref:85).
+        cfg.ple_embed_dim    = cfg_i(cj, "ple_embed_dim", cfg.hidden);
+        // The five QSA indexer fields have NO defaults: the reference
+        // requires all five together or none (ref:_validate_qsa_config),
+        // so 0 here means "absent" and the refusal below says which.
+        cfg.indexer_n_heads        = cfg_i(cj, "indexer_n_heads", 0);
+        cfg.indexer_kv_heads       = cfg_i(cj, "indexer_kv_heads", 0);
+        cfg.indexer_head_dim       = cfg_i(cj, "indexer_head_dim", 0);
+        cfg.indexer_budget         = cfg_i(cj, "indexer_budget", 0);
+        cfg.indexer_compress_ratio = cfg_i(cj, "indexer_compress_ratio", 0);
+        // ple_layer_ids is a 1-BASED list in the config (ref:127).  Store
+        // it verbatim; converting here would hide that from the test.
+        {
+            const size_t at = cj.find("\"ple_layer_ids\"");
+            if (at != std::string::npos) {
+                const size_t lb = cj.find('[', at), rb = cj.find(']', at);
+                if (lb != std::string::npos && rb != std::string::npos && rb > lb) {
+                    const std::string arr = cj.substr(lb + 1, rb - lb - 1);
+                    size_t q2 = 0;
+                    while (q2 < arr.size()) {
+                        while (q2 < arr.size() && !std::isdigit((unsigned char)arr[q2])) ++q2;
+                        if (q2 >= arr.size()) break;
+                        size_t e2 = q2;
+                        while (e2 < arr.size() && std::isdigit((unsigned char)arr[e2])) ++e2;
+                        cfg.ple_layer_ids.push_back(std::atoi(arr.substr(q2, e2 - q2).c_str()));
+                        q2 = e2;
+                    }
+                }
+            }
+        }
+    }
+    if (muse) {
+        cfg.is_muse = true;
+        cfg.attn_out_gate = true;
+        // sliding_window was read ONLY inside the gemma-4 block, so Muse
+        // never got one -- and BOTH Muse paths then invented their own:
+        // prefill_muse hardcoded window_left 2047 and forward_muse set
+        // none at all, so prefill and decode disagreed about how much
+        // history a sliding layer sees.  ref/muse_glimmer.py:1191 takes
+        // it from the config for exactly the rope-using (sliding) layers.
+        cfg.sliding_window = cfg_i(cj, "sliding_window", 0);
+        float qk = cfg_f(cj, "qk_scale_factor", 0.0f);
+        float ex = cfg_f(cj, "scale_query_by", 0.0f);
+        cfg.query_prescale = ex > 0.0f ? ex : (qk > 0.0f ? qk : 1.0f);
+    }
+    // ---- K2-Horizon --------------------------------------------------
+    // model_type "k2_horizon".  rope_head_dim == head_dim here, so the
+    // split/interleave rope path in the reference never runs; refuse a
+    // checkpoint that would need it rather than silently using plain rope.
+    cfg.is_k2 = model_type.find("k2_horizon") != std::string::npos;
+    if (cfg.is_k2) {
+        cfg.norm_groups     = cfg_i(cj, "layernorm_num_groups", 1);
+        cfg.mova_experts    = cfg_i(j, "mova_num_experts", 0);
+        cfg.mova_top_k      = cfg_i(j, "mova_num_experts_per_tok", 0);
+        cfg.moe_gate_bias   = cfg_b(j, "moe_gate_bias", false);
+        cfg.norm_topk_prob  = cfg_b(j, "norm_topk_prob", true);
+        cfg.router_scale    = cfg_f(j, "router_scaling_factor", 1.0f);
+        cfg.rope_head_dim   = cfg_i(cj, "rope_head_dim", 0);
+        cfg.sparse_step     = cfg_i(j, "decoder_sparse_step", 1);
+        cfg.n_shared_expert = cfg_i(j, "num_shared_experts", 0);
+        cfg.query_key_norm  = cfg_b(j, "query_key_norm", false);
+        cfg.rope_theta      = cfg_f(j, "rope_theta", cfg.rope_theta);
+
+        std::string score; find_scalar(j, "router_score_func", score);
+        cfg.router_sigmoid = score.find("sigmoid") != std::string::npos;
+
+        std::string gate; find_scalar(j, "attention_gate_func", gate);
+        cfg.attn_gate = gate.find("softplus") != std::string::npos ? 2
+                      : gate.find("silu")     != std::string::npos ? 1 : 0;
+        cfg.attn_out_gate = cfg.attn_gate != 0;
+
+        // rope_theta lives under "rope_parameters" in this config, not at
+        // the top level where cfg_f above looked for it.
+        {
+            const size_t rp = j.find("\"rope_parameters\"");
+            if (rp != std::string::npos) {
+                const size_t b = j.find('{', rp), e = j.find('}', b);
+                if (b != std::string::npos && e != std::string::npos)
+                    cfg.rope_theta = cfg_f(j.substr(b, e - b), "rope_theta", cfg.rope_theta);
+            }
+        }
+
+        // The shared expert is one MLP of moe_intermediate_size *
+        // num_shared_experts.  The config has no shared_expert_intermediate_size
+        // key, so without this the shared expert would load as width 0.
+        if (cfg.n_shared_expert > 0 && cfg.shared_inter == 0)
+            cfg.shared_inter = cfg.moe_inter * cfg.n_shared_expert;
+
+        // mlp_only_layers is a plain int array
+        cfg.mlp_only_layers.clear();
+        {
+            const size_t p = j.find("\"mlp_only_layers\"");
+            if (p != std::string::npos) {
+                const size_t a = j.find('[', p), b = j.find(']', a);
+                if (a != std::string::npos && b != std::string::npos) {
+                    const std::string arr = j.substr(a + 1, b - a - 1);
+                    size_t q = 0;
+                    while (q < arr.size()) {
+                        while (q < arr.size() && !std::isdigit(static_cast<unsigned char>(arr[q]))) ++q;
+                        if (q >= arr.size()) break;
+                        size_t e2 = q;
+                        while (e2 < arr.size() && std::isdigit(static_cast<unsigned char>(arr[e2]))) ++e2;
+                        cfg.mlp_only_layers.push_back(std::atoi(arr.substr(q, e2 - q).c_str()));
+                        q = e2;
+                    }
+                }
+            }
+        }
+    }
+
+    if (cfg.hidden <= 0 || cfg.n_layers <= 0) {
+        err = "config.json missing hidden_size or num_hidden_layers"; return false;
+    }
+    if (cfg.is_agnes) {
+        // The one thing in this architecture the engine does not have.
+        // Loading without it drops parallel_ffn_inter / (intermediate_size
+        // + parallel_ffn_inter) of every FFN -- about a tenth of the
+        // model's feed-forward capacity -- and the result still loads,
+        // still generates fluent text, and is not this model.  That is
+        // the failure mode this tree spent a whole session removing, so
+        // refuse until it is implemented rather than quietly approximate.
+        if (cfg.lin_k_heads <= 0 || cfg.lin_v_heads <= 0) {
+            err = "Agnes: no gated-DeltaNet geometry in the config"; return false;
+        }
+        // parallel_ffn is folded into the main FFN at upload, so after
+        // loading the feed-forward intermediate really IS this wide.  Say
+        // so once, here, rather than leave every consumer of dense_inter
+        // to remember the exception: the widths the engine derives from
+        // the uploaded tensor (sh_gu.output_rows()/2) already come out at
+        // the folded size, and this makes the config-derived bounds --
+        // the verifier staging buffers among them -- agree with them
+        // instead of under-allocating by parallel_ffn_inter.
+        cfg.dense_inter += cfg.parallel_ffn_inter;
+        // attn_output_gate needs nothing here.  Agnes ships no gate
+        // tensor because the gate rides in a double-width q_proj, and the
+        // engine detects exactly that from the tensor's own width --
+        // `gated = (QD == 2 * n_heads * head_dim)` in both the decode and
+        // the batched-prefill attention -- then splits it per head
+        // (launch_split_qgate: q at [head*2*hd + d], gate at
+        // [head*2*hd + hd + d]) and applies sigmoid before o_proj.  That
+        // is the same layout the reference produces with
+        // `view(heads, 2*head_dim)` followed by `chunk(2, dim=-1)`.
+    }
+    if (cfg.is_k2) {
+        if (cfg.rope_head_dim && cfg.head_dim && cfg.rope_head_dim != cfg.head_dim) {
+            err = "k2_horizon: rope_head_dim != head_dim needs the split/interleave "
+                  "rope path, which is not implemented"; return false;
+        }
+        if (cfg.norm_groups <= 0 || cfg.hidden % cfg.norm_groups) {
+            err = "k2_horizon: hidden_size is not divisible by layernorm_num_groups";
+            return false;
+        }
+    }
+
+    // ---- layer_types -------------------------------------------------
+    cfg.layer_types.assign(cfg.n_layers, LayerKind::FULL_ATTN);
+    cfg.muse_sliding_attention.assign(cfg.n_layers, false);
+    {
+        const size_t p = j.find("\"layer_types\"");
+        if (p != std::string::npos) {
+            const size_t a = j.find('[', p), b = j.find(']', a);
+            if (a != std::string::npos && b != std::string::npos) {
+                const std::string arr = j.substr(a, b - a);
+                size_t q = 0;
+                int i = 0;
+                while (i < cfg.n_layers) {
+                    const size_t s = arr.find('"', q);
+                    if (s == std::string::npos) break;
+                    const size_t e = arr.find('"', s + 1);
+                    if (e == std::string::npos) break;
+                    const std::string v = arr.substr(s + 1, e - s - 1);
+                    // Anything not recognised used to fall through to
+                    // FULL_ATTN.  That is the worst possible default: a
+                    // checkpoint naming its linear layers something this
+                    // loader has not seen runs every one of them as full
+                    // attention, loads cleanly, and produces fluent text
+                    // that is not the model's.  Agnes is exactly that case
+                    // -- it spells them "agnes_delta_attention" and
+                    // "agnes_global_attention" -- so recognise the names
+                    // that exist and REFUSE the ones that do not.
+                    const bool linear = v == "linear_attention" ||
+                                        v.find("delta") != std::string::npos;
+                    // Deliberately NOT a substring match on "attention":
+                    // that would swallow every future spelling back into
+                    // the silent FULL_ATTN default this check exists to
+                    // remove.  List what is known; refuse the rest.
+                    // Qwen4-Exp labels its sparse-attention layers
+                    // "qwen_sparse_attention" (ref/qwen4_exp_config.py:25).
+                    // They are an ATTENTION layer as far as the layer
+                    // TABLE is concerned -- the reference's own
+                    // layers_block_type maps them onto "attention"
+                    // (ref:176) -- but they are NOT full attention: QSA
+                    // scores blocks with an indexer and attends to a
+                    // gathered subset.  Recognised here so the file parses
+                    // (rule 10), recorded in qsa_attention so
+                    // unsupported_reason() can refuse by name, and never
+                    // silently executed as dense attention.
+                    // The published Flash-Next config types its sparse layers
+                    // plain "full_attention": HF's Qwen4ExpTextAttention gives
+                    // EVERY attention layer an indexer, and the checkpoint
+                    // ships indexer weights for all of them.  Executing those
+                    // as dense attention matches QSA only while every block
+                    // fits the budget (<= ~2K tokens) and is a different
+                    // model after that.
+                    const bool qsa    = v == "qwen_sparse_attention" ||
+                                        (cfg.is_qwen4_exp && v == "full_attention" &&
+                                         cfg.indexer_n_heads > 0 && cfg.indexer_budget > 0);
+                    const bool full   = v == "full_attention" ||
+                                        v == "sliding_attention" ||
+                                        qsa ||
+                                        v.find("global") != std::string::npos;
+                    if (int(cfg.qsa_attention.size()) < cfg.n_layers)
+                        cfg.qsa_attention.assign(size_t(cfg.n_layers), false);
+                    cfg.qsa_attention[size_t(i)] = qsa;
+                    if (!linear && !full) {
+                        err = "config.json layer_types[" + std::to_string(i) +
+                              "] is \"" + v + "\", which this loader does not "
+                              "recognise as linear or full attention";
+                        return false;
+                    }
+                    cfg.layer_types[i] = linear ? LayerKind::LINEAR_ATTN
+                                                : LayerKind::FULL_ATTN;
+                    cfg.muse_sliding_attention[i] =
+                        (v == "sliding_attention");
+                    ++i;
+                    q = e + 1;
+                }
+            }
+        }
+    }
+
+    // ---- K2 per-layer sparsity ---------------------------------------
+    // A sparse layer runs MoVA attention and the routed MoE; a dense one
+    // runs plain attention and a single intermediate_size MLP.  Both
+    // shapes coexist (layers 0-2 dense, 3-47 sparse in the 36B-A4B), so
+    // nothing downstream may assume one kind.
+    cfg.k2_sparse.assign(cfg.n_layers, false);
+    if (cfg.is_k2) {
+        for (int i = 0; i < cfg.n_layers; ++i)
+            cfg.k2_sparse[size_t(i)] = k2::is_sparse_layer(
+                i, cfg.mlp_only_layers.empty() ? nullptr : cfg.mlp_only_layers.data(),
+                int(cfg.mlp_only_layers.size()), cfg.n_experts, cfg.sparse_step);
+    }
+    if(use_gguf && !cfg.is_gemma4 && !cfg.is_qwen3){
+        // Qwen text-only mRoPE uses the same position in every section.
+        // Keep the derived sections in the model description; only Agnes
+        // previously populated this field, and no execution path reads it.
+        const Json tc=Json::parse(j).at("text_config");
+        const Json& sections=tc.at("rope_parameters").at("mrope_section");
+        cfg.mrope=true;cfg.mrope_section.clear();
+        for(const Json& x:sections.array)cfg.mrope_section.push_back(x.integer());
+    }
+
+    // ---- shards ------------------------------------------------------
+    shards.clear();
+    index.clear();
+    TensorRef selected_embedding;
+    native_model.reset();
+    std::string native_path=dir+"/model-v3.b70";
+    if (::access(native_path.c_str(),F_OK)!=0) native_path=dir+"/model-v2.b70";
+    const char* ple_source = std::getenv("GRIMOIRE_QFN_PLE_SOURCE");
+    const bool external_ple = ple_source && *ple_source;
+    const bool use_native = !use_gguf && ::access(native_path.c_str(), F_OK) == 0;
+    if (external_ple && (!cfg.is_qwen4_exp || use_gguf || use_native || cfg.ple_layer_ids.empty())) {
+        err = "GRIMOIRE_QFN_PLE_SOURCE requires a Qwen4-Exp safetensors target with PLE";
+        return false;
+    }
+    ShardMembers primary;
+    std::filesystem::path model_root;
+    if (cfg.is_qwen4_exp && !use_gguf && !use_native) {
+        if (!checkpoint_members(dir, external_ple, primary, err)) return false;
+        if (!primary.empty()) {
+            const char* configured_root = std::getenv("GRIMOIRE_MODEL_ROOT");
+            std::error_code ec;
+            const auto model_dir = std::filesystem::canonical(dir, ec);
+            if (!ec) model_root = configured_root && *configured_root
+                ? std::filesystem::canonical(configured_root, ec) : model_dir.parent_path();
+            if (ec) { err = "cannot resolve model root: " + ec.message(); return false; }
+        }
+    }
+    if(use_gguf) {
+        if(!(cfg.is_gemma4 ? gguf_gemma4_index(*this,err)
+             : cfg.is_qwen3 ? gguf_qwen3_index(*this,err)
+             : gguf_qwen35_index(*this,err)))return false;
+    } else if (use_native) {
+        native_model=std::make_unique<NativeModel>();
+        if(!native_model->open(native_path,err))return false;
+        const auto* rec=native_model->records();
+        for(uint64_t i=0;i<native_model->header().tensor_count;++i){
+            const auto& nr=rec[i];
+            const std::string name(nr.name,strnlen(nr.name,sizeof nr.name));
+            if(skip_vision&&(name.find(".visual.")!=std::string::npos||name.find("vision")!=std::string::npos))continue;
+            TensorRef r;r.native=&nr;r.t.name=name;
+            r.t.dtype=STDtype(nr.source_dtype);
+            r.t.shape.assign(nr.shape,nr.shape+nr.rank);
+            r.t.begin=0;r.t.end=nr.payload_bytes;
+            index[name]=r;
+        }
+    } else {
+        HFModel hf;
+        if (!hf.discover(dir, err)) return false;
+        const bool embed_recipe = hf.config.count("embed_tokens_quant") != 0;
+        const std::string side = hf.cfg_str("embed_tokens_quant.side_file", "");
+        const std::string key_weight = hf.cfg_str("embed_tokens_quant.key_weight", "");
+        const std::string key_scale = hf.cfg_str("embed_tokens_quant.key_scale", "");
+        if (embed_recipe && (hf.cfg_int("embed_tokens_quant.bits", 0) != 8 ||
+            hf.cfg_int("embed_tokens_quant.packed", 0) != 0 || side.empty() ||
+            side == "." || side == ".." || side.find('/') != std::string::npos ||
+            side.find('\\') != std::string::npos || key_weight.empty() || key_scale.empty())) {
+            err = "unsupported INT8 embedding recipe (bits, packing, side file or tensor keys)";
+            return false;
+        }
+        const std::string scheme = hf.cfg_str("embed_tokens_quant.scheme", "per_row_absmax_symmetric");
+        if (embed_recipe && scheme != "per_row_absmax_symmetric") {
+            err = "unsupported embedding quantization scheme: " + scheme; return false;
+        }
+        int side_shard = -1;
+        if (primary.empty()) {
+            for (const auto& file : hf.shards) primary.try_emplace(file);
+        } else if (embed_recipe) {
+            primary.try_emplace(dir + "/" + side);
+        }
+        for (const auto& [file, names] : primary) {
+            auto st = std::make_unique<SafeTensors>();
+            if (model_root.empty() ? !st->open(file, err) :
+                !open_indexed_shard(*st, file, model_root, err)) return false;
+            const bool is_side = embed_recipe && file == dir + "/" + side;
+            if (is_side) side_shard = int(shards.size());
+            auto add = [&](const STTensor& t) {
+                if (is_side || (skip_vision && (t.name.find(".visual.") != std::string::npos ||
+                                               t.name.find("vision") != std::string::npos))) return;
+                TensorRef r;
+                r.shard = int(shards.size());
+                r.t = t;
+                index[t.name] = std::move(r);
+            };
+            if (names.empty()) {
+                for (const auto& kv : st->tensors()) add(kv.second);
+            } else for (const auto& name : names) {
+                const auto* t = st->find(name);
+                if (!t) { err = file + ": indexed tensor not found: " + name; return false; }
+                add(*t);
+            }
+            shards.push_back(std::move(st));
+        }
+        if (embed_recipe) {
+            if (side_shard < 0) { err = "embedding side file not found: " + side; return false; }
+            const auto* weight = shards[size_t(side_shard)]->find(key_weight);
+            const auto* scale = shards[size_t(side_shard)]->find(key_scale);
+            if (!weight || !scale || weight->dtype != STDtype::I8 ||
+                weight->shape.size() != 2 || weight->shape[0] < cfg.vocab ||
+                weight->shape[1] != cfg.hidden || scale->dtype != STDtype::F16 ||
+                scale->shape != std::vector<int64_t>{weight->shape[0], 1}) {
+                err = "INT8 embedding requires I8[vocab,hidden] and F16[vocab,1] scales";
+                return false;
+            }
+            // Validate all rows before any GPU allocation or upload. Zero scales
+            // are valid padding, as in the reference's vocabulary shards.
+            std::vector<float> scales(size_t(scale->shape[0]));
+            if (!shards[size_t(side_shard)]->read_f32(*scale, scales.data(), err)) return false;
+            for (float v : scales) if (!std::isfinite(v) || v < 0) {
+                err = "INT8 embedding scales must be finite and nonnegative"; return false;
+            }
+            selected_embedding.shard = side_shard;
+            selected_embedding.t = *weight;
+            selected_embedding.int8_embedding = true;
+            selected_embedding.scales_shard = side_shard;
+            selected_embedding.scales_t = *scale;
+        }
+    }
+    if (index.empty()) { err = "no tensors found in " + dir; return false; }
+
+    // ---- prefix ------------------------------------------------------
+    // Multimodal checkpoints nest the text model one level deeper. The
+    // MoE 35B uses model.language_model.*, plain text models use model.*
+    prefix = (index.count("model.language_model.embed_tokens.weight") ||
+              index.count("model.language_model.norm.weight"))
+           ? "model.language_model." : "model.";
+    if (selected_embedding.ok()) index[prefix + "embed_tokens.weight"] = selected_embedding;
+
+    if (external_ple) {
+        ShardMembers source;
+        if (!checkpoint_members(ple_source, true, source, err)) return false;
+        std::map<int, std::string> table_prefix;
+        for (int layer : cfg.ple_layer_ids) {
+            if (layer <= 0 || layer > cfg.n_layers) { err = "invalid PLE layer ID"; return false; }
+            table_prefix.emplace(layer, prefix + "layers." + std::to_string(layer - 1) +
+                                       ".ple.ple_embedding.ngram_embedding.");
+        }
+        std::map<int, size_t> table_entries;
+        for (const auto& [file, names] : source) {
+            std::unique_ptr<SafeTensors> st;
+            for (const auto& name : names) for (const auto& [layer, base] : table_prefix) {
+                if (name.compare(0, base.size(), base) != 0) continue;
+                const auto key = name.substr(base.size());
+                const bool part = key.size() > 13 && key.compare(0, 6, "shard_") == 0 &&
+                    key.compare(key.size()-7, 7, ".weight") == 0 &&
+                    key.find_first_not_of("0123456789", 6) == key.size()-7;
+                if (!part && key != "weight" && key != "weight_scale") continue;
+                if (!st) {
+                    st = std::make_unique<SafeTensors>();
+                    if (!open_indexed_shard(*st, file, model_root, err)) return false;
+                }
+                const auto* t = st->find(name);
+                if (!t) { err = file + ": indexed PLE tensor not found: " + name; return false; }
+                TensorRef r;
+                r.shard = int(shards.size());
+                r.t = *t;
+                if (!index.emplace(name, std::move(r)).second) {
+                    err = "external PLE overlaps the target: " + name;
+                    return false;
+                }
+                if (key != "weight_scale") ++table_entries[layer];
+                break;
+            }
+            if (st) shards.push_back(std::move(st));
+        }
+        for (const auto& [layer, base] : table_prefix) {
+            size_t parts = 0;
+            while (parts < table_entries[layer] &&
+                   index.count(base + "shard_" + std::to_string(parts) + ".weight")) ++parts;
+            const bool flat = index.count(base + "weight") != 0;
+            if ((flat && (parts || table_entries[layer] != 1)) ||
+                (!flat && (parts == 0 || parts != table_entries[layer]))) {
+                err = "external PLE requires one complete table per layer: " + base;
+                return false;
+            }
+        }
+    }
+
+    // Offline format compilers operate over the checkpoint index directly.
+    // Some BF16 releases store all experts in fused 3-D tensors rather than
+    // the per-expert names expected by the inference compatibility loader.
+    if (index_only) return true;
+
+    auto get = [&](const std::string& n) {
+        auto it = index.find(n);
+        return it == index.end() ? TensorRef{} : it->second;
+    };
+    // NVFP4 (NVIDIA Blackwell) wears the SAME .weight_packed name and the
+    // same [N][K/2] E2M1 payload as MXFP4.  What tells them apart is the
+    // GLOBAL SCALE: NVFP4 ships one FP32 per tensor and MXFP4 has no such
+    // tensor at all.  Nothing else is a reliable discriminator -- the
+    // scale tensor's dtype would be, but only if the writer declared it,
+    // and the shape ratio (K/16 vs K/32) is a second opinion rather than
+    // a first one.  So: global scale present -> NVFP4, and the caller
+    // must keep it OFF the direct-MXFP4 upload, which would read E4M3
+    // per-16 scales as E8M0 per-32 and produce a fluent wrong model.
+    //
+    // Derivation and the merged-partition trap: b70/nvfp4.hpp.
+    auto mark_nvfp4 = [&](TensorRef& p, const TensorRef& sc,
+                          const std::string& base) -> bool {
+        TensorRef gs = get(base + ".weight_global_scale");
+        if (!gs.ok()) return false;
+        if (p.t.shape.size() != 2 || sc.t.shape.size() != 2) return false;
+        const int N = int(p.t.shape[0]);
+        const int K = int(p.t.shape[1]) * 2;
+        // One E4M3 scale per 16 elements.  If the checkpoint disagrees,
+        // this is not NVFP4 as this engine understands it and guessing
+        // would be worse than declining to recognise it.
+        if (int(sc.t.shape[0]) != N || int(sc.t.shape[1]) * 16 != K) return false;
+        p.nvfp4 = true;
+        p.scales_shard = sc.shard;
+        p.scales_t = sc.t;
+        p.gscale_shard = gs.shard;
+        p.gscale_t = gs.t;
+        p.t.shape = {N, K};
+        return true;
+    };
+
+    auto linear = [&](const std::string& base) { return linear_ref(base); };
+    // compressed-tensors MXFP4: base.weight_packed [N][K/2] E2M1 nibbles +
+    // base.weight_scale [N][K/32] E8M0.  This IS GRIMOIRE's MXFP4 layout, so
+    // the upload path copies it straight to VRAM (see quantize_upload_t).
+    auto packed = [&](const std::string& base) {
+        TensorRef p = get(base + ".weight_packed");
+        if (!p.ok()) return TensorRef{};
+        TensorRef sc = get(base + ".weight_scale");
+        if (!sc.ok()) return TensorRef{};
+        if (mark_nvfp4(p, sc, base)) return p;
+        p.scales_shard = sc.shard;
+        p.scales_t = sc.t;
+        const int N = int(p.t.shape[0]);
+        const bool int4 = p.t.dtype == STDtype::I32 && sc.t.dtype == STDtype::BF16;
+        const int K = int(p.t.shape[1]) * (int4 ? 8 : 2);
+        if (int4) {
+            const int groups = int(sc.t.shape[1]);
+            if (groups <= 0 || K % groups) return TensorRef{};
+            p.compressed_int4 = true;
+            p.gptq_group = K / groups;
+            TensorRef zp = get(base + ".weight_zero_point");   // asymmetric exports
+            if (zp.ok()) { p.qzeros_shard = zp.shard; p.qzeros_t = zp.t; }
+        }
+        p.t.shape = {N, K};
+        return p;
+    };
+
+    embed      = get(prefix + "embed_tokens.weight");
+    if (embed.ok() && embed.t.dtype == STDtype::I8 && !embed.int8_embedding && !embed.native) {
+        err = "INT8 embedding has no declared row-scale recipe; refusing unscaled codes";
+        return false;
+    }
+    final_norm = get(prefix + "norm.weight");
+    if (cfg.is_qwen4_exp) {
+        // Qwen4-Exp has no model.norm: the tail hyper-connection mixer's
+        // grouped norm IS the final norm, and its gated mean is what the
+        // head reads (ref/qwen4_exp_nvidia_model.py:576, and the module
+        // has no self.norm at all).  use_combine is false there, so no
+        // block_inject_weight exists -- vLLM skips loading one by name.
+        const std::string m = prefix + "hyper_connection_mixer.";
+        hc_final.norm = get(m + "hc_norm.weight");
+        hc_final.down = get(m + "input_mix_weight_down.weight");
+        hc_final.up   = get(m + "input_mix_weight_up.weight");
+    }
+    // linear(), not get(): the head can be quantized too (Ornith-1.5-NVFP4
+    // ships lm_head as modelopt NVFP4), and a raw get() handed its U8
+    // nibbles to the upload as if they were the weight.
+    lm_head    = linear("lm_head");
+    if (!lm_head.ok()) lm_head = linear(prefix + "lm_head");
+    if (!embed.ok()) { err = "embed_tokens not found (prefix " + prefix + ")"; return false; }
+
+    // ---- layers ------------------------------------------------------
+    layers.assign(cfg.n_layers, {});
+    for (int L = 0; L < cfg.n_layers; ++L) {
+        Qwen35Layer& lay = layers[L];
+        lay.kind = cfg.layer_types[L];
+        const std::string b = prefix + "layers." + std::to_string(L) + ".";
+
+        lay.input_norm     = get(b + "input_layernorm.weight");
+        lay.post_attn_norm = get(b + "post_attention_layernorm.weight");
+
+        if (cfg.is_qwen4_exp) {
+            // Neither input_layernorm nor post_attention_layernorm exists
+            // on this architecture: the two hyper-connections' own grouped
+            // norms take both places (the decoder layer's forward calls
+            // mix()/combine_and_mix() where every other Qwen calls a
+            // layernorm).  Resolving them would silently find nothing and
+            // the need() check below would then reject a valid file.
+            auto hc = [&](Qwen35Layer::HCRef& r, const char* which) {
+                const std::string h = b + which + ".";
+                r.norm   = get(h + "hc_norm.weight");
+                r.down   = get(h + "input_mix_weight_down.weight");
+                r.inject = get(h + "block_inject_weight.weight");
+                r.up     = get(h + "input_mix_weight_up.weight");
+            };
+            hc(lay.hc_attn, "attn_hyper_connection");
+            hc(lay.hc_mlp,  "mlp_hyper_connection");
+
+            lay.qsa = L < int(cfg.qsa_attention.size()) && cfg.qsa_attention[size_t(L)];
+            if (lay.qsa) {
+                const std::string ix = b + "self_attn.indexer.";
+                lay.ix_qk_proj = linear(ix + "index_qk_proj");
+                if (!lay.ix_qk_proj.ok()) lay.ix_qk_proj = get(ix + "index_qk_proj.weight");
+                lay.ix_q_norm  = get(ix + "q_layernorm.weight");
+                lay.ix_k_norm  = get(ix + "k_layernorm.weight");
+            }
+
+            // ple_layer_ids is 1-BASED in the config
+            // (ref/qwen4_exp_config.py:127).  It is stored verbatim, so
+            // the +1 belongs HERE, at the point of use, where it is
+            // visible next to the layer index it is compared against.
+            {
+                std::vector<int> ids = cfg.ple_layer_ids;
+                std::sort(ids.begin(), ids.end());
+                ids.erase(std::unique(ids.begin(), ids.end()), ids.end());
+                for (size_t k = 0; k < ids.size(); ++k)
+                    if (ids[k] == L + 1) { lay.ple = true; lay.ple_dense_id = int(k); }
+            }
+            if (lay.ple) {
+                const std::string pl = b + "ple.";
+                lay.ple_key       = linear(pl + "key_proj");
+                lay.ple_value     = linear(pl + "value_proj");
+                lay.ple_conv1d    = get(pl + "conv1d.weight");
+                lay.ple_norm_key  = get(pl + "norm_key.weight");
+                lay.ple_norm_query= get(pl + "norm_query.weight");
+                lay.ple_norm_conv = get(pl + "norm_conv.weight");
+                lay.ple_table     = get(pl + "ple_embedding.ngram_embedding.weight");
+                lay.ple_table_scale =
+                    get(pl + "ple_embedding.ngram_embedding.weight_scale");
+                if (!lay.ple_table.ok())
+                    for (int sh = 0;; ++sh) {
+                        TensorRef t = get(pl + "ple_embedding.ngram_embedding.shard_" +
+                                          std::to_string(sh) + ".weight");
+                        if (!t.ok()) break;
+                        lay.ple_shards.push_back(t);
+                    }
+                lay.ple_mul_t = get(pl + "ple_embedding.layer_multipliers");
+                lay.ple_vsz_t = get(pl + "ple_embedding.ngram_heads_vocab_sizes");
+                lay.ple_off_t = get(pl + "ple_embedding.ngram_heads_offsets");
+            }
+        }
+
+        if (lay.kind == LayerKind::LINEAR_ATTN) {
+            // Agnes names its two attention submodules delta_attn and
+            // global_attn where Qwen3.5 uses linear_attn and self_attn.
+            // Same modules, same tensor set (verified against the
+            // checkpoint's safetensors index), different spelling.
+            const std::string a = b + (cfg.is_agnes ? "delta_attn." : "linear_attn.");
+            lay.la_in_qkv  = linear(a + "in_proj_qkv");
+            lay.la_in_z    = linear(a + "in_proj_z");
+            lay.la_in_a    = linear(a + "in_proj_a");
+            lay.la_in_b    = linear(a + "in_proj_b");
+            lay.la_conv1d  = get(a + "conv1d.weight");
+            lay.la_A_log   = get(a + "A_log");
+            lay.la_dt_bias = get(a + "dt_bias");
+            lay.la_norm    = get(a + "norm.weight");
+            lay.la_out     = linear(a + "out_proj");
+        } else {
+            const std::string a = b + (cfg.is_agnes ? "global_attn." : "self_attn.");
+            lay.q_proj = linear(a + "q_proj");
+            lay.k_proj = linear(a + "k_proj");
+            lay.v_proj = linear(a + "v_proj");
+            lay.o_proj = linear(a + "o_proj");
+            lay.q_norm = get(a + "q_norm.weight");
+            lay.k_norm = get(a + "k_norm.weight");
+            if (cfg.is_muse) {
+                lay.attn_gate    = linear(a + "gate_proj");
+                lay.pre_ff_norm  = get(b + "pre_feedforward_layernorm.weight");
+                lay.post_ff_norm = get(b + "post_feedforward_layernorm.weight");
+            }
+            if (cfg.is_gemma4) {
+                lay.pre_ff_norm  = get(b + "pre_feedforward_layernorm.weight");
+                lay.post_ff_norm = get(b + "post_feedforward_layernorm.weight");
+                lay.layer_scalar = get(b + "layer_scalar");
+                // attention_k_eq_v: a FULL-attention layer ships no
+                // v_proj at all, and V is the pre-norm pre-RoPE k_proj
+                // output.  Verified against the real weight map: layers
+                // 5, 11, ... 59 have no v_proj and every sliding layer
+                // does.  Check both directions -- a missing v_proj where
+                // one is expected, or a present one where the config says
+                // there should be none, means this is not the checkpoint
+                // the config describes.
+                const bool sliding = !cfg.muse_sliding_attention.empty() &&
+                                     cfg.muse_sliding_attention[size_t(L)];
+                const bool want_v = !(cfg.k_eq_v && !sliding);
+                if (want_v && !lay.v_proj.ok()) {
+                    err = "gemma-4 layer " + std::to_string(L) +
+                          " has no v_proj, but it is a " +
+                          (sliding ? "sliding" : "full-attention") +
+                          " layer that should have one";
+                    return false;
+                }
+                if (!want_v && lay.v_proj.ok()) {
+                    err = "gemma-4 layer " + std::to_string(L) +
+                          " is full-attention with attention_k_eq_v set, so "
+                          "it should have NO v_proj, but the checkpoint has "
+                          "one";
+                    return false;
+                }
+                if (!lay.pre_ff_norm.ok() || !lay.post_ff_norm.ok()) {
+                    err = "gemma-4 layer " + std::to_string(L) +
+                          " is missing a sandwich feed-forward norm";
+                    return false;
+                }
+                // Every gemma-4 layer has q_norm and k_norm
+                // (ref/gemma4.py:1192, 1196).  Elsewhere in this loader
+                // they are optional, so a missing one would simply not be
+                // applied -- fluent output from an unnormalised head.
+                if (!lay.q_norm.ok() || !lay.k_norm.ok()) {
+                    err = "gemma-4 layer " + std::to_string(L) +
+                          " is missing q_norm or k_norm; both are present on "
+                          "every layer of this architecture and skipping "
+                          "them is silent";
+                    return false;
+                }
+                if (!lay.layer_scalar.ok()) {
+                    err = "gemma-4 layer " + std::to_string(L) +
+                          " has no layer_scalar; the reference multiplies "
+                          "the residual stream by it at the end of every "
+                          "layer, so running without it is a different model";
+                    return false;
+                }
+                // The uploader reads this into ONE float.  A tensor that
+                // is present but not scalar-shaped is a valid safetensors
+                // record, so nothing upstream rejects it -- and the read
+                // would run off the end of a single-float destination.
+                // Count elements rather than match a shape: [], [1] and
+                // [1,1] all mean the same number.
+                {
+                    int64_t n = 1;
+                    for (int64_t dim : lay.layer_scalar.t.shape) n *= dim;
+                    if (n != 1) {
+                        err = "gemma-4 layer " + std::to_string(L) +
+                              " has a layer_scalar with " +
+                              std::to_string(n) + " elements; it is a "
+                              "per-layer scalar and is read as one float";
+                        return false;
+                    }
+                }
+            }
+            if (cfg.is_k2) {
+                // Every K2 layer has the attention output gate; only the
+                // SPARSE ones replace v_proj with the MoVA bank.  Layers
+                // 0-2 are dense and keep the ordinary v_proj resolved
+                // above, so both shapes have to coexist here.
+                lay.k2_sparse = cfg.k2_sparse[size_t(L)];
+                if (cfg.attn_gate) lay.attn_gate = linear(a + "gate_proj");
+                if (lay.k2_sparse && cfg.mova_experts > 0) {
+                    lay.v_router      = linear(a + "v_router");
+                    lay.v_router_bias = get(a + "v_router.bias");
+                    lay.v_experts.resize(size_t(cfg.mova_experts));
+                    for (int e = 0; e < cfg.mova_experts; ++e)
+                        lay.v_experts[size_t(e)] =
+                            linear(a + "v_experts." + std::to_string(e));
+                }
+            }
+        }
+
+        const std::string m = b + "mlp.";
+        // Agnes' second SwiGLU.  Resolved for every layer that has one;
+        // the uploader folds it into the main FFN, so nothing downstream
+        // needs to know it existed.
+        if (cfg.parallel_ffn_inter > 0) {
+            const std::string pf = m + "parallel_ffn.";
+            lay.pf_gate = linear(pf + "gate_proj");
+            lay.pf_up   = linear(pf + "up_proj");
+            lay.pf_down = linear(pf + "down_proj");
+            // The uploader folds only when all three are present, and
+            // otherwise takes the ordinary gate/up/down branch.  Silently.
+            // Since dense_inter has already been widened to the folded
+            // size, nothing downstream would notice either: the engine
+            // would just run a narrower FFN than the checkpoint has.  A
+            // declared parallel FFN with a missing projection is a broken
+            // checkpoint, so say which layer and which tensor.
+            const TensorRef* pfs[3] = {&lay.pf_gate, &lay.pf_up, &lay.pf_down};
+            const char* pfn[3] = {"gate_proj", "up_proj", "down_proj"};
+            for (int t = 0; t < 3; ++t) {
+                if (pfs[t]->ok()) continue;
+                err = "parallel_ffn_intermediate_size is " +
+                      std::to_string(cfg.parallel_ffn_inter) + " but layer " +
+                      std::to_string(L) + " has no " + pf + pfn[t];
+                return false;
+            }
+            // Paired widths, checked against the config rather than
+            // against each other alone: a gate/up pair that agree with
+            // one another but not with the declared width would fold into
+            // a matrix whose shape is self-consistent and wrong.
+            const int pg = int(lay.pf_gate.t.shape.size()==2 ? lay.pf_gate.t.shape[0] : 0);
+            const int pu = int(lay.pf_up.t.shape.size()==2   ? lay.pf_up.t.shape[0]   : 0);
+            const int pd = int(lay.pf_down.t.shape.size()==2 ? lay.pf_down.t.shape[1] : 0);
+            if (pg != cfg.parallel_ffn_inter || pu != cfg.parallel_ffn_inter ||
+                pd != cfg.parallel_ffn_inter) {
+                err = "layer " + std::to_string(L) + " parallel_ffn widths (" +
+                      std::to_string(pg) + "," + std::to_string(pu) + "," +
+                      std::to_string(pd) + ") disagree with "
+                      "parallel_ffn_intermediate_size " +
+                      std::to_string(cfg.parallel_ffn_inter);
+                return false;
+            }
+        }
+        // K2: a DENSE layer has no router and no experts -- its FFN is one
+        // intermediate_size MLP under mlp.{gate,up,down}_proj.  cfg.is_moe()
+        // is true for the model as a whole, so without this the three dense
+        // layers would be sent looking for experts that do not exist.
+        if ((cfg.is_k2 && !lay.k2_sparse) ||
+            (cfg.is_qwen3 && cfg.is_moe() &&
+             (std::find(cfg.mlp_only_layers.begin(),cfg.mlp_only_layers.end(),L)!=cfg.mlp_only_layers.end() ||
+              (cfg.sparse_step>0 && (L+1)%cfg.sparse_step!=0)))) {
+            lay.sh_gate = linear(m + "gate_proj");
+            lay.sh_up   = linear(m + "up_proj");
+            lay.sh_down = linear(m + "down_proj");
+        } else if (cfg.is_moe()) {
+            lay.router    = linear(m + "gate");
+            // K2 names the shared expert "shared_experts" (plural) and
+            // carries a router bias; Qwen uses "shared_expert" and a
+            // separate shared_expert_gate.
+            if (cfg.is_k2) {
+                lay.router_bias = get(m + "gate.bias");
+                lay.sh_gate = linear(m + "shared_experts.gate_proj");
+                lay.sh_up   = linear(m + "shared_experts.up_proj");
+                lay.sh_down = linear(m + "shared_experts.down_proj");
+            } else {
+                lay.sh_gate   = linear(m + "shared_expert.gate_proj");
+                lay.sh_up     = linear(m + "shared_expert.up_proj");
+                lay.sh_down   = linear(m + "shared_expert.down_proj");
+                lay.sh_gate_w = linear(m + "shared_expert_gate");
+            }
+
+            lay.e_gate_p.resize(cfg.n_experts); lay.e_gate_s.resize(cfg.n_experts);
+            lay.e_up_p.resize(cfg.n_experts);   lay.e_up_s.resize(cfg.n_experts);
+            lay.e_down_p.resize(cfg.n_experts); lay.e_down_s.resize(cfg.n_experts);
+            const TensorRef fused_gu = get(m + "experts.gate_up_proj");
+            const TensorRef fused_dn = get(m + "experts.down_proj");
+            for (int e = 0; e < cfg.n_experts; ++e) {
+                const std::string x = m + "experts." + std::to_string(e) + ".";
+                lay.e_gate_p[e] = get(x + "gate_proj.weight_packed");
+                lay.e_gate_s[e] = get(x + "gate_proj.weight_scale");
+                lay.e_up_p[e]   = get(x + "up_proj.weight_packed");
+                lay.e_up_s[e]   = get(x + "up_proj.weight_scale");
+                lay.e_down_p[e] = get(x + "down_proj.weight_packed");
+                lay.e_down_s[e] = get(x + "down_proj.weight_scale");
+                auto fallback = [&](const std::string& base, TensorRef& p, TensorRef& s) {
+                    if (p.ok()) return;
+                    p = linear(base);
+                    // linear() has already classified NVFP4 and block FP8;
+                    // re-marking an NVFP4 expert row_scaled here would read
+                    // its E4M3 block scales as FP32 channel scales.
+                    if (!p.ok() || p.gptq || p.nvfp4 || p.block_scaled) return;
+                    s = get(base + ".weight_scale");
+                    if (s.ok()) {
+                        p.row_scaled = true;
+                        p.scales_shard = s.shard;
+                        p.scales_t = s.t;
+                    }
+                };
+                fallback(x + "gate_proj", lay.e_gate_p[e], lay.e_gate_s[e]);
+                fallback(x + "up_proj",   lay.e_up_p[e],   lay.e_up_s[e]);
+                fallback(x + "down_proj", lay.e_down_p[e], lay.e_down_s[e]);
+                // BF16 Ornith-1.5 stores expert matrices fused as
+                // [E,2I,H] and [E,H,I].  Resolve zero-copy logical slices so
+                // the B70 upload path can quantize them directly to MXFP4.
+                if (!lay.e_gate_p[e].ok() && fused_gu.ok()) {
+                    lay.e_gate_p[e] = fused_expert_slice(fused_gu,
+                        uint64_t(e) * 2 * cfg.moe_inter * cfg.hidden,
+                        cfg.moe_inter, cfg.hidden, ".gate");
+                    lay.e_up_p[e] = fused_expert_slice(fused_gu,
+                        (uint64_t(e) * 2 * cfg.moe_inter + cfg.moe_inter) * cfg.hidden,
+                        cfg.moe_inter, cfg.hidden, ".up");
+                }
+                if (!lay.e_down_p[e].ok() && fused_dn.ok())
+                    lay.e_down_p[e] = fused_expert_slice(fused_dn,
+                        uint64_t(e) * cfg.hidden * cfg.moe_inter,
+                        cfg.hidden, cfg.moe_inter, ".down");
+            }
+        } else if (cfg.is_muse) {
+            // Muse ships compressed-tensors MXFP4 for the FFN
+            // (.weight_packed + .weight_scale), which uploads straight to
+            // VRAM.  This was the ONLY shape accepted, with no fallback --
+            // so a Muse checkpoint whose FFN is plain .weight (a bf16
+            // release, or one converted locally) failed to load with
+            // "expected tensors missing: mlp.gate_proj", which reads like a
+            // naming problem and is really a FORMAT assumption.  The
+            // attention projections in the same model have always used
+            // linear(), so the two halves disagreed about what a Muse
+            // checkpoint looks like.
+            //
+            // Take packed when it is there -- unchanged for a real
+            // compressed checkpoint -- and fall back to plain otherwise.
+            lay.sh_gate = packed(m + "gate_proj");
+            lay.sh_up   = packed(m + "up_proj");
+            lay.sh_down = packed(m + "down_proj");
+            if (!lay.sh_gate.ok()) lay.sh_gate = linear(m + "gate_proj");
+            if (!lay.sh_up.ok())   lay.sh_up   = linear(m + "up_proj");
+            if (!lay.sh_down.ok()) lay.sh_down = linear(m + "down_proj");
+        } else {
+            lay.sh_gate = linear(m + "gate_proj");
+            lay.sh_up   = linear(m + "up_proj");
+            lay.sh_down = linear(m + "down_proj");
+        }
+    }
+
+    // ---- validate ----------------------------------------------------
+    // A missing tensor here means the name convention differs and the
+    // model would otherwise run on garbage. Fail loudly instead.
+    int missing = 0;
+    std::string first_missing;
+    auto need = [&](const TensorRef& r, const char* what, int L) {
+        if (!r.ok()) {
+            if (++missing == 1)
+                first_missing = std::string(what) + " (layer " + std::to_string(L) + ")";
+        }
+    };
+    for (int L = 0; L < cfg.n_layers; ++L) {
+        const Qwen35Layer& lay = layers[L];
+        if (!cfg.is_qwen4_exp) need(lay.input_norm, "input_layernorm", L);
+        else {
+            // Say which hyper-connection, not just "a tensor is missing":
+            // the two are the same four names under different prefixes and
+            // a checkpoint that ships one and not the other is a real,
+            // confusing case.
+            need(lay.hc_attn.norm, "attn_hyper_connection.hc_norm", L);
+            need(lay.hc_attn.down, "attn_hyper_connection.input_mix_weight_down", L);
+            need(lay.hc_attn.inject, "attn_hyper_connection.block_inject_weight", L);
+            need(lay.hc_attn.up,   "attn_hyper_connection.input_mix_weight_up", L);
+            need(lay.hc_mlp.norm,  "mlp_hyper_connection.hc_norm", L);
+            need(lay.hc_mlp.down,  "mlp_hyper_connection.input_mix_weight_down", L);
+            need(lay.hc_mlp.inject,"mlp_hyper_connection.block_inject_weight", L);
+            need(lay.hc_mlp.up,    "mlp_hyper_connection.input_mix_weight_up", L);
+            if (lay.qsa) {
+                need(lay.ix_qk_proj, "self_attn.indexer.index_qk_proj", L);
+                need(lay.ix_q_norm,  "self_attn.indexer.q_layernorm", L);
+                need(lay.ix_k_norm,  "self_attn.indexer.k_layernorm", L);
+            }
+            if (lay.ple) {
+                need(lay.ple_key,        "ple.key_proj", L);
+                need(lay.ple_value,      "ple.value_proj", L);
+                need(lay.ple_conv1d,     "ple.conv1d", L);
+                need(lay.ple_norm_key,   "ple.norm_key", L);
+                need(lay.ple_norm_query, "ple.norm_query", L);
+                need(lay.ple_norm_conv,  "ple.norm_conv", L);
+                need(lay.ple_table.ok() || lay.ple_shards.empty() ? lay.ple_table
+                                                                 : lay.ple_shards[0],
+                     "ple.ple_embedding.ngram_embedding", L);
+            }
+        }
+        if (lay.kind == LayerKind::LINEAR_ATTN) {
+            need(lay.la_in_qkv, "linear_attn.in_proj_qkv", L);
+            need(lay.la_out,    "linear_attn.out_proj", L);
+            need(lay.la_conv1d, "linear_attn.conv1d", L);
+        } else {
+            need(lay.q_proj, "self_attn.q_proj", L);
+            need(lay.o_proj, "self_attn.o_proj", L);
+            if (cfg.is_qwen3) {
+                need(lay.q_norm, "self_attn.q_norm", L);
+                need(lay.k_norm, "self_attn.k_norm", L);
+            }
+        }
+        // K2 mixes both FFN shapes in one model: a dense layer has a plain
+        // MLP and no router at all, so requiring mlp.gate everywhere would
+        // reject a valid checkpoint.
+        if ((cfg.is_k2 && !lay.k2_sparse) ||
+            (cfg.is_qwen3 && cfg.is_moe() && !lay.router.ok())) {
+            need(lay.sh_gate, "mlp.gate_proj", L);
+        } else if (cfg.is_moe()) {
+            need(lay.router, "mlp.gate", L);
+            need(lay.e_gate_p.empty() ? TensorRef{} : lay.e_gate_p[0], "experts.0.gate_proj", L);
+        } else {
+            need(lay.sh_gate, "mlp.gate_proj", L);
+        }
+        if (cfg.is_k2 && lay.k2_sparse && cfg.mova_experts > 0) {
+            // MoVA replaces v_proj entirely; if these are missing the value
+            // stream is silently absent rather than wrong.
+            need(lay.v_router, "self_attn.v_router", L);
+            need(lay.v_experts.empty() ? TensorRef{} : lay.v_experts[0],
+                 "self_attn.v_experts.0", L);
+        }
+    }
+    if (missing) {
+        char buf[256];
+        std::snprintf(buf, sizeof buf,
+                      "%d expected tensors missing, first: %s. "
+                      "The checkpoint uses a different naming convention.",
+                      missing, first_missing.c_str());
+        err = buf;
+        return false;
+    }
+    return true;
+}
+
+// One projection's weight with what its readers need attached: block-FP8
+// weight_scale_inv, NVFP4 / compressed-tensors scales, GPTQ qzeros and scales.
+// load() resolves every layer through this; anything that looks a weight up
+// later must too.  The MTP head did a raw index lookup, which dropped the FP8
+// block scales: Qwen3.8-27B-FP8's head drafted garbage and MTP ran at 17.6
+// tok/s against 33.1 without it (2026-10-05).
+TensorRef Qwen35Model::linear_ref(const std::string& base) const {
+    auto get = [&](const std::string& n) {
+        auto it = index.find(n);
+        return it == index.end() ? TensorRef{} : it->second;
+    };
+    auto mark_nvfp4 = [&](TensorRef& p, const TensorRef& sc,
+                          const std::string& base) -> bool {
+        TensorRef gs = get(base + ".weight_global_scale");
+        if (!gs.ok()) return false;
+        if (p.t.shape.size() != 2 || sc.t.shape.size() != 2) return false;
+        const int N = int(p.t.shape[0]);
+        const int K = int(p.t.shape[1]) * 2;
+        // One E4M3 scale per 16 elements.  If the checkpoint disagrees,
+        // this is not NVFP4 as this engine understands it and guessing
+        // would be worse than declining to recognise it.
+        if (int(sc.t.shape[0]) != N || int(sc.t.shape[1]) * 16 != K) return false;
+        p.nvfp4 = true;
+        p.scales_shard = sc.shard;
+        p.scales_t = sc.t;
+        p.gscale_shard = gs.shard;
+        p.gscale_t = gs.t;
+        p.t.shape = {N, K};
+        return true;
+    };
+
+        TensorRef r = get(base + ".weight");
+        if (r.ok()) {
+            TensorRef sc = get(base + ".weight_scale");
+            // modelopt NVFP4 (Ornith-1.5-35B-A3B-NVFP4, Qwen3.8-Flash-Next-
+            // NVFP4): a PLAIN .weight holding U8 [N][K/2] E2M1 nibbles, an
+            // E4M3 .weight_scale [N][K/16], and an F32 .weight_scale_2 that
+            // MULTIPLIES.  Before this branch the pair fell through to the
+            // FP8 case below and the nibbles were read as FP8 values.
+            if (sc.ok() && r.t.dtype == STDtype::U8 && sc.t.dtype == STDtype::F8_E4M3 &&
+                r.t.shape.size() == 2 && sc.t.shape.size() == 2) {
+                TensorRef g2 = get(base + ".weight_scale_2");
+                const int64_t N = r.t.shape[0], K = r.t.shape[1] * 2;
+                if (g2.ok() && g2.t.numel() == 1 && sc.t.shape[0] == N &&
+                    sc.t.shape[1] * 16 == K) {
+                    r.nvfp4 = true;
+                    r.nvfp4_mul = true;
+                    r.scales_shard = sc.shard;  r.scales_t = sc.t;
+                    r.gscale_shard = g2.shard;  r.gscale_t = g2.t;
+                    r.t.shape = {N, K};
+                    return r;
+                }
+                return TensorRef{};    // U8 weight we cannot interpret: refuse
+            }
+            // compressed-tensors FP8 stores a scale beside every quantized
+            // Linear weight: per output channel ([N] or [N,1]) or, in
+            // modelopt checkpoints, ONE scalar per tensor.  Both multiply;
+            // the readers broadcast a scalar (read_row_scales).
+            if (sc.ok()) {
+                r.row_scaled = true;
+                r.scales_shard = sc.shard;
+                r.scales_t = sc.t;
+                return r;
+            }
+            // Block FP8: weight_scale_inv, one scale per 128x128 tile.
+            TensorRef si = get(base + ".weight_scale_inv");
+            if (si.ok() && si.t.shape.size() == 2 && r.t.shape.size() == 2 &&
+                (r.t.dtype == STDtype::F8_E4M3 || r.t.dtype == STDtype::F8_E5M2)) {
+                const int64_t N = r.t.shape[0], K = r.t.shape[1];
+                if (si.t.shape[0] != (N + 127) / 128 || si.t.shape[1] != (K + 127) / 128)
+                    return TensorRef{};  // not the 128x128 layout: refuse, never guess
+                r.block_scaled = true;
+                r.scales_shard = si.shard;
+                r.scales_t = si.t;
+            }
+            return r;
+        }
+        TensorRef cp = get(base + ".weight_packed");
+        TensorRef cs = get(base + ".weight_scale");
+        if (cp.ok() && cs.ok() && mark_nvfp4(cp, cs, base)) return cp;
+        if (cp.ok() && cs.ok() && cp.t.dtype == STDtype::I32 &&
+            cs.t.dtype == STDtype::BF16 && cp.t.shape.size() == 2 &&
+            cs.t.shape.size() == 2 && cp.t.shape[0] == cs.t.shape[0]) {
+            const int out = int(cp.t.shape[0]);
+            const int in = int(cp.t.shape[1]) * 8;
+            const int groups = int(cs.t.shape[1]);
+            if (groups > 0 && in % groups == 0) {
+                cp.compressed_int4 = true;
+                cp.scales_shard = cs.shard;
+                cp.scales_t = cs.t;
+                cp.gptq_group = in / groups;
+                cp.t.shape = {out, in};
+                // Asymmetric exports (symmetric: false) ship per-group zero
+                // points, packed 8 rows per int32: [N/8][groups].  Without
+                // them every weight was decoded around 8 -- the fluent-free
+                // garbage of Muse-Glimmer-30B-GPTQ-INT4.
+                TensorRef zp = get(base + ".weight_zero_point");
+                if (zp.ok()) { cp.qzeros_shard = zp.shard; cp.qzeros_t = zp.t; }
+                return cp;
+            }
+        }
+        TensorRef qw = get(base + ".qweight");
+        TensorRef qz = get(base + ".qzeros");
+        TensorRef sc = get(base + ".scales");
+        if (!qw.ok() || !qz.ok() || !sc.ok() || qw.t.shape.size() != 2 ||
+            qz.t.shape.size() != 2 || sc.t.shape.size() != 2) return TensorRef{};
+        const int in = int(qw.t.shape[0]) * 8;
+        const int out = int(qw.t.shape[1]);
+        const int groups = int(qz.t.shape[0]);
+        if (groups <= 0 || in % groups) return TensorRef{};
+        qw.gptq = true;
+        qw.qzeros_shard = qz.shard; qw.qzeros_t = qz.t;
+        qw.scales_shard = sc.shard; qw.scales_t = sc.t;
+        qw.gptq_group = in / groups;
+        qw.t.shape = {out, in};
+        return qw;
+    }
+
+bool Qwen35Model::native_view(const TensorRef& r, QuantWeight& out, std::string& err) const {
+    if (!r.native || !native_model || r.t.shape.size()!=2) {
+        err="expected a native matrix"; return false;
+    }
+    NativeLayout l;
+    if (!native_layout(*r.native,l,err)) return false;
+    if (r.t.shape[0]<=0 || r.t.shape[0]>INT32_MAX || r.t.shape[1]!=l.K ||
+        r.native_payload_offset%l.row_payload_bytes) {
+        err="invalid native matrix slice geometry"; return false;
+    }
+    return native_model->view(*r.native,r.native_payload_offset/l.row_payload_bytes,
+                              int(r.t.shape[0]),out,err);
+}
+
+bool Qwen35Model::read_native_f32(const TensorRef& r,float* dst,std::string& err) const {
+    if (!r.native || !dst) { err="native tensor or destination missing"; return false; }
+    if (r.native->encoding!=uint32_t(NativeEncoding::RAW)) {
+        QuantWeight w;
+        if (!native_view(r,w,err)) return false;
+        for (int n=0;n<w.N;++n) for (int k=0;k<w.K;++k)
+            dst[size_t(n)*w.K+k]=w.at(n,k);
+        return true;
+    }
+    const int64_t n=r.t.numel();
+    const auto dtype=STDtype(r.native->source_dtype);
+    const size_t unit=size_t(st_dtype_size(dtype));
+    if (!unit || n<=0 || uint64_t(n)>SIZE_MAX/unit ||
+        r.native_payload_offset>r.native->payload_bytes ||
+        uint64_t(n)*unit>r.native->payload_bytes-r.native_payload_offset) {
+        err="unsupported native RAW dtype or invalid slice"; return false;
+    }
+    const auto* p=static_cast<const uint8_t*>(data(r));
+    st_to_f32(p,dtype,n,dst);
+    return true;
+}
+
+QuantWeight Qwen35Model::quant_view(const TensorRef& packed, const TensorRef& scale,
+                                    int N, int K) const {
+    QuantWeight w;
+    w.fmt        = expert_fmt;
+    w.N          = N;
+    w.K          = K;
+    w.payload    = static_cast<const uint8_t*>(data(packed));
+    w.scales     = data(scale);
+    w.zeros      = nullptr;
+    w.row_bytes  = bytes_per_row(expert_fmt, K);
+    w.row_scales = scales_per_row(expert_fmt, K);
+    return w;
+}
+
+int64_t Qwen35Model::total_bytes(bool include_experts) const {
+    int64_t n = bytes(embed) + bytes(final_norm) + bytes(lm_head);
+    for (const Qwen35Layer& L : layers) {
+        n += bytes(L.input_norm) + bytes(L.post_attn_norm);
+        n += bytes(L.la_in_qkv) + bytes(L.la_in_z) + bytes(L.la_in_a) + bytes(L.la_in_b);
+        n += bytes(L.la_conv1d) + bytes(L.la_A_log) + bytes(L.la_dt_bias)
+           + bytes(L.la_norm) + bytes(L.la_out);
+        n += bytes(L.q_proj) + bytes(L.k_proj) + bytes(L.v_proj) + bytes(L.o_proj);
+        n += bytes(L.router) + bytes(L.sh_gate) + bytes(L.sh_up) + bytes(L.sh_down)
+           + bytes(L.sh_gate_w);
+        if (include_experts)
+            for (size_t e = 0; e < L.e_gate_p.size(); ++e)
+                n += bytes(L.e_gate_p[e]) + bytes(L.e_gate_s[e])
+                   + bytes(L.e_up_p[e])   + bytes(L.e_up_s[e])
+                   + bytes(L.e_down_p[e]) + bytes(L.e_down_s[e]);
+    }
+    return n;
+}
+
+void Qwen35Model::summary() const {
+    int nlin = 0, nfull = 0;
+    for (LayerKind k : cfg.layer_types)
+        (k == LayerKind::LINEAR_ATTN ? nlin : nfull)++;
+
+    std::printf("  %-26s %s\n", "prefix", prefix.c_str());
+    std::printf("  %-26s %d\n", "hidden", cfg.hidden);
+    std::printf("  %-26s %d  (%d linear, %d full)\n", "layers", cfg.n_layers, nlin, nfull);
+    std::printf("  %-26s %d\n", "vocab", cfg.vocab);
+    if (cfg.is_moe())
+        std::printf("  %-26s %d experts, top-%d, inter %d, shared %d\n", "moe",
+                    cfg.n_experts, cfg.top_k, cfg.moe_inter, cfg.shared_inter);
+    else
+        std::printf("  %-26s dense, inter %d\n", "ffn", cfg.dense_inter);
+    std::printf("  %-26s %d q / %d kv heads, dim %d, rope %.0f (partial %.2f)\n",
+                "full attention", cfg.n_heads, cfg.n_kv_heads, cfg.head_dim,
+                cfg.rope_theta, cfg.partial_rope);
+    std::printf("  %-26s %d k-heads x%d, %d v-heads x%d, conv %d\n", "gated deltanet",
+                cfg.lin_k_heads, cfg.lin_k_dim, cfg.lin_v_heads, cfg.lin_v_dim,
+                cfg.conv_kernel);
+    std::printf("  %-26s %.2f MiB/layer, %.1f MiB total (context-independent)\n",
+                "deltanet state",
+                double(cfg.deltanet_state_bytes()) / 1048576.0,
+                double(cfg.deltanet_state_bytes()) * nlin / 1048576.0);
+    std::printf("  %-26s %.2f GiB\n", "weights (text only)",
+                double(total_bytes()) / 1073741824.0);
+}
+
+} // namespace b70

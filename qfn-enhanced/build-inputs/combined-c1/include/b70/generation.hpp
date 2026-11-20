@@ -1,0 +1,471 @@
+// GRIMOIRE
+// Copyright (C) 2026 Ian Ernst
+//
+// This program is free software: you can redistribute it and/or modify
+// it under the terms of the GNU General Public License as published by
+// the Free Software Foundation, either version 3 of the License, or
+// (at your option) any later version.
+//
+// This program is distributed in the hope that it will be useful,
+// but WITHOUT ANY WARRANTY; without even the implied warranty of
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+// GNU General Public License for more details.
+//
+// You should have received a copy of the GNU General Public License
+// along with this program.  If not, see <https://www.gnu.org/licenses/>.
+//
+// SPDX-License-Identifier: GPL-3.0-or-later
+
+#pragma once
+#include <algorithm>
+#include <chrono>
+#include <cstdint>
+#include <cstdio>
+#include <exception>
+#include <functional>
+#include <cstdlib>
+#include <stdexcept>
+#include <vector>
+
+namespace b70 {
+enum class FinishReason { Stop, Length, Cancelled };
+inline const char* finish_reason_name(FinishReason r) {
+    return r==FinishReason::Stop?"stop":(r==FinishReason::Length?"length":"cancelled");
+}
+// Speculation accounting.  tok/s alone cannot settle any question about a
+// drafter: it moves when the draft gets cheaper AND when it gets more
+// accurate, and those want opposite decisions.  accepted/steps is the half
+// that isolates proposal quality, so any A/B between two draft
+// configurations -- MTP vs DFlash2, selector on vs off, one K-norm
+// convention vs another -- needs it recorded, not inferred.
+struct SpecStats {
+    long long steps=0;      // speculative rounds entered
+    long long drafted=0;    // draft tokens proposed (anchor excluded)
+    long long accepted=0;   // draft tokens the verifier kept
+    double per_step() const { return steps ? double(accepted)/double(steps) : 0.0; }
+    double rate()     const { return drafted ? double(accepted)/double(drafted) : 0.0; }
+    // GRIMOIRE_SPEC_TIME=1: the caller installs a device fence and the loop
+    // times every phase of a round to it.  Diagnosis only -- the fences
+    // serialise host and device, so the sum runs a little above the
+    // untimed step.  Unset (the default, and every host test), no fence
+    // is called and nothing below is touched.
+    std::function<void()> fence;
+    double snap_ms=0, draft_ms=0, verify_ms=0, commit_ms=0;
+};
+struct GenerationTiming {
+    using Clock = std::chrono::steady_clock;
+    Clock::time_point start{}, prompt_ready{}, first_token{}, last_token{};
+    size_t prefill_tokens = 0;
+};
+struct GreedySpecCommit {
+    int start, rows, next_token;
+    bool verified;
+};
+struct GenerationOptions {
+    int max_tokens=0, eos=-1, eot=-1, draft_depth=0;
+    bool dflash=false, mtp=false, graph=false;
+    // Optional; nothing is recorded when null.
+    SpecStats* stats=nullptr;
+    GenerationTiming* timing=nullptr;
+    // Ranked engines agree before any live recurrent/KV state is committed.
+    std::function<bool(const GreedySpecCommit&)> agree_greedy_commit{};
+    // CLI diagnostics and host tests only. Substitute the proposal source,
+    // not the verifier, rank agreement, or recurrent commit.
+    std::function<int32_t(int32_t, int, bool)> diagnostic_draft{};
+};
+inline int generation_budget(const std::vector<int32_t>& ids, int requested, int capacity, int vocab) {
+    if(ids.empty())throw std::invalid_argument("prompt must contain at least one token");
+    if(capacity<=0 || ids.size()>=size_t(capacity))
+        throw std::invalid_argument("prompt leaves no room for completion in the context window");
+    if(requested<0)throw std::invalid_argument("max_tokens must be nonnegative");
+    for(auto t:ids)if(t<0||t>=vocab)throw std::invalid_argument("prompt token outside model vocabulary");
+    return std::min(requested,capacity-int(ids.size()));
+}
+
+namespace gen_detail {
+// The engine's per-call prefill token budget when it has one (host test
+// engines do not): 0 = no limit.
+template<class E> auto prefill_budget(E& e, int) -> decltype(int(e.prefill_token_budget())) {
+    return e.prefill_token_budget();
+}
+template<class E> int prefill_budget(E&, long) { return 0; }
+} // namespace gen_detail
+
+// Production control flow is a template to allow stateful, deterministic host
+// tests without emulating GPU numerics. Errors propagate, never masquerade as EOS.
+template<class Engine>
+int generate_tokens(Engine& e, const std::vector<int32_t>& prompt,
+                    GenerationOptions o, std::vector<int32_t>& out,
+                    const std::function<bool(int32_t)>& callback,
+                    FinishReason& reason) {
+    out.clear();reason=FinishReason::Length;
+    if(o.diagnostic_draft && (o.mtp || o.dflash))
+        throw std::invalid_argument("diagnostic proposals require real drafting off");
+    o.max_tokens=generation_budget(prompt,o.max_tokens,e.max_seq,e.cfg.vocab);
+    if(!o.max_tokens)return 0;
+    if(o.timing) {
+        *o.timing = {};
+        o.timing->start = GenerationTiming::Clock::now();
+    }
+    // Snapshot at the END of the request, covering prompt AND reply, so
+    // the next turn can resume from the whole conversation rather than
+    // from the prompt this one happened to start with.  Without it the
+    // snapshot never grows and reuse covers only the first turn forever.
+    //
+    // RAII because this function returns from six places (every emit()
+    // that stops) and can throw from more.  Rule 7c's argument: the paths
+    // that need it most have no exit to annotate.
+    //
+    // NOT on the exception path: a request that threw left the engine
+    // mid-flight, and a snapshot of that state would be handed to the
+    // next request as though it described a finished one.
+    struct PrefixSnapshot {
+        Engine& e; const std::vector<int32_t>& prompt;
+        const std::vector<int32_t>& out;
+        ~PrefixSnapshot() {
+            if(std::uncaught_exceptions())return;
+            std::vector<int32_t> all=prompt;
+            all.insert(all.end(),out.begin(),out.end());
+            // TRUNCATE TO WHAT THE ENGINE ACTUALLY PROCESSED.  emit()
+            // pushes a token BEFORE forward() consumes it, so the last
+            // token of `out` has been returned to the caller and never
+            // fed back in -- the cache holds one entry fewer than this
+            // list names.  Claiming otherwise resumes at a position whose
+            // KV row was never written, and the answer that comes out is
+            // fluent and slightly wrong, which took a three-turn gate to
+            // see (turns one and two matched).
+            //
+            // e.pos is the count the engine will stand behind, so deriving
+            // the length from it cannot drift from the loop's shape again.
+            if(e.pos>=0&&size_t(e.pos)<all.size()){
+                all.resize(size_t(e.pos));
+            } else if(e.pos>=0&&size_t(e.pos)>all.size()){
+                // THE OTHER DIRECTION (external audit F4, 2026-09-21).
+                // Speculative verification commits a WHOLE accepted
+                // block to the recurrent state in one call
+                // (commit_spec_prefix) BEFORE the loop that delivers
+                // those tokens to `out` one at a time even runs -- so if
+                // that delivery loop stops partway (EOS inside the
+                // accepted block, or a cancelled callback), e.pos
+                // already reflects tokens this snapshot's own token list
+                // does not name. That is the OPPOSITE of the case above:
+                // here the cache holds MORE than this list admits to,
+                // not fewer, and there is no direction to resize `all`
+                // that fixes it -- shrinking would lose real,
+                // already-committed tokens from the label, and there is
+                // nothing to grow it WITH, since what actually got
+                // emitted to the caller is exactly `all` already.
+                //
+                // A restore later would set pos = all.size() (the
+                // label) while the copied recurrent state is however
+                // many extra tokens further along -- invisible for a
+                // plain KV cache (rows past the labeled position are
+                // simply never read) but real corruption for a
+                // hybrid/DeltaNet model, whose recurrent state is a
+                // single rolling summary with no per-position rollback.
+                // Restore-and-replay to repair it is not an option: it
+                // is documented elsewhere in this engine as corrupting
+                // memory on exactly these models.
+                //
+                // So: decline to cache this termination rather than
+                // cache a label that lies about what state it names.
+                // Losing one turn's resume is a re-read next time;
+                // saving a mislabeled snapshot is silent wrong output on
+                // every turn after that, on the one architecture family
+                // where nothing else would catch it.
+                return;
+            }
+            e.save_prefix_now(all);
+        }
+    } prefix_snapshot{e,prompt,out};
+    // REUSE WHAT IS ALREADY RESIDENT.  A chat turn is the previous prompt
+    // plus a reply plus a new message, so the snapshot taken at the end of
+    // the last request is a strict PREFIX of this one.  Before this,
+    // reset() threw that away and the whole history was re-read on every
+    // single turn -- the cache only fired on a byte-identical repeat,
+    // which a growing conversation never produces.
+    //
+    // reuse == 0 is the old path exactly: reset, prefill everything.
+    const int reuse = e.prefix_reuse(prompt);
+    bool resumed = false;
+    if(reuse>0) {
+        e.sync();
+        resumed = e.restore_prefix_upto(reuse);
+    }
+    if(!resumed) e.reset();
+    // The tail is what is left to process.  prefix_reuse keeps a token back so
+    // prefill still produces this request's logits rather than leaving the
+    // previous request's in place -- except for a prompt head saved at the
+    // prompt's END (2026-11-17), whose restore puts that row's logits back:
+    // then the tail is empty and nothing is read.
+    const std::vector<int32_t> tail = resumed
+        ? std::vector<int32_t>(prompt.begin()+reuse, prompt.end()) : prompt;
+    // Pipeline parallel: feed a long prompt in chunks so the ranks overlap --
+    // rank 0 runs its layers on chunk c+1 while rank 1 runs its layers on
+    // chunk c (one whole-prompt prefill left each rank idle while the other
+    // worked: PP=2 prefill was no faster than one card).  Every rank runs this
+    // same code on the same prompt, so the chunking agrees.
+    // GRIMOIRE_PP_CHUNK=<tokens> (0 = one prefill).  MEASURED 2026-10-01,
+    // Ornith 5987 tokens on gpu0+gpu1, GRIMOIRE_PP_LAYERS=19,21: chunk 2048
+    // 0.630 s (9,503 tok/s; one B70: 0.703 s, 8,516), 1536 0.648, 1200
+    // 0.706, 3000 0.749; a short first chunk (GRIMOIRE_PP_CHUNK_FIRST)
+    // is slower.  Default split 24,16: chunk 2048 0.678 s, no chunks 0.737.
+    auto prefill_part = [&](const std::vector<int32_t>& tail) -> bool {
+        static const int pp_chunk = [] {
+            const char* v = std::getenv("GRIMOIRE_PP_CHUNK");
+            return v && *v ? std::max(0, std::atoi(v)) : 2048; }();
+        // GRIMOIRE_PP_CHUNK_FIRST: a shorter first chunk fills the pipeline
+        // sooner (the last rank idles until the first chunk arrives).
+        static const int pp_first = [] {
+            const char* v = std::getenv("GRIMOIRE_PP_CHUNK_FIRST");
+            return v && *v ? std::max(0, std::atoi(v)) : 0; }();
+        // One card: whole prompts, unless the prefill scratch would not fit
+        // in VRAM (Grimoire::prefill_token_budget) -- then chunks of that size.
+        if(!e.pp_enabled()) {
+            const int budget = gen_detail::prefill_budget(e, 0);
+            if(budget <= 0 || int(tail.size()) <= budget) return e.prefill(tail);
+            for(size_t off = 0; off < tail.size(); off += size_t(budget)) {
+                const size_t len = std::min(size_t(budget), tail.size() - off);
+                if(!e.prefill(std::vector<int32_t>(tail.begin() + off, tail.begin() + off + len)))
+                    return false;
+            }
+            return true;
+        }
+        if(pp_chunk <= 0 || int(tail.size()) < 2 * pp_chunk)
+            return e.prefill(tail);
+        static const bool pp_timing = std::getenv("GRIMOIRE_PP_TIMING") != nullptr;
+        const auto pt0 = std::chrono::steady_clock::now();
+        // Chunk list: the optional first chunk, then the rest split into
+        // EQUAL chunks of at most pp_chunk (GRIMOIRE_PP_EVEN=0 = fixed
+        // pp_chunk plus a remainder, as before).  Both stages build the same
+        // list from the same prompt.
+        static const bool pp_even = [] { const char* v = std::getenv("GRIMOIRE_PP_EVEN");
+            return v && *v == '1'; }();
+        std::vector<size_t> lens;
+        {
+            size_t rem = tail.size();
+            if (pp_first > 0 && size_t(pp_first) < rem) { lens.push_back(size_t(pp_first)); rem -= size_t(pp_first); }
+            if (pp_even) {
+                const size_t n = (rem + size_t(pp_chunk) - 1) / size_t(pp_chunk);
+                for (size_t i = 0; i < n; ++i) {
+                    const size_t l = (rem + (n - i) - 1) / (n - i);
+                    lens.push_back(l); rem -= l;
+                }
+            } else {
+                while (rem > 0) { const size_t l = std::min(rem, size_t(pp_chunk)); lens.push_back(l); rem -= l; }
+            }
+        }
+        size_t off = 0;
+        for (size_t ci = 0; ci < lens.size(); ++ci) {
+            const size_t len = lens[ci];
+            // a downstream stage may read the NEXT chunk's boundary rows off
+            // the socket while this chunk computes (0 = nothing to expect)
+            e.pp_expect_next_rows(ci + 1 < lens.size() ? int(lens[ci + 1]) : 0);
+            const auto c0 = std::chrono::steady_clock::now();
+            if(!e.prefill(std::vector<int32_t>(tail.begin() + off, tail.begin() + off + len)))
+                return false;
+            if(pp_timing) {
+                e.sync();
+                const auto c1 = std::chrono::steady_clock::now();
+                std::fprintf(stderr, "    PP chunk %zu+%zu: start %.1f end %.1f ms\n", off, len,
+                    std::chrono::duration<double, std::milli>(c0 - pt0).count(),
+                    std::chrono::duration<double, std::milli>(c1 - pt0).count());
+            }
+            off += len;
+        }
+        return true;
+    };
+    // PROMPT HEAD (2026-11-16): stop a few tokens before the end of a long prompt and snapshot the recurrent state
+    // there (Grimoire::save_prefix_head), so the same prompt again -- or an agent's next turn, whose history starts
+    // with this prompt -- resumes from it instead of re-reading everything.  GRIMOIRE_PREFIX_CACHE=1 only.
+    auto prefill_tail = [&]() -> bool {
+        const int base = resumed ? reuse : 0;
+        // the whole prompt came from a head saved at its end: the restore put that row's logits back
+        if(tail.empty()) return true;
+        // 2026-11-17: the head after the WHOLE prompt, with its output -- one prefill, no 64-row second call
+        if(e.prefix_head_at_end(prompt.size(), base)) {
+            if(!prefill_part(tail)) return false;
+            e.sync();
+            e.save_prefix_head(prompt, true);
+            return true;
+        }
+        const int h = e.prefix_head_split(prompt.size(), base);
+        if(h <= base) return prefill_part(tail);
+        if(!prefill_part(std::vector<int32_t>(prompt.begin() + base, prompt.begin() + h))) return false;
+        e.sync();
+        e.save_prefix_head(std::vector<int32_t>(prompt.begin(), prompt.begin() + h));
+        return prefill_part(std::vector<int32_t>(prompt.begin() + h, prompt.end()));
+    };
+    if(!prefill_tail()) {
+        // A rejected batch may already have submitted work. Drain before a
+        // sequential retry so no token is processed twice.  A resumed
+        // request must NOT reset here -- that would discard the very
+        // prefix it just restored and then replay only the tail, which
+        // silently answers from a truncated conversation.
+        e.sync();
+        if(resumed) {
+            if(!e.restore_prefix_upto(reuse))
+                throw std::runtime_error("prefix restore failed on retry");
+        } else e.reset();
+        for(auto t:tail)if(!e.forward(t))throw std::runtime_error("sequential prefill failed");
+    }
+    e.sync();
+    if(o.timing) {
+        o.timing->prefill_tokens = tail.size();
+        o.timing->prompt_ready = GenerationTiming::Clock::now();
+    }
+    if(o.dflash) {
+        std::vector<int32_t> unused;
+        if(!e.dflash_draft(0,e.pos,unused,true))throw std::runtime_error("DFlash context preparation failed");
+    }
+    if(o.graph && !o.dflash && !o.mtp && !o.diagnostic_draft && !e.graph_ok)e.build_graph();
+    int tok=e.argmax_token();
+    auto stop=[&](int t){return (o.eos>=0&&t==o.eos)||(o.eot>=0&&t==o.eot);};
+    auto emit=[&](int t) {
+        if(t<0||t>=e.cfg.vocab)throw std::runtime_error("engine returned an invalid token");
+        if(stop(t)){reason=FinishReason::Stop;return false;}
+        out.push_back(t);
+        if(o.timing) {
+            o.timing->last_token = GenerationTiming::Clock::now();
+            if(out.size()==1) o.timing->first_token = o.timing->last_token;
+        }
+        if(callback&&!callback(t)){reason=FinishReason::Cancelled;return false;}
+        return int(out.size())<o.max_tokens;
+    };
+    while(int(out.size())<o.max_tokens) {
+        // The verified anchor is immediately available, including at TTFT.
+        if(!emit(tok))break;
+        const int k=std::min({o.draft_depth,e.max_seq-e.pos-1,o.max_tokens-int(out.size())});
+        if((o.dflash||o.mtp||o.diagnostic_draft)&&k>0) {
+            const int saved=e.pos;
+            bool degraded=false;   // draft discarded unjudged, see below
+            const bool timed=o.stats&&o.stats->fence;
+            std::chrono::steady_clock::time_point t_lap;
+            auto lap=[&](double* acc){
+                if(!timed)return;
+                o.stats->fence();
+                const auto t=std::chrono::steady_clock::now();
+                if(acc)*acc+=std::chrono::duration<double,std::milli>(t-t_lap).count();
+                t_lap=t;
+            };
+            lap(nullptr);
+            e.snapshot_recurrent();
+            if(timed)lap(&o.stats->snap_ms);
+            std::vector<int32_t> candidates{tok};
+            if(o.dflash) {
+                std::vector<int32_t> block;
+                if(!e.dflash_draft(tok,saved,block)||block.empty())
+                    throw std::runtime_error("DFlash draft failed");
+                candidates.insert(candidates.end(),block.begin(),block.begin()+std::min(k,int(block.size())));
+            } else {
+                int d=tok;
+                for(int j=1;j<=k;++j) {
+                    d=o.diagnostic_draft ? o.diagnostic_draft(d,saved+j-1,j>1)
+                                         : e.mtp_draft(d,saved+j-1,j>1);
+                    if(d<0||d>=e.cfg.vocab)throw std::runtime_error("MTP or diagnostic draft failed");
+                    candidates.push_back(d);
+                }
+            }
+            for(int t:candidates)if(t<0||t>=e.cfg.vocab)throw std::runtime_error("invalid draft token");
+            if(timed)lap(&o.stats->draft_ms);
+            std::vector<int32_t> verified;
+            const bool batched_ok=e.prefill(candidates,&verified);
+            if(timed)lap(&o.stats->verify_ms);
+            if (!batched_ok && o.agree_greedy_commit) {
+                // Join the decision exchange, but do not run a target step
+                // or mutate live state on only a subset of the ranks.
+                o.agree_greedy_commit({saved, 0, -1, false});
+                throw std::runtime_error("ranked greedy batch verification declined");
+            }
+            if(!batched_ok) {
+                // The batched verify declined.  prefill() returns false
+                // only BEFORE it submits any work -- an unavailable
+                // batched path, or scratch it could not allocate -- so
+                // the engine state is untouched and the same verify can
+                // be done a token at a time.  Without this, a degraded
+                // batched path turned every speculative request into a
+                // hard failure: correct output was available and the
+                // request threw anyway.
+                verified.clear();
+                if(e.has_recurrent_state()) {
+                    // A sequential verify on a recurrent model cannot be
+                    // rolled back: commit_spec_prefix replays from the
+                    // per-step images only the BATCHED verify writes, and
+                    // restore-and-replay corrupts memory (see below).  It
+                    // is not enough that the engine said a batched verify
+                    // was AVAILABLE -- spec_verify_available() answers for
+                    // the device, not for this call, and a scratch
+                    // allocation can still fail here.  Nothing has been
+                    // submitted yet, so degrade this round to a plain
+                    // step: forward the verified anchor alone and leave
+                    // the drafted suffix unused.
+                    degraded = true;
+                    candidates.resize(1);
+                    if(!e.forward(candidates[0]))
+                        throw std::runtime_error("speculative verification failed");
+                    verified.push_back(e.argmax_token());
+                } else {
+                    for(size_t i=0;i<candidates.size();++i){
+                        if(!e.forward(candidates[i]))
+                            throw std::runtime_error("speculative verification failed");
+                        verified.push_back(e.argmax_token());
+                    }
+                }
+            }
+            if(verified.size()!=candidates.size())
+                throw std::runtime_error("speculative verification failed");
+            int accepted=1;
+            while(accepted<int(candidates.size())&&candidates[accepted]==verified[accepted-1])++accepted;
+            const GreedySpecCommit decision{saved, accepted, verified[accepted-1], batched_ok && !degraded};
+            if (o.agree_greedy_commit && !o.agree_greedy_commit(decision))
+                throw std::runtime_error("greedy verifier ranks disagree on the commit");
+            // Counted BEFORE the emit loop below, which can return early on
+            // a stop token or a cancelled callback: the round happened and
+            // its proposals were judged either way, and dropping it would
+            // bias the rate upward on exactly the requests that end early.
+            // A degraded round proposed a draft and then threw it away
+            // without the verifier ever judging it.  Counting it as a step
+            // with zero accepted would report an acceptance rate for a
+            // round that never happened.
+            if(o.stats && !degraded) {
+                ++o.stats->steps;
+                o.stats->drafted  += int(candidates.size())-1;   // anchor is not a draft
+                o.stats->accepted += accepted-1;
+            }
+            if(accepted<int(candidates.size()) ||
+               (batched_ok && e.has_recurrent_state())) {
+                // Fused recurrent verification leaves the live DeltaNet
+                // state unchanged. Finalize every accepted prefix, including
+                // a fully accepted block, before starting the next round.
+                // A degraded sequential round already advanced its state.
+                // commit_spec_prefix is exact whenever there is no
+                // recurrent state to rebuild, whichever verify ran.  When
+                // there IS recurrent state, only the batched verify writes
+                // the per-step images it replays from -- and the engine
+                // refuses to speculate at all in that case
+                // (spec_verify_available), so this is never reached with a
+                // sequential verify and recurrent state.
+                //
+                // A restore-and-replay rollback was tried here and does NOT
+                // work: restore_recurrent alone is clean, but re-running
+                // forward() at a position that has already been processed
+                // corrupts memory on a DeltaNet model -- reproducible, and
+                // it surfaces as a SIGSEGV at teardown because USM on a CPU
+                // device is host malloc.  That is a latent bug in the
+                // linear-attention decode path worth chasing on the card;
+                // until it is, do not build a rollback on re-entering a
+                // position.
+                e.commit_spec_prefix(saved,accepted);
+            }
+            if(timed)lap(&o.stats->commit_ms);
+            for(int i=1;i<accepted;++i)if(!emit(candidates[i]))return int(out.size());
+            tok=decision.next_token;
+        } else {
+            if(e.pos>=e.max_seq)break;
+            if(!(e.graph_ok?e.step():e.forward(tok)))throw std::runtime_error("decode step failed");
+            tok=e.argmax_token();
+        }
+    }
+    return int(out.size());
+}
+} // namespace b70

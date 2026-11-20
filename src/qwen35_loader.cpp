@@ -20,6 +20,7 @@
 //  qwen35_loader.cpp
 // =====================================================================
 #include "b70/qwen35.hpp"
+#include "b70/qfn_mtp_experts.hpp"
 #include "b70/k2_horizon.hpp"
 #include <cctype>
 #include <algorithm>
@@ -168,6 +169,151 @@ bool   cfg_b(const std::string& j, const char* k, bool d) {
 }
 
 } // namespace
+
+bool QfnMtpExperts::open(const std::string& dir, std::string& err) {
+    constexpr int group = 32;
+    const uint16_t endian_probe = 1;
+    uint8_t low_byte = 0;
+    std::memcpy(&low_byte, &endian_probe, 1);
+    if (low_byte != 1) { err = "QFN MTP INT4 requires a little-endian host"; return false; }
+
+    QfnMtpExperts next;
+    int count = 0;
+    const std::string config = dir + "/config.json";
+    try {
+        const auto doc = Json::parse(read_file(config));
+        const auto& text = doc.at("text_config");
+        next.hidden_ = text.at("hidden_size").integer();
+        next.inter_ = text.at("moe_intermediate_size").integer();
+        count = text.at("num_experts").integer();
+        if (doc.at("model_type").text() != "qwen4_exp" ||
+            text.at("model_type").text() != "qwen4_exp_text" ||
+            text.at("mtp").at("num_hidden_layers").integer() != 1 || count <= 0 ||
+            next.hidden_ <= 0 || next.inter_ <= 0 || next.hidden_ % group || next.inter_ % group)
+            throw std::invalid_argument("expected one Qwen4-Exp MTP layer with group-32 expert geometry");
+
+        const auto& quant = doc.at("quantization_config");
+        const auto& schemes = quant.at("config_groups");
+        const auto& routed = schemes.at("mtp_routed_experts");
+        const auto& targets = routed.at("targets").array;
+        const auto& w = routed.at("weights");
+        const auto* actorder = w.find("actorder");
+        const auto* block = w.find("block_structure");
+        if (quant.at("quant_method").text() != "compressed-tensors" ||
+            quant.at("format").text() != "pack-quantized" || schemes.object.size() != 1 ||
+            routed.at("format").text() != "pack-quantized" ||
+            targets.size() != 1 || targets.front().text() != "RoutedExperts" ||
+            routed.at("input_activations").kind != Json::Kind::Null ||
+            w.at("type").text() != "int" || w.at("num_bits").integer() != 4 ||
+            w.at("strategy").text() != "group" || w.at("group_size").integer() != group ||
+            !w.at("symmetric").flag() || w.at("dynamic").flag() ||
+            (actorder && actorder->kind != Json::Kind::Null) ||
+            (block && block->kind != Json::Kind::Null))
+            throw std::invalid_argument("expected static symmetric compressed-tensors INT4 group-32 routed weights");
+    } catch (const std::invalid_argument& e) {
+        err = config + ": " + e.what();
+        return false;
+    }
+
+    ShardMembers files;
+    if (!checkpoint_members(dir, true, files, err)) return false;
+    const char* configured_root = std::getenv("GRIMOIRE_MODEL_ROOT");
+    std::error_code ec;
+    const auto model_dir = std::filesystem::canonical(dir, ec);
+    if (ec) { err = dir + ": " + ec.message(); return false; }
+    const auto root = configured_root && *configured_root
+        ? std::filesystem::canonical(configured_root, ec) : model_dir.parent_path();
+    if (ec) { err = "cannot resolve model root: " + ec.message(); return false; }
+
+    const std::string prefix = "mtp.layers.0.mlp.experts.";
+    std::map<std::string, Tensor> indexed;
+    for (const auto& [path, names] : files) {
+        std::unique_ptr<SafeTensors> shard;
+        for (const auto& name : names) {
+            if (name.compare(0, prefix.size(), prefix) != 0) continue;
+            if (!shard) {
+                shard = std::make_unique<SafeTensors>();
+                if (!open_indexed_shard(*shard, path, root, err)) return false;
+            }
+            const auto* info = shard->find(name);
+            if (!info) { err = path + ": indexed MTP tensor not found: " + name; return false; }
+            indexed.emplace(name, Tensor{shard.get(), info});
+        }
+        if (shard) {
+            shard->unmap();  // Weight bytes are streamed through pread, one expert at a time.
+            next.shards_.push_back(std::move(shard));
+        }
+    }
+
+    auto take = [&](const std::string& name, STDtype dtype, std::vector<int64_t> shape, Tensor& out) {
+        const auto it = indexed.find(name);
+        if (it == indexed.end()) { err = "missing indexed MTP tensor: " + name; return false; }
+        if (it->second.info->dtype != dtype || it->second.info->shape != shape) {
+            err = name + ": incompatible dtype or shape; expected " + st_dtype_name(dtype) + " [";
+            for (size_t i = 0; i < shape.size(); ++i) {
+                if (i) err += ',';
+                err += std::to_string(shape[i]);
+            }
+            err += ']';
+            return false;
+        }
+        out = it->second;
+        indexed.erase(it);
+        return true;
+    };
+    constexpr std::array<const char*, 3> projections{"gate_proj", "up_proj", "down_proj"};
+    for (int e = 0; e < count; ++e) {
+        std::array<Projection, 3> expert{};
+        for (size_t p = 0; p < projections.size(); ++p) {
+            const int n = p == 2 ? next.hidden_ : next.inter_;
+            const int k = p == 2 ? next.inter_ : next.hidden_;
+            const auto base = prefix + std::to_string(e) + "." + projections[p];
+            Tensor shape;
+            if (!take(base + ".weight_packed", STDtype::I32, {n, k / 8}, expert[p].packed) ||
+                !take(base + ".weight_scale", STDtype::BF16, {n, k / group}, expert[p].scales) ||
+                !take(base + ".weight_shape", STDtype::I64, {2}, shape)) return false;
+            std::array<int64_t, 2> dims{};
+            if (!shape.shard->read_raw(*shape.info, dims.data(), err)) return false;
+            if (dims != std::array<int64_t, 2>{n, k}) {
+                err = shape.info->name + ": values do not match [out_features,in_features]";
+                return false;
+            }
+        }
+        next.experts_.push_back(expert);
+    }
+    if (!indexed.empty()) {
+        err = "unsupported indexed MTP routed tensor: " + indexed.begin()->first;
+        return false;
+    }
+    *this = std::move(next);
+    return true;
+}
+
+bool QfnMtpExperts::read_expert(int id, QfnMtpExpert& out, std::string& err) const {
+    if (id < 0 || id >= expert_count()) {
+        err = "MTP expert ID out of range: " + std::to_string(id);
+        return false;
+    }
+    QfnMtpExpert next;
+    const std::array<PackedWeight*, 3> weights{&next.gate, &next.up, &next.down};
+    const auto& expert = experts_[size_t(id)];
+    for (size_t p = 0; p < weights.size(); ++p) {
+        const auto& src = expert[p];
+        auto& dst = *weights[p];
+        dst.fmt = Fmt::INT4;
+        dst.N = p == 2 ? hidden_ : inter_;
+        dst.K = p == 2 ? inter_ : hidden_;
+        dst.row_bytes = dst.K / 2;
+        dst.row_scales = dst.K / 32;
+        dst.payload.resize(size_t(src.packed.info->end - src.packed.info->begin));
+        dst.scales_raw.resize(size_t(src.scales.info->end - src.scales.info->begin));
+        dst.zeros.assign(dst.scales_raw.size() / sizeof(bf16_t), 8);
+        if (!src.packed.shard->read_raw(*src.packed.info, dst.payload.data(), err) ||
+            !src.scales.shard->read_raw(*src.scales.info, dst.scales_raw.data(), err)) return false;
+    }
+    out = std::move(next);
+    return true;
+}
 
 bool keep_qwen_bf16(const std::string& name) {
     auto ends=[&](const char* suffix){const size_t n=std::strlen(suffix);

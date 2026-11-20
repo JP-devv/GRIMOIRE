@@ -210,9 +210,17 @@ sycl::event launch_gemm_xmx(sycl::queue& q, const QuantWeight& w,
                             const sycl_bf16* x, float* y, int M,
                             const std::vector<sycl::event>& deps = {});
 struct QfnMoeTile;
+// Two independent 5120-wide BF16 products for Flash-Next's HC down projection.
+sycl::event launch_qfn_hc_down_tiled(sycl::queue& q, const QuantWeight& w,
+                                    const sycl_bf16* x, float* y, int rows,
+                                    const std::vector<sycl::event>& deps);
 sycl::event launch_qfn_int4_grouped(sycl::queue& q, const QuantWeight& w, int expert_width,
                                    const sycl_bf16* x, float* y, const QfnMoeTile* tiles,
-                                   int tile_count, const std::vector<sycl::event>& deps = {});
+                                   int tile_count, const std::vector<sycl::event>& deps = {}, bool wide_n = false,
+                                   const int32_t* live_tiles = nullptr, bool prefetch = false);
+sycl::event launch_qfn_int4_offset_grouped(sycl::queue& q, const QuantWeight& w, int expert_width,
+                                          const sycl_bf16* x, float* y, const int32_t* offsets,
+                                          int workers, const std::vector<sycl::event>& deps = {});
 // Large-M prompt GEMM (src/gemm_fast.cpp; bin/libgrimoire_gemm.so in the
 // AOT binaries).  launch_gemm_xmx() takes it whenever the shape fits.
 // Large-M GEMM with SwiGLU fused into the epilogue (gemm_fast.cpp): w is
@@ -243,6 +251,7 @@ bool gemm_fast_swiglu_supported(const QuantWeight& w, int M);
 sycl::event launch_gemm_fast_swiglu(sycl::queue& q, const QuantWeight& w, const sycl_bf16* x,
                                     sycl_bf16* h, int M,
                                     const std::vector<sycl::event>& deps = {});
+bool gemm_fast_shape_ok(const QuantWeight& w, int M);
 bool gemm_fast_supported(const QuantWeight& w, int M);
 sycl::event launch_gemm_fast(sycl::queue& q, const QuantWeight& w,
                              const sycl_bf16* x, float* y, int M,
@@ -749,10 +758,13 @@ sycl::event launch_rmsnorm_moe_residual_batched(sycl::queue& q,float* h,
 sycl::event launch_causal_conv1d_prefill(
     sycl::queue& q, const ConvParams& p, int tokens,
     const std::vector<sycl::event>& deps = {});
+// Optional diagnostic output: state immediately after this zero-based batch row.
+struct VerifyRowCheckpoint { float* data = nullptr; int row = -1; };
 sycl::event launch_causal_conv1d_split_prefill(
     sycl::queue& q,const ConvParams& p,int tokens,float* qv,float* kv,float* vv,
     sycl_bf16* vv_bf,
-    int qk_size,int v_size,const std::vector<sycl::event>& deps = {});
+    int qk_size,int v_size,const std::vector<sycl::event>& deps = {},
+    VerifyRowCheckpoint checkpoint = {});
 sycl::event launch_causal_conv1d_split_bf16_prefill(sycl::queue& q,
     const sycl_bf16* x,const bf16_t* weight,float* ring,int channels,int kernel,
     int tokens,sycl_bf16* qv,sycl_bf16* kv,sycl_bf16* vv,int qk_size,int v_size,
@@ -980,6 +992,9 @@ sycl::event launch_deltanet_gates_batched(sycl::queue& q, const float* ab,
 sycl::event launch_deltanet_native_gates(sycl::queue& q, const float* ab,
     float* gate_a_head_major, float* beta_head_major, int tokens, int heads, int64_t stride,
     const std::vector<sycl::event>& deps = {});
+sycl::event launch_l2norm_heads_pair_f32(sycl::queue& q, float* a, float* b,
+                                         int n_heads, int dim,
+                                         const std::vector<sycl::event>& deps = {});
 sycl::event launch_l2norm_heads_pair_bf16(sycl::queue& q,const float* qsrc,
     const float* ksrc,sycl_bf16* qdst,sycl_bf16* kdst,int n_heads,int dim,
     const std::vector<sycl::event>& deps = {});
@@ -988,7 +1003,7 @@ sycl::event launch_l2norm_heads_pair_bf16_io(sycl::queue& q,sycl_bf16* qv,
 sycl::event launch_swiglu_batched(sycl::queue& q, const float* gu, float* out,
     int tokens, int inter, const std::vector<sycl::event>& deps = {});
 sycl::event launch_swiglu_bf16_out(sycl::queue& q, const float* gu, sycl_bf16* out,
-    int tokens, int inter, const std::vector<sycl::event>& deps = {});
+    int tokens, int inter, const std::vector<sycl::event>& deps = {}, const int32_t* live_rows = nullptr);
 sycl::event launch_swiglu_f16_batched(sycl::queue& q, const float* gu,
     float* out, int tokens, int inter,
     const std::vector<sycl::event>& deps = {});
@@ -1009,7 +1024,7 @@ sycl::event launch_gate_sigmoid_mul_batched(sycl::queue& q, float* x,
     const std::vector<sycl::event>& deps = {});
 sycl::event launch_permute_rows_bf16(sycl::queue& q, const float* src,
     const int32_t* perm_token, sycl_bf16* dst, int rows, int width,
-    const std::vector<sycl::event>& deps = {});
+    const std::vector<sycl::event>& deps = {}, const int32_t* live_rows = nullptr);
 sycl::event launch_moe_unpermute(sycl::queue& q, const float* src,
     const int32_t* inverse, const float* route_weight, float* dst,
     int tokens, int top_k, int hidden,
@@ -1075,7 +1090,8 @@ sycl::event launch_causal_conv1d_split_groups(sycl::queue& q, const float* x,
     float* save_base, int64_t save_stride, const std::vector<sycl::event>& deps = {});
 sycl::event launch_deltanet_verify_rows(sycl::queue& q, const DeltaNetParams& p, const DnGroups& g,
                                         int64_t state_stride, float* saved,
-                                        const std::vector<sycl::event>& deps = {});
+                                        const std::vector<sycl::event>& deps = {},
+                                        VerifyRowCheckpoint checkpoint = {});
 // p.state (in place) advanced by the n rows saved at `saved` (consecutive rows), in order:
 // the same arithmetic again, so the state equals the per-row loop's after those n rows.
 sycl::event launch_deltanet_replay(sycl::queue& q, const DeltaNetParams& p, const float* saved, int n,

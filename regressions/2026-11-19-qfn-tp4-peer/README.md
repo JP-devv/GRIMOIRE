@@ -67,6 +67,74 @@ compares unfused vs. fused residual-add/RMSNorm with grouped experts and
 peer-push fixed; it verifies the fused path ran and all 32 IDs match before
 running a trace-off pair.
 
+For the pinned grouped-XMX benchmark binary, set `QFN_BENCH_MODE=chunk-sweep`
+with `QFN_GROUPED_CONTROL` pointing at the 512-token `grouped-gate` directory.
+The fenced gate checks each requested chunk size (512/1024/2048) and records
+`reductions.tsv`: counts derived from the actual emitted call and sub-chunk
+shapes and the pinned binary's reduction sites. `timing.tsv` comes only from
+subsequent trace-off runs of sizes that matched every frozen ID on every rank.
+
+`QFN_BENCH_MODE=decode-profile` enables
+`GRIMOIRE_QFN_TP_DECODE_REDUCE_TIMING=1` on a compatible native TP4 peer-push
+binary and compares against the same frozen IDs. `decode-profile.log` reports
+fenced INT4 gate/up and down, HC down/inject and up/mean, and logical FP32
+reduction counts/bytes by phase. The reduction queue-drain bucket includes
+preceding queued compute and must not be counted as transport.
+
+`QFN_BENCH_MODE=verifier-diagnostic` uses the one-shot native CLI with
+`GRIMOIRE_QFN_TP4_VERIFY_DIAGNOSTIC=1` and real drafting off. It injects
+three frozen proposals into the production generation loop. It writes
+`verifier.log` separates two controls. `same-batch` compares the production
+commit against a device checkpoint taken inside the convolution and
+DeltaNet kernels after row 1, independent of the rollback buffers; both
+branches consume the correction from a fresh committed verifier context.
+That control isolates recurrent state and convolution history, not KV or
+PLE. `sequential` compares committed state and next logits against fresh
+target-only replay at 2708 and 2709. An exit of 2 means all ranks passed the
+same-batch control but exact sequential comparison failed; exit 1 does
+not qualify the same-batch control. This is a correctness diagnostic, not
+a timing run, and does not enable speculative serving.
+
+`QFN_BENCH_MODE=grouped-offset` compares the capacity-grid device-route
+scheduler with `GRIMOIRE_QFN_GROUPED_OFFSET_SCHED=1` at chunk 2048. Both arms
+use N64 grouped XMX, device routes, and socket fan-out; K prefetch stays
+off. The candidate uses one workgroup per reported compute unit and walks
+only the live gate/up tile spans. Down still uses the original descriptors.
+Each arm must match all 32 frozen IDs on every rank, and the gate verifies
+the expected 48 calls per chunk and fixed worker count before timing.
+
+`QFN_BENCH_MODE=grouped-projections` profiles gate/up and down separately
+using SYCL device event timestamps with 2048+658 rows and socket fan-out.
+The receipt requires 48 launches of each projection per chunk and all 32
+frozen IDs per rank. Profiling changes the queue and is not throughput.
+
+`QFN_BENCH_MODE=grouped-prefetch` compares ordinary grouped XMX with
+`GRIMOIRE_QFN_GROUPED_K_PREFETCH=1` on the same binary, chunk size and
+transport. The candidate issues six-K32-tile lookahead hints for the
+gate/up projection only. Both gates verify the requested kernel shape and
+match the frozen IDs, and timings are published only for runs that recheck
+those IDs without trace flags.
+
+`QFN_BENCH_MODE=ipc-events` compares `GRIMOIRE_QFN_TP_SYNC=fanout`
+against `ipc-events` with the same grouped XMX binary, 2048-row prefill
+chunk, and MTP off. Both arms must select the requested transport and
+match all 32 frozen IDs on every rank; gate logs must also show the
+2048+658 rows. Timing arms run without trace flags and recheck the IDs.
+The event diagnostic uses fresh IPC event indices for each transport
+chunk and fails closed at 4096 chunks; it is not a long-lived serving
+backend. Unsupported event export/import or device visibility is a
+failed setup, not a fallback to the fan-out control.
+
+`QFN_BENCH_MODE=mtp3-diagnostic` uses `GRIMOIRE_QFN_TP4_VERIFY_DIAGNOSTIC=mtp3`
+to load the external head without `GRIMOIRE_MTP=1`. Set `QFN_DRAFT_SOURCE`
+to the draft snapshot and `QFN_GROUPED_CONTROL` to the frozen TP4 IDs.
+The CLI uses the real `mtp_draft` method and the same ranked batched verifier;
+serving cannot select this mode. Both arms must match all 32 IDs on all
+four ranks, and the on arm must report speculative rounds. Only then does
+the runner collect trace-off decode spans and accepted proposals per round,
+followed by a separate fenced draft/verify timing pass. The sequential
+state comparison above remains independent of this token gate.
+
 `QFN_BENCH_MODE=mtp-preflight` is currently a **negative** qualification
 check for `GRIMOIRE_MTP=1 GRIMOIRE_MTP_K=3` under host-staged TP4. It passes
 only when every rank reports the speculation-off loader refusal. No tokens

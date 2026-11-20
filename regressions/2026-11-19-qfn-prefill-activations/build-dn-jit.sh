@@ -7,7 +7,8 @@ bin=${1:?isolated binary path}
 obj=${2:?fresh object directory}
 mkdir -p "$obj"
 sources=(tools/grimoire_main.cpp src/{grimoire,qwen35_loader,native_model,safetensors,quantize,gptq,gemv_decode,gguf,gguf_decode,gguf_qwen35,gemm_xmx,attention,deltanet,moe_kernels,tiered_moe,cpu_experts,moe_ref,ops,prefill,tokenizer}.cpp)
-# Existing JIT shared libraries from the same diagnostic worktree are unchanged.
+# Use existing JIT shared libraries unless a diagnostic supplies its own pair.
+libs=${QFN_JIT_LIBDIR:-bin}
 set -x
 objects=()
 for src in "${sources[@]}"; do
@@ -17,6 +18,6 @@ for src in "${sources[@]}"; do
         icpx "${flags[@]}" -c "$src" -o "$o"
     fi
 done
-icpx "${flags[@]}" "${objects[@]}" -lpthread -Lbin -lgrimoire_gemm -lgrimoire_attn '-Wl,-rpath,$ORIGIN' -o "$bin"
+icpx "${flags[@]}" "${objects[@]}" -lpthread -L"$libs" -lgrimoire_gemm -lgrimoire_attn '-Wl,-rpath,$ORIGIN' -o "$bin"
 "$bin" --help
 sha256sum "$bin"

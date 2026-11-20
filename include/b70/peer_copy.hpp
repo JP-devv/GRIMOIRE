@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // Opt-in Linux Intel Level Zero IPC transport. GPU payload stays on GPUs;
-// Unix sockets carry handles, readiness and consumption acknowledgements only.
-// No device-side polling, cross-device atomics, or imported host allocations.
+// Unix sockets carry handles and, by default, readiness/consumption messages.
+// The TP4 event prototype uses Level Zero waits, not polling kernels or atomics.
 #pragma once
 #include "b70/ipc_socket.hpp"
 #include <sycl/sycl.hpp>
@@ -9,7 +9,9 @@
 #include <level_zero/ze_api.h>
 #include <algorithm>
 #include <array>
+#include <chrono>
 #include <cstdint>
+#include <cstdio>
 #include <cstdlib>
 #include <dlfcn.h>
 #include <limits>
@@ -34,6 +36,21 @@ class PeerCopy {
         decltype(&zeCommandListAppendMemoryCopy) copy = nullptr;
         decltype(&zeCommandListHostSynchronize) sync = nullptr;
         decltype(&zeCommandListDestroy) destroy = nullptr;
+        decltype(&zeCommandListAppendBarrier) barrier = nullptr;
+        decltype(&zeEventPoolCreate) pool_create = nullptr;
+        decltype(&zeEventPoolDestroy) pool_destroy = nullptr;
+        decltype(&zeEventPoolGetIpcHandle) pool_get = nullptr;
+        decltype(&zeEventPoolPutIpcHandle) pool_put = nullptr;
+        decltype(&zeEventPoolOpenIpcHandle) pool_open = nullptr;
+        decltype(&zeEventPoolCloseIpcHandle) pool_close = nullptr;
+        decltype(&zeEventCreate) event_create = nullptr;
+        decltype(&zeEventDestroy) event_destroy = nullptr;
+        decltype(&zeEventHostReset) event_reset = nullptr;
+        decltype(&zeEventQueryStatus) event_status = nullptr;
+        bool events_ready() const {
+            return barrier && pool_create && pool_destroy && pool_get && pool_put && pool_open && pool_close &&
+                   event_create && event_destroy && event_reset && event_status;
+        }
         // Leave the default host path free of new loader activity.
         void load() {
             if(library) return;
@@ -50,6 +67,12 @@ class PeerCopy {
             B70_PEER_SYMBOL(copy, zeCommandListAppendMemoryCopy);
             B70_PEER_SYMBOL(sync, zeCommandListHostSynchronize);
             B70_PEER_SYMBOL(destroy, zeCommandListDestroy);
+            B70_PEER_SYMBOL(barrier, zeCommandListAppendBarrier);
+            B70_PEER_SYMBOL(pool_create, zeEventPoolCreate); B70_PEER_SYMBOL(pool_destroy, zeEventPoolDestroy);
+            B70_PEER_SYMBOL(pool_get, zeEventPoolGetIpcHandle); B70_PEER_SYMBOL(pool_put, zeEventPoolPutIpcHandle);
+            B70_PEER_SYMBOL(pool_open, zeEventPoolOpenIpcHandle); B70_PEER_SYMBOL(pool_close, zeEventPoolCloseIpcHandle);
+            B70_PEER_SYMBOL(event_create, zeEventCreate); B70_PEER_SYMBOL(event_destroy, zeEventDestroy);
+            B70_PEER_SYMBOL(event_reset, zeEventHostReset); B70_PEER_SYMBOL(event_status, zeEventQueryStatus);
 #undef B70_PEER_SYMBOL
         }
         bool ready() const { return properties && groups && alloc && free && resident && get && put && open && close && create && copy && sync && destroy; }
@@ -278,17 +301,147 @@ public:
     }
 };
 
-// Dedicated sockets carry only pair setup and the two barriers per push.
 // A receive slot belongs to exactly one sender, and only its owning GPU
 // reads it. The rank-zero hub brokers descriptors but never stages payloads.
 class PeerPush4 {
+    static constexpr uint64_t event_timeout_ns = 3000000000ULL;
+    struct EventLink {
+        // A bounded, one-shot diagnostic. Never reset/reuse a signaled
+        // epoch: a faster rank might arm a wait before its peer resets it.
+        static constexpr unsigned epochs = 4096;
+        struct Epoch { ze_event_handle_t ready{}, consumed{}; };
+        std::vector<Epoch> own, peer;
+        ze_event_pool_handle_t pool{}, imported{};
+        ze_ipc_event_pool_handle_t handle{};
+        bool exported = false;
+
+        bool setup(PeerCopy& l, std::string& why) {
+            auto& a = l.api;
+            auto agree = [&](bool present) {
+                uint32_t other = 0;
+                return ipc::exchange(l.socket, l.first, uint32_t(present), other) && present && other == 1;
+            };
+            why = "IPC event pool export unavailable";
+            const ze_event_pool_desc_t pd{ZE_STRUCTURE_TYPE_EVENT_POOL_DESC, nullptr,
+                                          ZE_EVENT_POOL_FLAG_IPC | ZE_EVENT_POOL_FLAG_HOST_VISIBLE, 2 * epochs};
+            if (a.events_ready() && a.pool_create(l.context, &pd, 0, nullptr, &pool) == ZE_RESULT_SUCCESS)
+                exported = a.pool_get(pool, &handle) == ZE_RESULT_SUCCESS;
+            int export_fd = -1;
+            if (exported) std::memcpy(&export_fd, &handle, sizeof export_fd);
+            if (!agree(export_fd >= 0)) return false;
+
+            why = "IPC event pool handle exchange or import failed";
+            ze_ipc_event_pool_handle_t ph{};
+            int received = -1;
+            const auto send = [&] { return ipc::send_fd(l.socket, export_fd) && ipc::write_all(l.socket, &handle, sizeof handle); };
+            const auto recv = [&] { return ipc::recv_fd(l.socket, received) && ipc::read_all(l.socket, &ph, sizeof ph); };
+            const bool exchanged = l.first ? send() && recv() : recv() && send();
+            if (exchanged) std::memcpy(&ph, &received, sizeof received);
+            bool ok = exchanged && a.pool_open(l.context, ph, &imported) == ZE_RESULT_SUCCESS;
+            if (received >= 0) ::close(received);
+            const auto create = [&](ze_event_pool_handle_t p, auto& out) {
+                ze_event_desc_t ed{ZE_STRUCTURE_TYPE_EVENT_DESC, nullptr, 0,
+                                   ZE_EVENT_SCOPE_FLAG_DEVICE | ZE_EVENT_SCOPE_FLAG_HOST, ZE_EVENT_SCOPE_FLAG_DEVICE};
+                out.resize(epochs);
+                for (auto& epoch : out) {
+                    if (a.event_create(p, &ed, &epoch.ready) != ZE_RESULT_SUCCESS) return false;
+                    ++ed.index;
+                    if (a.event_create(p, &ed, &epoch.consumed) != ZE_RESULT_SUCCESS) return false;
+                    ++ed.index;
+                }
+                return true;
+            };
+            if (!agree(ok && create(pool, own) && create(imported, peer))) return false;
+
+            // Check remote visibility of a GPU signal before cross-rank waits.
+            why = "IPC device-signal visibility probe failed";
+            ok = a.barrier(l.copies, own[0].ready, 0, nullptr) == ZE_RESULT_SUCCESS &&
+                 a.sync(l.copies, event_timeout_ns) == ZE_RESULT_SUCCESS;
+            if (!agree(ok) || !agree(a.event_status(peer[0].ready) == ZE_RESULT_SUCCESS)) return false;
+            return agree(a.event_reset(own[0].ready) == ZE_RESULT_SUCCESS);
+        }
+
+        void reset(PeerCopy& l) {
+            auto& a = l.api;
+            for (auto* events : {&peer, &own}) for (auto& e : *events) {
+                if (e.ready) a.event_destroy(e.ready);
+                if (e.consumed) a.event_destroy(e.consumed);
+                e = {};
+            }
+            peer.clear(); own.clear();
+            if (imported) { a.pool_close(imported); imported = nullptr; }
+            if (exported) { a.pool_put(l.context, handle); exported = false; }
+            if (pool) { a.pool_destroy(pool); pool = nullptr; }
+        }
+    };
     std::array<PeerCopy, 4> links;
+    std::array<EventLink, 4> events;
+    ze_event_pool_handle_t bridge_pool{};
+    std::vector<ze_event_handle_t> bridge;
     std::array<int, 4> fds{-1, -1, -1, -1};
     uint64_t sequence_ = 0;
-    bool enabled = false;
+    bool enabled = false, use_events = false, broken = false;
+    int rank_ = -1;
 
     void disconnect() {
+        broken = true;
         for (int fd : fds) if (fd >= 0) ::shutdown(fd, SHUT_RDWR);
+    }
+
+    sycl::event sum(sycl::queue& q, float* local, size_t n, const std::array<const float*, 4>& src,
+                    const std::vector<sycl::event>& deps = {}) {
+        return q.submit([&](sycl::handler& h) {
+            h.depends_on(deps);
+            // Preserve the socket/host arithmetic association exactly.
+            h.parallel_for(sycl::range<1>(n), [=](sycl::id<1> i) {
+                float acc = src[0][i] + src[1][i];
+                acc = acc + src[2][i];
+                local[i] = acc + src[3][i];
+            });
+        });
+    }
+
+    bool event_push(sycl::queue& q, float* local, size_t n, int rank,
+                    const std::array<const float*, 4>& src) {
+        constexpr auto backend = sycl::backend::ext_oneapi_level_zero;
+        if (sequence_ == EventLink::epochs) {
+            std::fprintf(stderr, "TP4 IPC event diagnostic exhausted its %u non-reusable chunk epochs\n", EventLink::epochs);
+            return false;
+        }
+        const size_t slot = sequence_;
+        const auto context = q.get_context();
+        std::array<ze_event_handle_t, 6> ready{};
+        size_t next_ready = 0;
+        for (int p = 0; p < 4; ++p) if (p != rank) {
+            auto& l = links[p];
+            auto& e = events[p];
+            auto& s = e.own[slot];
+            auto* dst = static_cast<uint8_t*>(l.imported) + l.capacity;
+            ze_event_handle_t* wait = slot ? &e.peer[slot - 1].consumed : nullptr;
+            if (l.api.copy(l.copies, dst, local, n * sizeof(float), s.ready, wait != nullptr, wait) != ZE_RESULT_SUCCESS)
+                return false;
+            ready[next_ready++] = s.ready;
+            ready[next_ready++] = e.peer[slot].ready;
+        }
+        // Keep the six IPC dependencies in Level Zero. The compute queue
+        // imports only the local event from the native join on the first list.
+        auto& signal = links[rank == 0 ? 1 : 0];
+        if (signal.api.barrier(signal.copies, bridge[slot], uint32_t(ready.size()), ready.data()) != ZE_RESULT_SUCCESS)
+            return false;
+        using sycl::ext::oneapi::level_zero::ownership;
+        auto gathered = sycl::make_event<backend>({bridge[slot], ownership::keep}, context);
+        auto sum_event = sum(q, local, n, src, {gathered});
+        auto native = sycl::get_native<backend>(sum_event);
+        for (int p = 0; p < 4; ++p) if (p != rank) {
+            if (signal.api.barrier(signal.copies, events[p].own[slot].consumed, 1, &native) != ZE_RESULT_SUCCESS)
+                return false;
+        }
+        // The native signal fence proves the sum retired; do not return a
+        // live reduction or reset its events while SYCL still uses them.
+        if (signal.api.sync(signal.copies, event_timeout_ns) != ZE_RESULT_SUCCESS) return false;
+        sum_event.wait_and_throw();
+        ++sequence_;
+        return true;
     }
 public:
     ~PeerPush4() { reset(); }
@@ -296,8 +449,11 @@ public:
     uint64_t sequence() const { return sequence_; }
     void enable() { enabled = true; }
 
-    bool setup(sycl::queue& q, const std::vector<int>& hub, int rank, std::string& reason) {
+    bool setup(sycl::queue& q, const std::vector<int>& hub, int rank, std::string& reason,
+               bool ipc_events = false) {
         reset();
+        rank_ = rank;
+        use_events = ipc_events;
         // Rank 0 creates every pair in fixed order. Each other rank receives
         // endpoints in peer order from its existing rank-zero connection.
         if (rank == 0) {
@@ -322,33 +478,78 @@ public:
         bool available = true;
         for (int peer = 0; peer < 4; ++peer) if (peer != rank) {
             std::string why;
-            if (!links[peer].setup(q, fds[peer], rank < peer, why) || !links[peer].active()) {
+            if (!links[peer].setup(q, fds[peer], rank < peer, why) || !links[peer].active() ||
+                (use_events && !events[peer].setup(links[peer], why))) {
                 if (available) reason = "rank " + std::to_string(peer) + ": " + why;
                 available = false;
             }
         }
-        return available;
+        if (!available || !use_events) return available;
+        auto& signal = links[rank == 0 ? 1 : 0];
+        const ze_event_pool_desc_t pd{ZE_STRUCTURE_TYPE_EVENT_POOL_DESC, nullptr,
+                                      ZE_EVENT_POOL_FLAG_HOST_VISIBLE, EventLink::epochs};
+        reason = "cannot allocate local IPC ready join events";
+        if (signal.api.pool_create(signal.context, &pd, 1, &signal.device, &bridge_pool) != ZE_RESULT_SUCCESS)
+            return false;
+        bridge.resize(EventLink::epochs);
+        for (unsigned i = 0; i < EventLink::epochs; ++i) {
+            const ze_event_desc_t ed{ZE_STRUCTURE_TYPE_EVENT_DESC, nullptr, i,
+                                     ZE_EVENT_SCOPE_FLAG_DEVICE | ZE_EVENT_SCOPE_FLAG_HOST, ZE_EVENT_SCOPE_FLAG_DEVICE};
+            if (signal.api.event_create(bridge_pool, &ed, &bridge[i]) != ZE_RESULT_SUCCESS) return false;
+        }
+        return true;
     }
 
-    bool allreduce(sycl::queue& q, float* data, size_t elems, int rank) {
-        if (!enabled) return false;
+    struct Timing {
+        size_t calls = 0;
+        double drain_ms = 0, copy_ms = 0, ready_ms = 0, sum_ms = 0, reuse_ms = 0;
+    };
+    // When recording timings the caller has already drained the queue.
+    bool allreduce(sycl::queue& q, float* data, size_t elems, int rank, Timing* timing = nullptr,
+                   bool fanout = false) {
+        if (!enabled || broken || (use_events && timing)) return false;
+        const auto exchange = [&](const PeerCopy::Packet& own) {
+            if (fanout) return ipc::exchange_small_fanout(fds, rank, own, [](const auto& a, const auto& b) {
+                return a.seq == b.seq && a.bytes == b.bytes && a.kind == b.kind && a.format == b.format;
+            });
+            for (int peer = 0; peer < 4; ++peer)
+                if (peer != rank && !links[peer].exchange_packet(own)) return false;
+            return true;
+        };
+        using Clock = std::chrono::steady_clock;
+        auto lap = timing ? Clock::now() : Clock::time_point{};
+        auto record = [&](double Timing::*bucket) {
+            if (!timing) return;
+            const auto now = Clock::now();
+            timing->*bucket += std::chrono::duration<double, std::milli>(now - lap).count();
+            lap = now;
+        };
         struct Guard {
             PeerPush4& transport;
             bool done = false;
             ~Guard() { if (!done) transport.disconnect(); }
         } guard{*this};
         const size_t limit = links[rank == 0 ? 1 : 0].capacity / sizeof(float);
-        q.wait_and_throw();
+        if (!timing) q.wait_and_throw();
         for (size_t at = 0; at < elems; at += limit) {
             const size_t n = std::min(limit, elems - at), bytes = n * sizeof(float);
             float* const local = data + at;
             std::array<const float*, 4> src{};
             src[rank] = local;
+            for (int peer = 0; peer < 4; ++peer) if (peer != rank)
+                src[peer] = reinterpret_cast<const float*>(static_cast<uint8_t*>(links[peer].owned) + links[peer].capacity);
+            if (use_events) {
+                if (!event_push(q, local, n, rank, src)) {
+                    std::fprintf(stderr, "TP4 IPC event submission/completion failed: rank=%d chunk=%llu\n",
+                                 rank, static_cast<unsigned long long>(sequence_));
+                    return false;
+                }
+                continue;
+            }
             bool copies_ok = true;
             for (int peer = 0; peer < 4; ++peer) if (peer != rank) {
                 auto& link = links[peer];
                 auto* const dst = static_cast<uint8_t*>(link.imported) + link.capacity;
-                src[peer] = reinterpret_cast<const float*>(static_cast<uint8_t*>(link.owned) + link.capacity);
                 if (link.api.copy(link.copies, dst, local, bytes, nullptr, 0, nullptr) != ZE_RESULT_SUCCESS)
                     copies_ok = false;
             }
@@ -357,27 +558,43 @@ public:
                 if (link.api.sync(link.copies, 120000000000ULL) != ZE_RESULT_SUCCESS) copies_ok = false;
             }
             if (!copies_ok) return false;
+            record(&Timing::copy_ms);
             const PeerCopy::Packet ready{++sequence_, bytes, 1, 0};
-            for (int peer = 0; peer < 4; ++peer)
-                if (peer != rank && !links[peer].exchange_packet(ready)) return false;
-            // Same association as the host loop: ((rank0 + rank1) + rank2) + rank3.
-            q.parallel_for(sycl::range<1>(n), [=](sycl::id<1> i) {
-                float sum = src[0][i] + src[1][i];
-                sum = sum + src[2][i];
-                local[i] = sum + src[3][i];
-            }).wait_and_throw();
+            if (!exchange(ready)) return false;
+            record(&Timing::ready_ms);
+            sum(q, local, n, src).wait_and_throw();
+            record(&Timing::sum_ms);
             const PeerCopy::Packet consumed{sequence_, bytes, 2, 0};
-            for (int peer = 0; peer < 4; ++peer)
-                if (peer != rank && !links[peer].exchange_packet(consumed)) return false;
+            if (!exchange(consumed)) return false;
+            record(&Timing::reuse_ms);
         }
+        if (timing) ++timing->calls;
         guard.done = true;
         return true;
     }
 
     void reset() {
-        enabled = false;
+        if (enabled && use_events && !broken) {
+            // Don't release an export while a peer may still consume its
+            // final ready event. This is not on the reduction path.
+            const PeerCopy::Packet done{sequence_, 0, 3, 0};
+            if (!ipc::exchange_small_fanout(fds, rank_, done, [](const auto& a, const auto& b) {
+                    return a.seq == b.seq && a.kind == b.kind;
+                })) disconnect();
+        }
+        enabled = use_events = broken = false;
         sequence_ = 0;
-        for (auto& link : links) link.reset();
+        if (bridge_pool) {
+            auto& signal = links[rank_ == 0 ? 1 : 0];
+            for (auto e : bridge) if (e) signal.api.event_destroy(e);
+            bridge.clear();
+            signal.api.pool_destroy(bridge_pool);
+            bridge_pool = nullptr;
+        }
+        for (int p = 0; p < 4; ++p) {
+            events[p].reset(links[p]);
+            links[p].reset();
+        }
         for (int& fd : fds) if (fd >= 0) { ::close(fd); fd = -1; }
     }
 };

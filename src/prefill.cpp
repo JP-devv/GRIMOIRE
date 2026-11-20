@@ -1087,18 +1087,18 @@ sycl::event launch_causal_conv1d_prefill(
 sycl::event launch_causal_conv1d_split_prefill(
     sycl::queue& q,const ConvParams& p,int tokens,float* qv,float* kv,float* vv,
     sycl_bf16* vv_bf,
-    int qk_size,int v_size,const std::vector<sycl::event>& deps){
+    int qk_size,int v_size,const std::vector<sycl::event>& deps, VerifyRowCheckpoint checkpoint){
     // Kernel-4 fast path: one work-item per (channel, 16 consecutive tokens)
     // slides along the tokens with the last 3 inputs in registers, so every
     // input is read once instead of 4 times (78 ms -> see HANDOFF for a
     // 4088-token Qwen3.8-27B prefill).  Same fma order, same SiLU: the
     // outputs are bit-identical to the per-(token, channel) kernel below.
     static const bool old_conv = std::getenv("GRIMOIRE_CONV_OLD") != nullptr;
-    sycl::event compute;
+    const auto compute_rows = [&]<bool Capture>() -> sycl::event {
     if(!old_conv && p.kernel==4){
         constexpr int TB=16;
         const int nb=(tokens+TB-1)/TB;
-        compute=q.submit([&](sycl::handler&hd){hd.depends_on(deps);
+        return q.submit([&](sycl::handler&hd){hd.depends_on(deps);
           const ConvParams pp=p;
           hd.parallel_for(sycl::range<2>(size_t(nb),size_t(pp.channels)),[=](sycl::id<2>id){
             const int c=int(id[1]),t0=int(id[0])*TB,ch=pp.channels;
@@ -1123,10 +1123,14 @@ sycl::event launch_causal_conv1d_split_prefill(
                 else if(vv_bf)vv_bf[int64_t(t)*v_size+c-2*qk_size]=sycl_bf16(y);
                 else vv[int64_t(t)*v_size+c-2*qk_size]=y;
                 h0=h1;h1=h2;h2=xt;
+                if constexpr (Capture) if (t == checkpoint.row) {
+                    float* out = checkpoint.data + int64_t(c)*3;
+                    out[0]=h0; out[1]=h1; out[2]=h2;
+                }
             }
           });});
-    } else
-    compute=q.submit([&](sycl::handler&hd){hd.depends_on(deps);
+    }
+    return q.submit([&](sycl::handler&hd){hd.depends_on(deps);
       const ConvParams pp=p;
       hd.parallel_for(sycl::range<2>(size_t(tokens),size_t(pp.channels)),[=](sycl::id<2>id){
         const int t=int(id[0]),c=int(id[1]),K=pp.kernel;
@@ -1141,7 +1145,19 @@ sycl::event launch_causal_conv1d_split_prefill(
         else if(c<2*qk_size)kv[int64_t(t)*qk_size+c-qk_size]=y;
         else if(vv_bf)vv_bf[int64_t(t)*v_size+c-2*qk_size]=sycl_bf16(y);
         else vv[int64_t(t)*v_size+c-2*qk_size]=y;
+        if constexpr (Capture) if (t == checkpoint.row) {
+          // Generic convolution reads a window, not rolling registers. Take
+          // the trailing history directly from this row's live input window.
+          for (int j=0;j<K-1;++j) {
+            const int src=t-(K-2)+j;
+            checkpoint.data[int64_t(c)*(K-1)+j] = src>=0 ? pp.x[int64_t(src)*pp.channels+c]
+                                                        : ring[src+K-1];
+          }
+        }
       });});
+    };
+    const auto compute = checkpoint.data ? compute_rows.template operator()<true>()
+                                         : compute_rows.template operator()<false>();
     return q.submit([&](sycl::handler&hd){hd.depends_on(compute);const ConvParams pp=p;
       hd.parallel_for(sycl::range<1>(size_t(pp.channels)),[=](sycl::id<1>id){
         const int c=int(id[0]),K=pp.kernel;
@@ -2462,10 +2478,11 @@ sycl::event launch_swiglu_batched(sycl::queue& q, const float* gu, float* out,
 // that only feeds the down projection: out = bf16(silu(gate) * up), the same values
 // without the fp32 [tokens][inter] round trip.
 sycl::event launch_swiglu_bf16_out(sycl::queue& q, const float* gu, sycl_bf16* out,
-    int tokens, int inter, const std::vector<sycl::event>& deps) {
+    int tokens, int inter, const std::vector<sycl::event>& deps, const int32_t* live_rows) {
     return q.submit([&](sycl::handler& h) { h.depends_on(deps);
         h.parallel_for(sycl::range<1>(size_t(tokens) * inter), [=](sycl::id<1> id) {
             const int t = int(id[0] / inter), d = int(id[0] % inter);
+            if (live_rows && t >= *live_rows) return;
             const int64_t z = int64_t(t) * inter + d;
             const float g = gu[int64_t(t) * 2 * inter + d];
             out[z] = sycl_bf16((g / (1.0f + sycl::exp(-g))) * gu[int64_t(t) * 2 * inter + inter + d]);
@@ -2646,10 +2663,11 @@ sycl::event launch_gate_sigmoid_mul_batched(sycl::queue& q, float* x,
 
 sycl::event launch_permute_rows_bf16(sycl::queue& q, const float* src,
     const int32_t* perm_token, sycl_bf16* dst, int rows, int width,
-    const std::vector<sycl::event>& deps) {
+    const std::vector<sycl::event>& deps, const int32_t* live_rows) {
     return q.submit([&](sycl::handler& h){h.depends_on(deps);
         h.parallel_for(sycl::range<2>(size_t(rows),size_t(width)),[=](sycl::id<2> id){
             const int r=int(id[0]), d=int(id[1]);
+            if (live_rows && r >= *live_rows) return;
             dst[int64_t(r)*width+d]=sycl_bf16(src[int64_t(perm_token[r])*width+d]);
         });});
 }

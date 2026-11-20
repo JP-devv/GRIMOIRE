@@ -248,7 +248,92 @@ static void ranked_cancel_tests() {
     std::cout<<"ranked cancellation: TP/PP streams, speculative blocks, next request PASS\n";
 }
 
+// A four-rank control-flow regression, not an emulation of GPU numerics.
+// State is rank-specific and carries both recurrent and convolution history.
+struct PartialRejectEngine : Engine {
+    using Ring = std::array<int, 4>;
+    int rank = 0, state = 0;
+    Ring ring{};
+    std::vector<int> recurrent_rows;
+    std::vector<Ring> conv_rows;
+    std::array<int32_t, 3> proposals{};
+    PartialRejectEngine() { recurrent = true; }
+    void reset() { Engine::reset(); state = 0; ring = {}; }
+    int argmax_token() { return (history.back() + 1) % cfg.vocab; }
+    const float* forward(int t) {
+        const int at = pos;
+        if (!Engine::forward(t)) return nullptr;
+        ring[size_t(at) % ring.size()] = t + rank * 7;
+        state = (state * 3 + t + at + rank) % 1021;
+        logits = float(state) + float(ring[size_t(at) % ring.size()]) / 64.0f;
+        return &logits;
+    }
+    bool prefill(const std::vector<int32_t>& ids, std::vector<int32_t>* next = nullptr) {
+        const int live = state;
+        const auto conv = ring;
+        recurrent_rows.clear(); conv_rows.clear(); batch_count = 0;
+        for (const int t : ids) {
+            if (!forward(t)) return false;
+            if (next) { next->push_back(argmax_token()); recurrent_rows.push_back(state); conv_rows.push_back(ring); }
+        }
+        if (next) { state = live; ring = conv; ++batch_verifies; }
+        return true;
+    }
+    int mtp_draft(int, int, bool) { return proposals.at(size_t(batch_count++)); }
+    void commit_spec_prefix(int saved, int rows) {
+        Engine::commit_spec_prefix(saved, rows);
+        state = recurrent_rows.at(size_t(rows - 1));
+        ring = conv_rows.at(size_t(rows - 1));
+    }
+};
+
+void test_tp4_partial_rejection() {
+    const std::vector<int32_t> prompt{3, 5};
+    PartialRejectEngine baseline;
+    b70::GenerationOptions plain;
+    plain.max_tokens = 4;
+    std::vector<int32_t> reference;
+    b70::FinishReason reason{};
+    b70::generate_tokens(baseline, prompt, plain, reference, {}, reason);
+    assert(reference.size() == 4);
+    for (int rank = 0; rank < 4; ++rank) {
+        PartialRejectEngine replay, spec;
+        replay.rank = spec.rank = rank;
+        const auto wrong = (reference[2] + 1) % spec.cfg.vocab;
+        spec.proposals = {reference[1], wrong, (wrong + 1) % spec.cfg.vocab};
+        auto options = plain;
+        options.draft_depth = 3; // no MTP head in the diagnostic lane
+        int draft_calls = 0, decisions = 0;
+        options.diagnostic_draft = [&](int32_t prev, int at, bool advance) {
+            const int j = draft_calls++;
+            assert(at == int(prompt.size()) + j && advance == (j != 0));
+            assert(prev == (j == 0 ? reference[0] : spec.proposals.at(size_t(j - 1))));
+            return spec.proposals.at(size_t(j));
+        };
+        options.agree_greedy_commit = [&](const b70::GreedySpecCommit& c) {
+            ++decisions;
+            return c.start == int(prompt.size()) && c.rows == 2 &&
+                   c.next_token == reference[2] && c.verified;
+        };
+        std::vector<int32_t> ids;
+        b70::generate_tokens(spec, prompt, options, ids,
+            [&](int32_t) { return ids.size() < 3; }, reason);
+        assert(draft_calls == 3 && spec.batch_count == 0);
+        assert(decisions == 1 && spec.commits == 1 && spec.batch_verifies == 1);
+        assert(ids == (std::vector<int32_t>{reference[0], reference[1], reference[2]}));
+        assert(spec.pos == int(prompt.size()) + 2 && size_t(spec.pos) == spec.history.size());
+        assert(replay.prefill(prompt));
+        assert(replay.forward(reference[0]) && replay.forward(reference[1]));
+        assert(spec.history == replay.history && spec.state == replay.state && spec.ring == replay.ring);
+        assert(spec.forward(reference[2]) && replay.forward(reference[2]));
+        assert(spec.logits == replay.logits && spec.state == replay.state && spec.ring == replay.ring);
+        assert(spec.pos == replay.pos && spec.argmax_token() == reference[3]);
+    }
+    std::cout << "TP4 MTP3 model: four ranks reject proposal two, rewind and match replay state/logits PASS\n";
+}
+
 int main(){
+    test_tp4_partial_rejection();
     ranked_cancel_tests();
     using namespace b70;
     std::vector<int32_t> out;FinishReason reason;
