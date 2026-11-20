@@ -108,6 +108,11 @@ vllm() (
         *) echo "Invalid REFERENCE_MODE" >&2; exit 2 ;;
     esac
     printf '%s\n' "${REFERENCE_MODE:-graph-off}" > "$D/reference-mode"
+    local batch_tokens=${REFERENCE_BATCH_TOKENS:-1024}
+    if [[ $batch_tokens != 1024 && ( $batch_tokens != 2048 || ${REFERENCE_MODE:-} != eager-off ) ]]; then
+        echo "2048 reference batch tokens require the eager attribution arm" >&2
+        exit 2
+    fi
     if [[ ${PAIR_ORDER:-} == profile ]]; then
         mkdir "$D/vllm-work/traces"
         timeout --kill-after=5s 60s docker run --rm --pull=never \
@@ -128,7 +133,7 @@ vllm() (
         --signal=TERM --kill-after=8s "$CAP" vllm serve /models/qwen38-w4a16-snapshot \
         --host 127.0.0.1 --port "$BENCH_PORT" --served-model-name qwen38-flash-next-c1 \
         --trust-remote-code --dtype bfloat16 --kv-cache-dtype auto --tensor-parallel-size 4 --enable-expert-parallel \
-        --gpu-memory-utilization 0.95 --max-model-len 32768 --max-num-batched-tokens 1024 --max-num-seqs 16 \
+        --gpu-memory-utilization 0.95 --max-model-len 32768 --max-num-batched-tokens "$batch_tokens" --max-num-seqs 16 \
         --limit-mm-per-prompt '{"image":4,"video":2}' --async-scheduling --generation-config vllm \
         --compilation-config '{"cudagraph_mode":"FULL_AND_PIECEWISE","cudagraph_capture_sizes":[1,2,4,8,16,256,512,1024]}' \
         --no-enable-prefix-caching --enable-prompt-tokens-details "${profile_cli[@]}" "${reference_args[@]}")
@@ -154,7 +159,12 @@ vllm() (
         python3 "$B/trace-worker.py" "$D/vllm-work/traces" > "$D/worker-traces.json"
         exit 0
     fi
-    if [[ $fixture == frozen ]]; then python3 "$B/c1.py" vllm "$D/response.json" "$D/before.prom" "$D/after.prom" > "$D/vllm-phase.json"; fi
+    if [[ $fixture == frozen ]]; then
+        if ! python3 "$B/c1.py" vllm "$D/response.json" "$D/before.prom" "$D/after.prom" \
+            > "$D/vllm-phase.json" 2> "$D/vllm-score.log"; then
+            cat "$D/vllm-score.log" >&2
+        fi
+    fi
 )
 case "${PAIR_ORDER:-native-first}" in
     native-first) native; vllm ;;
@@ -168,7 +178,8 @@ sudo -n journalctl -k -q --no-pager --after-cursor "$CURSOR" -o cat > "$D/kernel
 awk '/xe.*(Fault response|Timedout job|GPU HANG|Engine memory CAT error|wedged)/' "$D/kernel.log" > "$D/xe-fault.log"
 [[ ! -s $D/xe-fault.log ]]
 sha256sum -c "$SERVING"
-if [[ ${PAIR_ORDER:-} == profile || ${PAIR_ORDER:-} == reference-only ]]; then exit 0; fi
+if [[ ${PAIR_ORDER:-} == profile ]]; then exit 0; fi
+if [[ ${PAIR_ORDER:-} == reference-only ]]; then [[ -s $D/vllm-phase.json ]]; exit; fi
 if [[ $fixture != frozen ]]; then
     score_args=()
     if [[ $fixture == long-decode ]]; then

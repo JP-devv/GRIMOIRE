@@ -1,0 +1,7 @@
+loading /home/haxor/models/qwen38-w4a16-snapshot ...
+  rank 3 -> GPU 3/4: Intel(R) Arc(TM) Pro B70 Graphics pci 0000:18:00.0
+ready. listening on 127.0.0.1:46529
+this is tensor-parallel rank 3, not the front end: serving nothing, following rank 0
+  TP rank 3: worker ready, waiting for requests
+signal 15: stopping gracefully -- no new requests, live generations end at their next token, GPU queues drain before memory is freed
+  TP rank 3: shutdown
