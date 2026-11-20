@@ -1,0 +1,104 @@
+--- a/src/grimoire.cpp
++++ b/src/grimoire.cpp
+@@ -3707,6 +3707,7 @@
+     bool   spec_multi_valid = false;
+     // Only the one-shot CLI can request verifier scratch without a draft head.
+     bool qfn_verify_diagnostic = false;
++    bool qfn_verify_replay = false;
+     bool qfn_mtp3_diagnostic = false; // CLI only; GRIMOIRE_MTP remains off
+     static constexpr int kQfnVerifyCheckpointRow = 1; // anchor is row 0; 1156 is row 1
+     float* qfn_verify_direct_dn = nullptr;
+@@ -19048,7 +19049,7 @@
+     if (verify && !((mtp4.ok || qfn_verify_diagnostic) && dn_verify_fused && spec_dn_inputs && spec_conv_inputs &&
+                     spec_multi && M <= kSpecBatch && !pp_enabled()))
+         return false;
+-    const bool same_batch_tap = verify && qfn_verify_diagnostic;
++    const bool same_batch_tap = verify && qfn_verify_diagnostic && !qfn_verify_replay;
+     if (same_batch_tap) {
+         if (M != 4 || tokens[kQfnVerifyCheckpointRow] != 1156)
+             throw std::runtime_error("QFN verifier checkpoint requires the frozen proposal row");
+@@ -20725,11 +20726,11 @@
+             }
+         }
+         const int valid_logits = tp_head_split ? head_valid : cfg.vocab;
+-        if (verify && qfn_verify_diagnostic) qfn_verify_logits.resize(size_t(M) * valid_logits);
++        if (same_batch_tap) qfn_verify_logits.resize(size_t(M) * valid_logits);
+         for(int r=0;r<M;++r) {
+             float* row=vlog?vlog+int64_t(r)*HN:s.logits;
+             if(!vlog) gemv_any(lm_head,blk_in+int64_t(r)*H,s.logits,none);
+-            if (verify && qfn_verify_diagnostic)
++            if (same_batch_tap)
+                 q.memcpy(qfn_verify_logits.data() + size_t(r) * valid_logits, row,
+                          size_t(valid_logits) * sizeof(float));
+             launch_argmax(q,row,valid_logits,s.d_tok,s.d_val,none);
+@@ -24675,6 +24676,51 @@
+     return gates == 2 ? 0 : 2;
+ }
+ 
++// Diagnostic target verifier only: replay the same prefix of candidate rows,
++// with independent prompt reconstruction before every sample.
++static int qfn_replay_rows(Grimoire& e, const std::vector<int32_t>& prompt) {
++    constexpr int anchor = 760;
++    const std::vector<int32_t> proposed{anchor, 1156, 16562, 16563};
++    if (prompt.size() != 2706 || e.prefix_cache_usable() || e.mtp4.ok)
++        throw std::runtime_error("QFN row replay requires the frozen prompt and MTP and prefix cache off");
++    auto reset_to_prompt = [&] {
++        GenerationOptions options;
++        options.max_tokens = 1;
++        FinishReason reason{};
++        std::vector<int32_t> first;
++        generate_tokens(e, prompt, options, first, {}, reason);
++        if (first != std::vector<int32_t>{anchor} || e.pos != int(prompt.size()))
++            throw std::runtime_error("QFN replay prompt state or anchor mismatch");
++        e.q.wait_and_throw();
++    };
++
++    reset_to_prompt();
++    std::vector<int32_t> expected;
++    for (int32_t token : proposed) {
++        if (!e.forward(token)) throw std::runtime_error("QFN target-only replay forward failed");
++        expected.push_back(e.argmax_token());
++    }
++    int sample = 0;
++    for (const size_t rows : {1u, 4u, 4u, 1u}) {
++        reset_to_prompt();
++        std::vector<int32_t> candidates(proposed.begin(), proposed.begin() + rows);
++        std::vector<int32_t> predicted;
++        const auto start = std::chrono::steady_clock::now();
++        if (!e.prefill_qwen4_exp(candidates, &predicted, nullptr))
++            throw std::runtime_error("QFN verifier declined row replay");
++        e.q.wait_and_throw();
++        const double ms = std::chrono::duration<double, std::milli>(
++            std::chrono::steady_clock::now() - start).count();
++        const bool match = predicted.size() == rows &&
++            std::equal(predicted.begin(), predicted.end(), expected.begin());
++        std::fprintf(stderr, "QFN row replay rank=%d sample=%d rows=%zu verify_ms=%.6f target_ids_match=%d\n",
++                     e.tp_rank, sample++, rows, ms, int(match));
++        if (!e.tp_agree_min(match) || !match)
++            throw std::runtime_error("QFN verifier predictions differ from target-only replay");
++    }
++    return 0;
++}
++
+ static int generate_ranked(Grimoire& e, const std::vector<int32_t>& prompt_ids,
+                            int n_predict, int eos_id, std::vector<int32_t>& out_ids, int eot_id,
+                            const std::function<bool(int32_t)>& on_token, FinishReason* finish,
+@@ -24688,7 +24734,8 @@
+     if(!tk.load(dir,err)){std::fprintf(stderr,"tokenizer: %s\n",err.c_str());return 1;}
+     Grimoire e;
+     const char* verify = std::getenv("GRIMOIRE_QFN_TP4_VERIFY_DIAGNOSTIC");
+-    e.qfn_verify_diagnostic = verify && std::strcmp(verify, "1") == 0;
++    e.qfn_verify_replay = verify && std::strcmp(verify, "replay") == 0;
++    e.qfn_verify_diagnostic = e.qfn_verify_replay || (verify && std::strcmp(verify, "1") == 0);
+     e.qfn_mtp3_diagnostic = verify && std::strcmp(verify, "mtp3") == 0;
+     if(!grimoire_load(e,dir,proj_fmt,max_seq,err)) {
+         std::fprintf(stderr,"load: %s\n",err.c_str());e.release();return 1;
+@@ -24712,7 +24759,7 @@
+             std::fprintf(stderr,"\n");
+         }
+         if (e.qfn_verify_diagnostic) {
+-            const int rc = qfn_verify_frozen(e, ids);
++            const int rc = e.qfn_verify_replay ? qfn_replay_rows(e, ids) : qfn_verify_frozen(e, ids);
+             e.release();
+             return rc;
+         }
