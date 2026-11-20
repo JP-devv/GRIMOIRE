@@ -13,10 +13,11 @@ case $variant in
     combined-c1) ;;
     prefill-cost) inputs=$root/prefill-cost; target=qfn-hc-m64 ;;
     row-replay) patches=(row-replay.patch) ;;
+    hc-resident) patches=(qfn-hc-resident-pack.patch) ;;
     hc-fused) patches=(hc-fused-bf16.patch) ;;
     coalesced-v) patches=(qfn-split-kv-coalesced-v.patch) ;;
     batch-head) patches=(qfn-verify-batch-head.patch) ;;
-    prefill-rsag) patches=(qfn-prefill-rsag.patch qfn-prefill-rsag-probe.patch) ;;
+    prefill-rsag) patches=(qfn-prefill-rsag.patch qfn-prefill-rsag-probe.patch qfn-prefill-rsag-receipt.patch) ;;
     *) echo "Unknown variant: $variant" >&2; exit 2 ;;
 esac
 tla=$(realpath -- "$3")

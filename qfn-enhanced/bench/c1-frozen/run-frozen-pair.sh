@@ -95,6 +95,18 @@ native() (
             export GRIMOIRE_QFN_HC_FUSED_BF16=0
             if [[ $NATIVE_MODE == hc-on ]]; then export GRIMOIRE_QFN_HC_FUSED_BF16=1; fi
             ;;
+        rsag-off|rsag-on)
+            [[ $fixture == frozen && ${PAIR_ORDER:-} == native-only ]]
+            build="$Q/../receipts/prefill-rsag-build"
+            [[ $(< "$build/build-rsag.exit") == 0 ]]
+            (cd "$build"; sha256sum -c rsag.sha256)
+            NATIVE_BIN=$build/qfn-combined
+            export GRIMOIRE_QFN_PREFILL_RSAG=0
+            if [[ $NATIVE_MODE == rsag-on ]]; then export GRIMOIRE_QFN_PREFILL_RSAG=1; fi
+            # With packed N64 and DecodeM8 off, this prints only aggregate
+            # prefill dispatch counters. It enables no event or fence timing.
+            export GRIMOIRE_QFN_MOE_TRACE=1
+            ;;
         *) echo "Invalid NATIVE_MODE" >&2; exit 2 ;;
     esac
     printf '%s\n' "${NATIVE_MODE:-baseline}" > "$D/native-mode"
@@ -136,6 +148,15 @@ native() (
         if [[ ${NATIVE_MODE:-} == hc-on ]]; then
             for rank in 0 1 2 3; do
                 grep -Eq "^QFN HC fused BF16 rank=$rank rows=2048 calls=[1-9][0-9]*$" "$D/native/r$rank.log"
+            done
+        fi
+        if [[ ${NATIVE_MODE:-} == rsag-* ]]; then
+            for rank in 0 1 2 3; do
+                grep -Eq "^QFN Xe2 gate/up: rank=$rank rows=2048 calls=48 output=fp32$" "$D/native/r$rank.log"
+                grep -Eq "^QFN Xe2 down: rank=$rank rows=2048 calls=48 output=fp32$" "$D/native/r$rank.log"
+                if [[ $NATIVE_MODE == rsag-on ]]; then
+                    grep -Fxq "QFN prefill RSAG rank=$rank rows=2048 calls=97" "$D/native/r$rank.log"
+                fi
             done
         fi
         python3 "$B/c1.py" native "$D/native"/r{0,1,2,3}.log > "$D/native-phase.json"
