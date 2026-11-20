@@ -4,6 +4,8 @@ set -euo pipefail
 B=$(cd -- "$(dirname -- "$0")" && pwd)
 ROOT=$(cd "$B/../../.." && pwd)
 variant=${NATIVE_HTTP_VARIANT:-baseline}
+context=${NATIVE_HTTP_CONTEXT:-32768}
+[[ $context == 32768 || $context == 262144 ]]
 case "$variant" in
     baseline) S=$ROOT/qfn-enhanced/build-inputs/combined-c1; manifest=rebuilt.sha256 ;;
     rsag) S=$ROOT/receipts/prefill-rsag-build; manifest=rsag.sha256 ;;
@@ -17,6 +19,7 @@ echo "$D"
 (cd "$S"; sha256sum -c "$manifest")
 cp "$S/$manifest" "$D/build.sha256"
 printf '%s\n' "$variant" > "$D/variant"
+printf '%s\n' "$context" > "$D/context"
 (cd "$B"; sha256sum -c inputs.sha256; python3 checkpoint-lock.py)
 sha256sum -c "$SERVING"
 [[ $BENCH_PORT =~ ^[0-9]{4,5}$ ]]
@@ -77,7 +80,7 @@ cap=$((APPROVED_DEADLINE_EPOCH - $(date +%s) - 20))
 for rank in 3 2 1 0; do
     GRIMOIRE_TP_RANK=$rank GRIMOIRE_TP_SOCKET=$socket_dir/p \
         timeout --signal=TERM --kill-after=8s "$cap" "$S/qfn-server" \
-        -m /home/haxor/models/qwen38-w4a16-snapshot --proj bf16 --ctx 32768 \
+        -m /home/haxor/models/qwen38-w4a16-snapshot --proj bf16 --ctx "$context" \
         --host 127.0.0.1 --port "$BENCH_PORT" > "$D/r$rank.out" 2> "$D/r$rank.log" &
     pids[rank]=$!
 done
