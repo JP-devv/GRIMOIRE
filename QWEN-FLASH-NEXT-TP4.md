@@ -32,11 +32,11 @@ cleanup() {
 trap cleanup EXIT
 trap "exit 130" INT
 trap "exit 143" TERM
-export ONEAPI_DEVICE_SELECTOR=level_zero:gpu
+export ONEAPI_DEVICE_SELECTOR=level_zero:gpu SYCL_CACHE_PERSISTENT=0
 export GRIMOIRE_TP_WORLD_SIZE=4 GRIMOIRE_TP_SOCKET="$run_dir/tp"
 export GRIMOIRE_QFN_TP4=1 GRIMOIRE_P2P=1 GRIMOIRE_P2P_CHUNK_MB=1
 export GRIMOIRE_QFN_TP_SYNC=fanout GRIMOIRE_MTP=0 GRIMOIRE_SEQ_SLOTS=1
-export GRIMOIRE_DECODE_GRAPH=0 GRIMOIRE_PREFIX_CACHE=0
+export GRIMOIRE_DECODE_GRAPH=0 GRIMOIRE_PREFIX_CACHE=1
 export GRIMOIRE_PREFILL_CHUNK=2048 GRIMOIRE_QFN_PREFILL_RSAG=1
 for rank in 0 1 2 3; do
     GRIMOIRE_TP_RANK=$rank "$server" -m "$model" --proj bf16 --ctx 32768 \
@@ -53,6 +53,11 @@ must use the same P2P and synchronization settings. The optional
 reduce-scatter/all-gather path applies to full 2,048-row reductions at
 the Flash-Next hidden width. Other payload sizes use peer push.
 
+The dense single-slot TP4 server can reuse an exact prompt or a prompt
+extended with more tokens. It saves a prompt-head snapshot before decode
+and keeps that prompt’s KV rows resident. All ranks agree on the match
+before skipping any rows. The default prompt-head threshold is 1,024
+new tokens. Set `GRIMOIRE_PREFIX_CACHE=0` to measure a cold request.
 
 To test the collective without loading a checkpoint, reserve the four
 GPUs and start the same four ranks with the native `grimoire` CLI.
