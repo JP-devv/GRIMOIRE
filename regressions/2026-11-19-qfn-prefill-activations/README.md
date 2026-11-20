@@ -15,3 +15,16 @@ For one-row MoE localization, set `GRIMOIRE_QFN_MOE_ROW_DIR`, `GRIMOIRE_QFN_MOE_
 `GRIMOIRE_QFN_MOE_ROW_ENTRY` supplies the full combined layer-entry batch before PLE; each layout still runs its own production PLE injection. `GRIMOIRE_QFN_MOE_ROW_STOP` makes the diagnostic CLI stop after writing the router decisions instead of continuing through the remaining layers or decoding. `bin/qfn_compare_dn_prefix` checks the first chunk and reports the first differing tap.
 
 Build the host-only C++17 tools with `make qfn-tools`; run their CPU regressions with `make test-qfn`. No Python, NumPy, PyTorch, or GPU toolkit is needed for these readers or regressions.
+
+For the four-B70 replay, use an isolated worktree with the JIT SYCL shared
+libraries already in `bin/`. Set `QFN_MODEL` to the dense text snapshot and
+`QFN_PLE_SOURCE` to the original snapshot. Run
+`bash replay-dn.sh NEW_EMPTY_DIR PP4_CAPTURE FROZEN_PROMPT_IDS [0|1]` in tmux
+from this directory. Use PP4's boundary capture for layer 0 or its selected
+layer-1 detail capture for layer 1. The runner builds into the empty directory,
+links a uniquely named binary, and does not start a GPU rank if the build
+fails. Lock acquisition and each rank are bounded; GPUs receive TERM only.
+Wait with `timeout <seconds> tmux wait-for <NEW_EMPTY_DIR-basename>-done`
+unless `NEW_EMPTY_DIR/receipt` already exists. The receipt records the terminating
+stage and exit status plus the isolated binary SHA-256. See [the recorded
+comparison](tp4-row-361.md) for interpretation.
