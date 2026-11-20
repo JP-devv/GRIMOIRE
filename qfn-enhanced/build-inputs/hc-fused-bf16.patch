@@ -1,0 +1,128 @@
+--- a/src/ops.cpp
++++ b/src/ops.cpp
+@@ -2709,9 +2709,10 @@
+ }
+ 
+ // A over rows: one work-group per (row, stream).
+-sycl::event launch_hc_combine_norm_rows(sycl::queue& q, float* hyper, const float* pend, const float* pinj,
++template<bool EmitBf16>
++static sycl::event launch_hc_combine_norm_rows_impl(sycl::queue& q, float* hyper, const float* pend, const float* pinj,
+                                         const bf16_t* w, float* normed, int rows, int hc_count, int hidden,
+-                                        float eps, const std::vector<sycl::event>& deps) {
++                                        float eps, sycl_bf16* projection, const std::vector<sycl::event>& deps) {
+     constexpr int WG = 256;
+     constexpr int MAXE = 16;
+     static const bool regs_env = [] { const char* e = std::getenv("GRIMOIRE_HC_NORM_REGS");
+@@ -2750,7 +2751,13 @@
+                 #pragma unroll
+                 for (int j = 0; j < MAXE; ++j) if (j < per) wv[j] = bf16_to_f32(ws[lane + j * WG]);
+                 #pragma unroll
+-                for (int j = 0; j < MAXE; ++j) if (j < per) o[lane + j * WG] = v[j] * inv * (1.0f + wv[j]);
++                for (int j = 0; j < MAXE; ++j) if (j < per) {
++                    const int element = lane + j * WG;
++                    const float value = v[j] * inv * (1.0f + wv[j]);
++                    o[element] = value;
++                    if constexpr (EmitBf16)
++                        projection[row * wide + int64_t(c) * hidden + element] = sycl_bf16(value);
++                }
+             });
+         });
+     }
+@@ -2775,9 +2782,29 @@
+             const bf16_t* ws = w + int64_t(c) * hidden;
+             float* o = normed + row * wide + int64_t(c) * hidden;
+             for (int i = lane; i < hidden; i += WG)
+-                o[i] = x[i] * inv * (1.0f + bf16_to_f32(ws[i]));
++                {
++                    const int element = i;
++                    const float value = x[i] * inv * (1.0f + bf16_to_f32(ws[i]));
++                    o[element] = value;
++                    if constexpr (EmitBf16)
++                        projection[row * wide + int64_t(c) * hidden + element] = sycl_bf16(value);
++                }
+         });
+     });
++}
++
++sycl::event launch_hc_combine_norm_rows(sycl::queue& q, float* hyper, const float* pend, const float* pinj,
++                                        const bf16_t* w, float* normed, int rows, int hc_count, int hidden,
++                                        float eps, const std::vector<sycl::event>& deps) {
++    return launch_hc_combine_norm_rows_impl<false>(q, hyper, pend, pinj, w, normed, rows,
++                                                 hc_count, hidden, eps, nullptr, deps);
++}
++
++sycl::event launch_qfn_hc_combine_norm_bf16(sycl::queue& q, float* hyper, const float* pend, const float* pinj,
++                                        const bf16_t* w, float* normed, int rows, int hc_count, int hidden,
++                                        float eps, sycl_bf16* projection, const std::vector<sycl::event>& deps) {
++    return launch_hc_combine_norm_rows_impl<true>(q, hyper, pend, pinj, w, normed, rows,
++                                                 hc_count, hidden, eps, projection, deps);
+ }
+ 
+ // B over rows: one work-group per output row; each weight row is read once and dotted with every row's normed.
+--- a/src/kernels.hpp
++++ b/src/kernels.hpp
+@@ -678,6 +678,9 @@
+ sycl::event launch_hc_combine_norm_rows(sycl::queue& q, float* hyper, const float* pend,
+     const float* pinj, const bf16_t* w, float* normed, int rows, int hc_count, int hidden,
+     float eps, const std::vector<sycl::event>& deps = {});
++sycl::event launch_qfn_hc_combine_norm_bf16(sycl::queue& q, float* hyper, const float* pend, const float* pinj,
++                                        const bf16_t* w, float* normed, int rows, int hc_count, int hidden,
++                                        float eps, sycl_bf16* projection, const std::vector<sycl::event>& deps = {});
+ sycl::event launch_hc_down_inject_rows(sycl::queue& q, const bf16_t* down, const bf16_t* inj_w,
+     const float* normed, float* lora, float* inj, int rows, int lowrank, int hc_count, int wide,
+     const std::vector<sycl::event>& deps = {});
+--- a/src/grimoire.cpp
++++ b/src/grimoire.cpp
+@@ -19634,7 +19634,9 @@
+     const bool fuse_prefill_hc = hf && std::strcmp(hf, "1") == 0 && qfn_ranked_xmx && qfn_xmx;
+     const char* tile_hc = std::getenv("GRIMOIRE_QFN_HC_DOWN_TILED");
+     const bool tiled_prefill_hc = tile_hc && std::strcmp(tile_hc, "1") == 0 && qfn_ranked_xmx && qfn_xmx;
+-    size_t hc_fused_calls = 0, hc_tiled_calls = 0;
++    const char* hc_pack_env = std::getenv("GRIMOIRE_QFN_HC_FUSED_BF16");
++    const bool fused_hc_bf16 = hc_pack_env && std::strcmp(hc_pack_env, "1") == 0;
++    size_t hc_fused_calls = 0, hc_tiled_calls = 0, hc_fused_bf16_calls = 0;
+     const bool dn_prof = std::getenv("GRIMOIRE_QFN_DN_PROFILE") != nullptr;
+     double dnp_ms[6] = {0, 0, 0, 0, 0, 0};   // qkv conv gates scan z other
+     auto dnp_t = std::chrono::steady_clock::now();
+@@ -19695,7 +19697,18 @@
+         }
+         if (hct) q.wait();
+         auto ht = std::chrono::steady_clock::now();
+-        if (fuse_prefill_hc && pblk && MR >= 32) {
++        const bool tiled_down = tiled_prefill_hc && MR >= 32 && hc.down.w.fmt == Fmt::BF16 &&
++            hc.down.w.N == 320 && hc.down.w.K == 10240 && gemm_fast_shape_ok(hc.down.w, MR);
++        const bool fuse_projection_input = fused_hc_bf16 && fuse_prefill_hc && pblk &&
++            MR == 2048 && tiled_down && q.is_in_order();
++        if (fuse_projection_input) {
++            traced("hc.combine_norm_bf16", [&] {
++                launch_qfn_hc_combine_norm_bf16(q, HY, pblk, pin, hc.norm, normed,
++                                               MR, HC, H, eps, xb, none);
++            });
++            ++hc_fused_bf16_calls;
++            hclap(1, ht);
++        } else if (fuse_prefill_hc && pblk && MR >= 32) {
+             // Apply the pending residual and RMSNorm in one pass; preserve
+             // the in-place hyper update needed by the following HC block.
+             traced("hc.combine_norm", [&] {
+@@ -19709,9 +19722,8 @@
+             traced("hc.norm", [&] { launch_hc_norm(q, HY, hc.norm, normed, MR, HC, H, eps, none); });
+             hclap(1, ht);
+         }
+-        if (tiled_prefill_hc && MR >= 32 && hc.down.w.fmt == Fmt::BF16 &&
+-            hc.down.w.N == 320 && hc.down.w.K == 10240 && gemm_fast_shape_ok(hc.down.w, MR)) {
+-            traced("hc.down.activation_bf16", [&] {
++        if (tiled_down) {
++            if (!fuse_projection_input) traced("hc.down.activation_bf16", [&] {
+                 launch_f32_to_bf16(q, normed, xb, size_t(MR) * WIDE, none);
+             });
+             traced("hc.down.tiled", [&] { launch_qfn_hc_down_tiled(q, hc.down.w, xb, lora, MR, none); });
+@@ -20588,6 +20600,9 @@
+     if (fuse_prefill_hc && std::getenv("GRIMOIRE_BUDGET_DEBUG"))
+         std::fprintf(stderr, "QFN HC prefill fused rank=%d pos=%d rows=%d calls=%zu\n",
+                      tp_rank, start_pos, M, hc_fused_calls);
++    if (fused_hc_bf16 && M == 2048)
++        std::fprintf(stderr, "QFN HC fused BF16 rank=%d rows=%d calls=%zu\n",
++                     tp_rank, M, hc_fused_bf16_calls);
+     if (qfn_grouped_profile && xmx_batches)
+         std::fprintf(stderr, "QFN grouped projection: rank=%d rows=%d gu_calls=%u gu_ms=%.3f down_calls=%u down_ms=%.3f\n",
+                      tp_rank, M, grouped_calls[0], double(grouped_ns[0]) / 1e6,
