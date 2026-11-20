@@ -70,7 +70,33 @@ native() (
     export GRIMOIRE_QFN_GROUPED_K_PREFETCH=0 GRIMOIRE_QFN_GROUPED_LIVE_TILES=1
     export GRIMOIRE_QFN_XE2_GATE_UP=fp32 GRIMOIRE_QFN_XE2_DOWN=1
     export GRIMOIRE_QFN_HC_DOWN_TILED=1 GRIMOIRE_QFN_HC_FUSED_PREFILL=1
+    NATIVE_BIN=/tmp/qfn-catchup.pf1/verifier/qfn-verifier
+    case "${NATIVE_MODE:-baseline}" in
+        baseline) ;;
+        replay)
+            [[ $fixture == frozen && ${PAIR_ORDER:-} == native-only ]]
+            build="$Q/../receipts/row-replay-build"
+            [[ $(< "$build/build-replay.exit") == 0 ]]
+            (cd "$build"; sha256sum -c replay.sha256)
+            NATIVE_BIN=$build/qfn-combined
+            export GRIMOIRE_QFN_TP4_VERIFY_DIAGNOSTIC=replay
+            ;;
+        hc-off|hc-on)
+            [[ $fixture == frozen && ${PAIR_ORDER:-} == native-only ]]
+            build="$Q/../receipts/hc-fused-build"
+            [[ $(< "$build/build-hc.exit") == 0 ]]
+            (cd "$build"; sha256sum -c hc.sha256)
+            NATIVE_BIN=$build/qfn-combined
+            export GRIMOIRE_QFN_HC_FUSED_BF16=0
+            if [[ $NATIVE_MODE == hc-on ]]; then export GRIMOIRE_QFN_HC_FUSED_BF16=1; fi
+            ;;
+        *) echo "Invalid NATIVE_MODE" >&2; exit 2 ;;
+    esac
+    printf '%s\n' "${NATIVE_MODE:-baseline}" > "$D/native-mode"
     export GRIMOIRE_PROMPT_IDS="$(< "$D/fixtures/$fixture.prompt.ids")" GRIMOIRE_PRINT_IDS=1 GRIMOIRE_GENERATION_PHASES=1
+    compgen -e GRIMOIRE_ | sort | while IFS= read -r key; do
+        printf '%s=%s\n' "$key" "${!key}"
+    done > "$D/native.env"
     CAP=$(remaining 90); (( CAP <= 165 )) || CAP=165
     SOCK=$(mktemp -d /tmp/qfn-c1-sock.XXXXXXXX)
     pids=(); trap 'for pid in "${pids[@]}"; do kill -TERM "$pid" 2>/dev/null || :; done; wait || :; rm -f -- "$SOCK/p"; rmdir -- "$SOCK"' EXIT
@@ -78,7 +104,7 @@ native() (
     mkdir "$D/native"
     for rank in 3 2 1 0; do
         GRIMOIRE_TP_RANK=$rank GRIMOIRE_TP_SOCKET=$SOCK/p \
-            timeout --signal=TERM --kill-after=4s "$CAP" /tmp/qfn-catchup.pf1/verifier/qfn-verifier \
+            timeout --signal=TERM --kill-after=4s "$CAP" "$NATIVE_BIN" \
             -m /home/haxor/models/qwen38-w4a16-snapshot --proj bf16 --ctx 32768 -p "$fixture" -n "$output" \
             > "$D/native/r$rank.out" 2> "$D/native/r$rank.log" &
         pids[rank]=$!
@@ -88,7 +114,27 @@ native() (
         grep -Fxq '  TP4 P2P: direct peer-push, FP32 payloads and rank-order sum' "$f"
         grep -Fxq '  QFN TP4 synchronization: socket fan-out' "$f"
     done
-    if [[ $fixture == frozen ]]; then python3 "$B/c1.py" native "$D/native"/r{0,1,2,3}.log > "$D/native-phase.json"; fi
+    if [[ ${NATIVE_MODE:-} == replay ]]; then
+        for rank in 0 1 2 3; do
+            awk -v rank="$rank" '
+                $1=="QFN" && $2=="row" && $3=="replay" {
+                    expected_rows = count==0 || count==3 ? 1 : 4
+                    if ($4!="rank=" rank || $5!="sample=" count+0 ||
+                        $6!="rows=" expected_rows || $8!="target_ids_match=1") exit 2
+                    print
+                    ++count
+                }
+                END {if (count!=4) exit 1}
+            ' "$D/native/r$rank.log"
+        done > "$D/row-replay.txt"
+    elif [[ $fixture == frozen ]]; then
+        if [[ ${NATIVE_MODE:-} == hc-on ]]; then
+            for rank in 0 1 2 3; do
+                grep -Eq "^QFN HC fused BF16 rank=$rank rows=2048 calls=[1-9][0-9]*$" "$D/native/r$rank.log"
+            done
+        fi
+        python3 "$B/c1.py" native "$D/native"/r{0,1,2,3}.log > "$D/native-phase.json"
+    fi
 )
 
 vllm() (
@@ -109,6 +155,7 @@ vllm() (
     esac
     printf '%s\n' "${REFERENCE_MODE:-graph-off}" > "$D/reference-mode"
     local batch_tokens=${REFERENCE_BATCH_TOKENS:-1024}
+    if [[ ${PAIR_ORDER:-} == profile && $fixture == full-chunk ]]; then batch_tokens=2048; fi
     if [[ $batch_tokens != 1024 && ( $batch_tokens != 2048 || ${REFERENCE_MODE:-} != eager-off ) ]]; then
         echo "2048 reference batch tokens require the eager attribution arm" >&2
         exit 2
@@ -170,6 +217,7 @@ case "${PAIR_ORDER:-native-first}" in
     native-first) native; vllm ;;
     reference-first) vllm; native ;;
     profile|reference-only) vllm ;;
+    native-only) native ;;
     *) echo "Invalid PAIR_ORDER" >&2; exit 2 ;;
 esac
 
@@ -179,6 +227,10 @@ awk '/xe.*(Fault response|Timedout job|GPU HANG|Engine memory CAT error|wedged)/
 [[ ! -s $D/xe-fault.log ]]
 sha256sum -c "$SERVING"
 if [[ ${PAIR_ORDER:-} == profile ]]; then exit 0; fi
+if [[ ${PAIR_ORDER:-} == native-only ]]; then
+    if [[ ${NATIVE_MODE:-} == replay ]]; then [[ -s $D/row-replay.txt ]]; else [[ -s $D/native-phase.json ]]; fi
+    exit
+fi
 if [[ ${PAIR_ORDER:-} == reference-only ]]; then [[ -s $D/vllm-phase.json ]]; exit; fi
 if [[ $fixture != frozen ]]; then
     score_args=()
