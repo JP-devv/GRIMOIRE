@@ -12,7 +12,7 @@ def main():
     args = parser.parse_args()
     traces = {}
     captured_ranks = set()
-    for path in sorted(args.trace_dir.rglob("*.pt.trace.json*")):
+    for path in sorted(args.trace_dir.rglob("*tp*_ep*_rank*.pt.trace.json*")):
         opener = gzip.open if path.suffix == ".gz" else open
         with opener(path, "rt") as stream:
             events = json.load(stream)["traceEvents"]
