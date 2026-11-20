@@ -264,12 +264,15 @@ vllm() (
     case "${REFERENCE_MODE:-graph-off}" in
         graph-off) ;;
         eager-off) reference_args=(--enforce-eager) ;;
-        recipe-mtp3|eager-mtp3)
+        recipe-mtp3|eager-mtp3|decode-graph-mtp3)
             context=262144
             compilation='{"cudagraph_mode":"FULL_AND_PIECEWISE","cudagraph_capture_sizes":[1,2,4,8,12,16,20,24,28,32,36,40,44,48,52,56,60,64,256,512,1024]}'
             recipe_env=(-e B70_MTP_DRAFT_PREFILL_NO_PIECEWISE=1)
             reference_args=(--speculative-config '{"method":"mtp","num_speculative_tokens":3,"model":"/models/qwen38-w4a16-mtp-snapshot","disable_eagle_block_drop":true}')
             if [[ $REFERENCE_MODE == eager-mtp3 ]]; then reference_args+=(--enforce-eager); fi
+            if [[ $REFERENCE_MODE == decode-graph-mtp3 ]]; then
+                compilation=${compilation/FULL_AND_PIECEWISE/FULL_DECODE_ONLY}
+            fi
             ;;
         *) echo "Invalid REFERENCE_MODE" >&2; exit 2 ;;
     esac
