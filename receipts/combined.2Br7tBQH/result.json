@@ -1,0 +1,16 @@
+{
+  "prefill_s": 2.8273960000000002,
+  "decode_s": 1.444134,
+  "cold_prefill_tok_s": 957.064380086836,
+  "decode_tok_s": 21.46615203298309,
+  "mtp3": {
+    "steps": 11,
+    "accepted": 21,
+    "drafted": 33
+  },
+  "targets": {
+    "decode_tok_s": 140,
+    "cold_prefill_tok_s": 4000
+  },
+  "targets_pass": false
+}

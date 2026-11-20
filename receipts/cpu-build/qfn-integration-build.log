@@ -1,0 +1,789 @@
+ 
+:: initializing oneAPI environment ...
+   qfn-integration-build.sh: BASH_VERSION = 5.3.9(1)-release
+   args: Using "$@" for setvars.sh arguments: --force
+:: compiler -- latest
+:: debugger -- latest
+:: dev-utilities -- latest
+:: dnnl -- latest
+:: dpl -- latest
+:: mkl -- latest
+:: tbb -- latest
+:: tcm -- latest
+:: umf -- latest
+:: vtune -- latest
+:: oneAPI environment initialized ::
+ 
+Intel(R) oneAPI DPC++/C++ Compiler 2026.2.0 (2026.2.0.20261001)
+Target: x86_64-unknown-linux-gnu
+Thread model: posix
+InstalledDir: /opt/intel/oneapi/compiler/2026.2/bin/compiler
+Configuration file: /opt/intel/oneapi/compiler/2026.2/bin/compiler/../icpx.cfg
+mkdir -p obj
+icpx -fsycl -fsycl-targets=intel_gpu_bmg_g31 -O3 -std=c++20 -fno-fast-math -ffp-contract=fast -fno-math-errno -fPIC -shared -Iinclude -Isrc -Xsycl-target-backend=intel_gpu_bmg_g31 '-options -doubleGRF' src/attn_verify_dpas.cpp -o libgrimoire_attn.so
+icpx -fsycl -fsycl-targets=intel_gpu_bmg_g31 -O3 -std=c++20 -fno-fast-math -ffp-contract=fast -fno-math-errno -fPIC -shared -Iinclude -Isrc -Xsycl-target-backend=intel_gpu_bmg_g31 '-options "-cl-intel-256-GRF-per-thread -doubleGRF"' src/gemm_fast.cpp -o libgrimoire_gemm.so
+icpx -fsycl -fsycl-targets=spir64 -fsycl-device-code-split=per_kernel -O2 -std=c++20 -fno-fast-math -ffp-contract=fast -fno-math-errno -Iinclude -Isrc -Ixe2 -c src/grimoire.cpp -o obj/grimoire.o
+icpx -fsycl -fsycl-targets=spir64 -fsycl-device-code-split=per_kernel -O2 -std=c++20 -fno-fast-math -ffp-contract=fast -fno-math-errno -Iinclude -Isrc -Ixe2 -c src/qwen35_loader.cpp -o obj/qwen35_loader.o
+src/gemm_fast.cpp:1028:20: warning: 'barrier' is deprecated: use sycl::group_barrier() free function instead [-Wdeprecated-declarations]
+ 1028 |                 it.barrier(sycl::access::fence_space::local_space);
+      |                    ^
+/opt/intel/oneapi/compiler/2026.2/bin/compiler/../../include/sycl/nd_item.hpp:214:3: note: 'barrier' has been explicitly marked deprecated here
+  214 |   __SYCL2020_DEPRECATED("use sycl::group_barrier() free function instead")
+      |   ^
+/opt/intel/oneapi/compiler/2026.2/bin/compiler/../../include/sycl/detail/defines_elementary.hpp:75:40: note: expanded from macro '__SYCL2020_DEPRECATED'
+   75 | #define __SYCL2020_DEPRECATED(message) __SYCL_DEPRECATED(message)
+      |                                        ^
+/opt/intel/oneapi/compiler/2026.2/bin/compiler/../../include/sycl/detail/defines_elementary.hpp:66:38: note: expanded from macro '__SYCL_DEPRECATED'
+   66 | #define __SYCL_DEPRECATED(message) [[deprecated(message)]]
+      |                                      ^
+src/gemm_fast.cpp:1060:20: warning: 'barrier' is deprecated: use sycl::group_barrier() free function instead [-Wdeprecated-declarations]
+ 1060 |                 it.barrier(sycl::access::fence_space::local_space);
+      |                    ^
+/opt/intel/oneapi/compiler/2026.2/bin/compiler/../../include/sycl/nd_item.hpp:214:3: note: 'barrier' has been explicitly marked deprecated here
+  214 |   __SYCL2020_DEPRECATED("use sycl::group_barrier() free function instead")
+      |   ^
+/opt/intel/oneapi/compiler/2026.2/bin/compiler/../../include/sycl/detail/defines_elementary.hpp:75:40: note: expanded from macro '__SYCL2020_DEPRECATED'
+   75 | #define __SYCL2020_DEPRECATED(message) __SYCL_DEPRECATED(message)
+      |                                        ^
+/opt/intel/oneapi/compiler/2026.2/bin/compiler/../../include/sycl/detail/defines_elementary.hpp:66:38: note: expanded from macro '__SYCL_DEPRECATED'
+   66 | #define __SYCL_DEPRECATED(message) [[deprecated(message)]]
+      |                                      ^
+src/gemm_fast.cpp:1028:20: warning: 'barrier' is deprecated: use sycl::group_barrier() free function instead [-Wdeprecated-declarations]
+ 1028 |                 it.barrier(sycl::access::fence_space::local_space);
+      |                    ^
+src/gemm_fast.cpp:1019:108: note: while substituting into a lambda expression here
+ 1019 |             h.parallel_for(sycl::nd_range<1>(size_t(KVH) * (Sp / TK) * 256, 256), [=](sycl::nd_item<1> it) {
+      |                                                                                                            ^
+src/gemm_fast.cpp:1016:44: note: while substituting into a lambda expression here
+ 1016 |         e = q.submit([&](sycl::handler& h) {
+      |                                            ^
+src/gemm_fast.cpp:1355:11: note: in instantiation of function template specialization 'b70::(anonymous namespace)::flash_fast_impl<128>' requested here
+ 1355 |         ? flash_fast_impl<128>(q, qv, k_cache, v_cache, out, tokens, start_pos, num_heads,
+      |           ^
+/opt/intel/oneapi/compiler/2026.2/bin/compiler/../../include/sycl/nd_item.hpp:214:3: note: 'barrier' has been explicitly marked deprecated here
+  214 |   __SYCL2020_DEPRECATED("use sycl::group_barrier() free function instead")
+      |   ^
+/opt/intel/oneapi/compiler/2026.2/bin/compiler/../../include/sycl/detail/defines_elementary.hpp:75:40: note: expanded from macro '__SYCL2020_DEPRECATED'
+   75 | #define __SYCL2020_DEPRECATED(message) __SYCL_DEPRECATED(message)
+      |                                        ^
+/opt/intel/oneapi/compiler/2026.2/bin/compiler/../../include/sycl/detail/defines_elementary.hpp:66:38: note: expanded from macro '__SYCL_DEPRECATED'
+   66 | #define __SYCL_DEPRECATED(message) [[deprecated(message)]]
+      |                                      ^
+src/gemm_fast.cpp:1060:20: warning: 'barrier' is deprecated: use sycl::group_barrier() free function instead [-Wdeprecated-declarations]
+ 1060 |                 it.barrier(sycl::access::fence_space::local_space);
+      |                    ^
+src/gemm_fast.cpp:1042:108: note: while substituting into a lambda expression here
+ 1042 |             h.parallel_for(sycl::nd_range<1>(size_t(KVH) * (Sp / TK) * 256, 256), [=](sycl::nd_item<1> it) {
+      |                                                                                                            ^
+src/gemm_fast.cpp:1039:44: note: while substituting into a lambda expression here
+ 1039 |         e = q.submit([&](sycl::handler& h) {
+      |                                            ^
+src/gemm_fast.cpp:1355:11: note: in instantiation of function template specialization 'b70::(anonymous namespace)::flash_fast_impl<128>' requested here
+ 1355 |         ? flash_fast_impl<128>(q, qv, k_cache, v_cache, out, tokens, start_pos, num_heads,
+      |           ^
+/opt/intel/oneapi/compiler/2026.2/bin/compiler/../../include/sycl/nd_item.hpp:214:3: note: 'barrier' has been explicitly marked deprecated here
+  214 |   __SYCL2020_DEPRECATED("use sycl::group_barrier() free function instead")
+      |   ^
+/opt/intel/oneapi/compiler/2026.2/bin/compiler/../../include/sycl/detail/defines_elementary.hpp:75:40: note: expanded from macro '__SYCL2020_DEPRECATED'
+   75 | #define __SYCL2020_DEPRECATED(message) __SYCL_DEPRECATED(message)
+      |                                        ^
+/opt/intel/oneapi/compiler/2026.2/bin/compiler/../../include/sycl/detail/defines_elementary.hpp:66:38: note: expanded from macro '__SYCL_DEPRECATED'
+   66 | #define __SYCL_DEPRECATED(message) [[deprecated(message)]]
+      |                                      ^
+src/gemm_fast.cpp:1028:20: warning: 'barrier' is deprecated: use sycl::group_barrier() free function instead [-Wdeprecated-declarations]
+ 1028 |                 it.barrier(sycl::access::fence_space::local_space);
+      |                    ^
+src/gemm_fast.cpp:1019:108: note: while substituting into a lambda expression here
+ 1019 |             h.parallel_for(sycl::nd_range<1>(size_t(KVH) * (Sp / TK) * 256, 256), [=](sycl::nd_item<1> it) {
+      |                                                                                                            ^
+src/gemm_fast.cpp:1016:44: note: while substituting into a lambda expression here
+ 1016 |         e = q.submit([&](sycl::handler& h) {
+      |                                            ^
+src/gemm_fast.cpp:1357:11: note: in instantiation of function template specialization 'b70::(anonymous namespace)::flash_fast_impl<256>' requested here
+ 1357 |         : flash_fast_impl<256>(q, qv, k_cache, v_cache, out, tokens, start_pos, num_heads,
+      |           ^
+/opt/intel/oneapi/compiler/2026.2/bin/compiler/../../include/sycl/nd_item.hpp:214:3: note: 'barrier' has been explicitly marked deprecated here
+  214 |   __SYCL2020_DEPRECATED("use sycl::group_barrier() free function instead")
+      |   ^
+/opt/intel/oneapi/compiler/2026.2/bin/compiler/../../include/sycl/detail/defines_elementary.hpp:75:40: note: expanded from macro '__SYCL2020_DEPRECATED'
+   75 | #define __SYCL2020_DEPRECATED(message) __SYCL_DEPRECATED(message)
+      |                                        ^
+/opt/intel/oneapi/compiler/2026.2/bin/compiler/../../include/sycl/detail/defines_elementary.hpp:66:38: note: expanded from macro '__SYCL_DEPRECATED'
+   66 | #define __SYCL_DEPRECATED(message) [[deprecated(message)]]
+      |                                      ^
+src/gemm_fast.cpp:1060:20: warning: 'barrier' is deprecated: use sycl::group_barrier() free function instead [-Wdeprecated-declarations]
+ 1060 |                 it.barrier(sycl::access::fence_space::local_space);
+      |                    ^
+src/gemm_fast.cpp:1042:108: note: while substituting into a lambda expression here
+ 1042 |             h.parallel_for(sycl::nd_range<1>(size_t(KVH) * (Sp / TK) * 256, 256), [=](sycl::nd_item<1> it) {
+      |                                                                                                            ^
+src/gemm_fast.cpp:1039:44: note: while substituting into a lambda expression here
+ 1039 |         e = q.submit([&](sycl::handler& h) {
+      |                                            ^
+src/gemm_fast.cpp:1357:11: note: in instantiation of function template specialization 'b70::(anonymous namespace)::flash_fast_impl<256>' requested here
+ 1357 |         : flash_fast_impl<256>(q, qv, k_cache, v_cache, out, tokens, start_pos, num_heads,
+      |           ^
+/opt/intel/oneapi/compiler/2026.2/bin/compiler/../../include/sycl/nd_item.hpp:214:3: note: 'barrier' has been explicitly marked deprecated here
+  214 |   __SYCL2020_DEPRECATED("use sycl::group_barrier() free function instead")
+      |   ^
+/opt/intel/oneapi/compiler/2026.2/bin/compiler/../../include/sycl/detail/defines_elementary.hpp:75:40: note: expanded from macro '__SYCL2020_DEPRECATED'
+   75 | #define __SYCL2020_DEPRECATED(message) __SYCL_DEPRECATED(message)
+      |                                        ^
+/opt/intel/oneapi/compiler/2026.2/bin/compiler/../../include/sycl/detail/defines_elementary.hpp:66:38: note: expanded from macro '__SYCL_DEPRECATED'
+   66 | #define __SYCL_DEPRECATED(message) [[deprecated(message)]]
+      |                                      ^
+icpx -fsycl -fsycl-targets=spir64 -fsycl-device-code-split=per_kernel -O2 -std=c++20 -fno-fast-math -ffp-contract=fast -fno-math-errno -Iinclude -Isrc -Ixe2 -c src/native_model.cpp -o obj/native_model.o
+icpx -fsycl -fsycl-targets=spir64 -fsycl-device-code-split=per_kernel -O2 -std=c++20 -fno-fast-math -ffp-contract=fast -fno-math-errno -Iinclude -Isrc -Ixe2 -c src/safetensors.cpp -o obj/safetensors.o
+icpx -fsycl -fsycl-targets=spir64 -fsycl-device-code-split=per_kernel -O2 -std=c++20 -fno-fast-math -ffp-contract=fast -fno-math-errno -Iinclude -Isrc -Ixe2 -c src/quantize.cpp -o obj/quantize.o
+6 warnings generated.
+icpx -fsycl -fsycl-targets=spir64 -fsycl-device-code-split=per_kernel -O2 -std=c++20 -fno-fast-math -ffp-contract=fast -fno-math-errno -Iinclude -Isrc -Ixe2 -c src/gptq.cpp -o obj/gptq.o
+icpx -fsycl -fsycl-targets=spir64 -fsycl-device-code-split=per_kernel -O2 -std=c++20 -fno-fast-math -ffp-contract=fast -fno-math-errno -Iinclude -Isrc -Ixe2 -c src/gemv_decode.cpp -o obj/gemv_decode.o
+src/gemm_fast.cpp:1028:20: warning: 'barrier' is deprecated: use sycl::group_barrier() free function instead [-Wdeprecated-declarations]
+ 1028 |                 it.barrier(sycl::access::fence_space::local_space);
+      |                    ^
+/opt/intel/oneapi/compiler/2026.2/bin/compiler/../../include/sycl/nd_item.hpp:214:3: note: 'barrier' has been explicitly marked deprecated here
+  214 |   __SYCL2020_DEPRECATED("use sycl::group_barrier() free function instead")
+      |   ^
+/opt/intel/oneapi/compiler/2026.2/bin/compiler/../../include/sycl/detail/defines_elementary.hpp:75:40: note: expanded from macro '__SYCL2020_DEPRECATED'
+   75 | #define __SYCL2020_DEPRECATED(message) __SYCL_DEPRECATED(message)
+      |                                        ^
+/opt/intel/oneapi/compiler/2026.2/bin/compiler/../../include/sycl/detail/defines_elementary.hpp:66:38: note: expanded from macro '__SYCL_DEPRECATED'
+   66 | #define __SYCL_DEPRECATED(message) [[deprecated(message)]]
+      |                                      ^
+src/gemm_fast.cpp:1060:20: warning: 'barrier' is deprecated: use sycl::group_barrier() free function instead [-Wdeprecated-declarations]
+ 1060 |                 it.barrier(sycl::access::fence_space::local_space);
+      |                    ^
+/opt/intel/oneapi/compiler/2026.2/bin/compiler/../../include/sycl/nd_item.hpp:214:3: note: 'barrier' has been explicitly marked deprecated here
+  214 |   __SYCL2020_DEPRECATED("use sycl::group_barrier() free function instead")
+      |   ^
+/opt/intel/oneapi/compiler/2026.2/bin/compiler/../../include/sycl/detail/defines_elementary.hpp:75:40: note: expanded from macro '__SYCL2020_DEPRECATED'
+   75 | #define __SYCL2020_DEPRECATED(message) __SYCL_DEPRECATED(message)
+      |                                        ^
+/opt/intel/oneapi/compiler/2026.2/bin/compiler/../../include/sycl/detail/defines_elementary.hpp:66:38: note: expanded from macro '__SYCL_DEPRECATED'
+   66 | #define __SYCL_DEPRECATED(message) [[deprecated(message)]]
+      |                                      ^
+src/gemm_fast.cpp:1028:20: warning: 'barrier' is deprecated: use sycl::group_barrier() free function instead [-Wdeprecated-declarations]
+ 1028 |                 it.barrier(sycl::access::fence_space::local_space);
+      |                    ^
+src/gemm_fast.cpp:1019:108: note: while substituting into a lambda expression here
+ 1019 |             h.parallel_for(sycl::nd_range<1>(size_t(KVH) * (Sp / TK) * 256, 256), [=](sycl::nd_item<1> it) {
+      |                                                                                                            ^
+src/gemm_fast.cpp:1016:44: note: while substituting into a lambda expression here
+ 1016 |         e = q.submit([&](sycl::handler& h) {
+      |                                            ^
+src/gemm_fast.cpp:1355:11: note: in instantiation of function template specialization 'b70::(anonymous namespace)::flash_fast_impl<128>' requested here
+ 1355 |         ? flash_fast_impl<128>(q, qv, k_cache, v_cache, out, tokens, start_pos, num_heads,
+      |           ^
+/opt/intel/oneapi/compiler/2026.2/bin/compiler/../../include/sycl/nd_item.hpp:214:3: note: 'barrier' has been explicitly marked deprecated here
+  214 |   __SYCL2020_DEPRECATED("use sycl::group_barrier() free function instead")
+      |   ^
+/opt/intel/oneapi/compiler/2026.2/bin/compiler/../../include/sycl/detail/defines_elementary.hpp:75:40: note: expanded from macro '__SYCL2020_DEPRECATED'
+   75 | #define __SYCL2020_DEPRECATED(message) __SYCL_DEPRECATED(message)
+      |                                        ^
+/opt/intel/oneapi/compiler/2026.2/bin/compiler/../../include/sycl/detail/defines_elementary.hpp:66:38: note: expanded from macro '__SYCL_DEPRECATED'
+   66 | #define __SYCL_DEPRECATED(message) [[deprecated(message)]]
+      |                                      ^
+src/gemm_fast.cpp:1060:20: warning: 'barrier' is deprecated: use sycl::group_barrier() free function instead [-Wdeprecated-declarations]
+ 1060 |                 it.barrier(sycl::access::fence_space::local_space);
+      |                    ^
+src/gemm_fast.cpp:1042:108: note: while substituting into a lambda expression here
+ 1042 |             h.parallel_for(sycl::nd_range<1>(size_t(KVH) * (Sp / TK) * 256, 256), [=](sycl::nd_item<1> it) {
+      |                                                                                                            ^
+src/gemm_fast.cpp:1039:44: note: while substituting into a lambda expression here
+ 1039 |         e = q.submit([&](sycl::handler& h) {
+      |                                            ^
+src/gemm_fast.cpp:1355:11: note: in instantiation of function template specialization 'b70::(anonymous namespace)::flash_fast_impl<128>' requested here
+ 1355 |         ? flash_fast_impl<128>(q, qv, k_cache, v_cache, out, tokens, start_pos, num_heads,
+      |           ^
+/opt/intel/oneapi/compiler/2026.2/bin/compiler/../../include/sycl/nd_item.hpp:214:3: note: 'barrier' has been explicitly marked deprecated here
+  214 |   __SYCL2020_DEPRECATED("use sycl::group_barrier() free function instead")
+      |   ^
+/opt/intel/oneapi/compiler/2026.2/bin/compiler/../../include/sycl/detail/defines_elementary.hpp:75:40: note: expanded from macro '__SYCL2020_DEPRECATED'
+   75 | #define __SYCL2020_DEPRECATED(message) __SYCL_DEPRECATED(message)
+      |                                        ^
+/opt/intel/oneapi/compiler/2026.2/bin/compiler/../../include/sycl/detail/defines_elementary.hpp:66:38: note: expanded from macro '__SYCL_DEPRECATED'
+   66 | #define __SYCL_DEPRECATED(message) [[deprecated(message)]]
+      |                                      ^
+src/gemm_fast.cpp:1028:20: warning: 'barrier' is deprecated: use sycl::group_barrier() free function instead [-Wdeprecated-declarations]
+ 1028 |                 it.barrier(sycl::access::fence_space::local_space);
+      |                    ^
+src/gemm_fast.cpp:1019:108: note: while substituting into a lambda expression here
+ 1019 |             h.parallel_for(sycl::nd_range<1>(size_t(KVH) * (Sp / TK) * 256, 256), [=](sycl::nd_item<1> it) {
+      |                                                                                                            ^
+src/gemm_fast.cpp:1016:44: note: while substituting into a lambda expression here
+ 1016 |         e = q.submit([&](sycl::handler& h) {
+      |                                            ^
+src/gemm_fast.cpp:1357:11: note: in instantiation of function template specialization 'b70::(anonymous namespace)::flash_fast_impl<256>' requested here
+ 1357 |         : flash_fast_impl<256>(q, qv, k_cache, v_cache, out, tokens, start_pos, num_heads,
+      |           ^
+/opt/intel/oneapi/compiler/2026.2/bin/compiler/../../include/sycl/nd_item.hpp:214:3: note: 'barrier' has been explicitly marked deprecated here
+  214 |   __SYCL2020_DEPRECATED("use sycl::group_barrier() free function instead")
+      |   ^
+/opt/intel/oneapi/compiler/2026.2/bin/compiler/../../include/sycl/detail/defines_elementary.hpp:75:40: note: expanded from macro '__SYCL2020_DEPRECATED'
+   75 | #define __SYCL2020_DEPRECATED(message) __SYCL_DEPRECATED(message)
+      |                                        ^
+/opt/intel/oneapi/compiler/2026.2/bin/compiler/../../include/sycl/detail/defines_elementary.hpp:66:38: note: expanded from macro '__SYCL_DEPRECATED'
+   66 | #define __SYCL_DEPRECATED(message) [[deprecated(message)]]
+      |                                      ^
+src/gemm_fast.cpp:1060:20: warning: 'barrier' is deprecated: use sycl::group_barrier() free function instead [-Wdeprecated-declarations]
+ 1060 |                 it.barrier(sycl::access::fence_space::local_space);
+      |                    ^
+src/gemm_fast.cpp:1042:108: note: while substituting into a lambda expression here
+ 1042 |             h.parallel_for(sycl::nd_range<1>(size_t(KVH) * (Sp / TK) * 256, 256), [=](sycl::nd_item<1> it) {
+      |                                                                                                            ^
+src/gemm_fast.cpp:1039:44: note: while substituting into a lambda expression here
+ 1039 |         e = q.submit([&](sycl::handler& h) {
+      |                                            ^
+src/gemm_fast.cpp:1357:11: note: in instantiation of function template specialization 'b70::(anonymous namespace)::flash_fast_impl<256>' requested here
+ 1357 |         : flash_fast_impl<256>(q, qv, k_cache, v_cache, out, tokens, start_pos, num_heads,
+      |           ^
+/opt/intel/oneapi/compiler/2026.2/bin/compiler/../../include/sycl/nd_item.hpp:214:3: note: 'barrier' has been explicitly marked deprecated here
+  214 |   __SYCL2020_DEPRECATED("use sycl::group_barrier() free function instead")
+      |   ^
+/opt/intel/oneapi/compiler/2026.2/bin/compiler/../../include/sycl/detail/defines_elementary.hpp:75:40: note: expanded from macro '__SYCL2020_DEPRECATED'
+   75 | #define __SYCL2020_DEPRECATED(message) __SYCL_DEPRECATED(message)
+      |                                        ^
+/opt/intel/oneapi/compiler/2026.2/bin/compiler/../../include/sycl/detail/defines_elementary.hpp:66:38: note: expanded from macro '__SYCL_DEPRECATED'
+   66 | #define __SYCL_DEPRECATED(message) [[deprecated(message)]]
+      |                                      ^
+Compilation from IR - skipping loading of FCL
+warning: Linking two modules of different data layouts: '' is 'e-p:64:64-p3:32:32-p6:32:32-i64:64-n8:16:32:64-G1' whereas 'Deserialized LLVM Module' is 'e-p:64:64-p3:32:32-p6:32:32-i64:64-n8:16:32:64'
+
+warning: Linking two modules of different target triples: '' is 'spir64' whereas 'Deserialized LLVM Module' is 'genx64-unknown-unknown'
+
+remark: <unknown>:0:0: loop not vectorized: only vectorizing loops that explicitly request it
+remark: <unknown>:0:0: loop not vectorized: only vectorizing loops that explicitly request it
+remark: <unknown>:0:0: loop not vectorized: only vectorizing loops that explicitly request it
+remark: <unknown>:0:0: loop not vectorized: only vectorizing loops that explicitly request it
+remark: <unknown>:0:0: loop not vectorized: only vectorizing loops that explicitly request it
+remark: <unknown>:0:0: loop not vectorized: only vectorizing loops that explicitly request it
+remark: <unknown>:0:0: loop not vectorized: only vectorizing loops that explicitly request it
+remark: <unknown>:0:0: loop not vectorized: only vectorizing loops that explicitly request it
+remark: <unknown>:0:0: loop not vectorized: only vectorizing loops that explicitly request it
+remark: <unknown>:0:0: loop not vectorized: only vectorizing loops that explicitly request it
+remark: <unknown>:0:0: loop not vectorized: only vectorizing loops that explicitly request it
+remark: <unknown>:0:0: loop not vectorized: only vectorizing loops that explicitly request it
+remark: <unknown>:0:0: loop not vectorized: only vectorizing loops that explicitly request it
+remark: <unknown>:0:0: loop not vectorized: only vectorizing loops that explicitly request it
+remark: <unknown>:0:0: loop not vectorized: only vectorizing loops that explicitly request it
+remark: <unknown>:0:0: loop not vectorized: only vectorizing loops that explicitly request it
+remark: <unknown>:0:0: loop not vectorized: only vectorizing loops that explicitly request it
+remark: <unknown>:0:0: loop not vectorized: only vectorizing loops that explicitly request it
+remark: <unknown>:0:0: loop not vectorized: only vectorizing loops that explicitly request it
+remark: <unknown>:0:0: loop not vectorized: only vectorizing loops that explicitly request it
+remark: <unknown>:0:0: loop not vectorized: only vectorizing loops that explicitly request it
+remark: <unknown>:0:0: loop not vectorized: only vectorizing loops that explicitly request it
+remark: <unknown>:0:0: loop not vectorized: only vectorizing loops that explicitly request it
+remark: <unknown>:0:0: loop not vectorized: only vectorizing loops that explicitly request it
+remark: <unknown>:0:0: loop not vectorized: only vectorizing loops that explicitly request it
+remark: <unknown>:0:0: loop not vectorized: only vectorizing loops that explicitly request it
+remark: <unknown>:0:0: loop not vectorized: only vectorizing loops that explicitly request it
+remark: <unknown>:0:0: loop not vectorized: only vectorizing loops that explicitly request it
+remark: <unknown>:0:0: loop not vectorized: only vectorizing loops that explicitly request it
+remark: <unknown>:0:0: loop not vectorized: only vectorizing loops that explicitly request it
+remark: <unknown>:0:0: loop not vectorized: only vectorizing loops that explicitly request it
+remark: <unknown>:0:0: loop not vectorized: only vectorizing loops that explicitly request it
+remark: <unknown>:0:0: loop not vectorized: only vectorizing loops that explicitly request it
+remark: <unknown>:0:0: loop not vectorized: only vectorizing loops that explicitly request it
+remark: <unknown>:0:0: loop not vectorized: only vectorizing loops that explicitly request it
+remark: <unknown>:0:0: loop not vectorized: only vectorizing loops that explicitly request it
+remark: <unknown>:0:0: loop not vectorized: only vectorizing loops that explicitly request it
+remark: <unknown>:0:0: loop not vectorized: only vectorizing loops that explicitly request it
+remark: <unknown>:0:0: loop not vectorized: only vectorizing loops that explicitly request it
+remark: <unknown>:0:0: loop not vectorized: only vectorizing loops that explicitly request it
+remark: <unknown>:0:0: loop not vectorized: only vectorizing loops that explicitly request it
+remark: <unknown>:0:0: loop not vectorized: only vectorizing loops that explicitly request it
+remark: <unknown>:0:0: loop not vectorized: only vectorizing loops that explicitly request it
+remark: <unknown>:0:0: loop not vectorized: only vectorizing loops that explicitly request it
+remark: <unknown>:0:0: loop not vectorized: only vectorizing loops that explicitly request it
+remark: <unknown>:0:0: loop not vectorized: only vectorizing loops that explicitly request it
+remark: <unknown>:0:0: loop not vectorized: only vectorizing loops that explicitly request it
+remark: <unknown>:0:0: loop not vectorized: only vectorizing loops that explicitly request it
+remark: <unknown>:0:0: loop not vectorized: only vectorizing loops that explicitly request it
+remark: <unknown>:0:0: loop not vectorized: only vectorizing loops that explicitly request it
+remark: <unknown>:0:0: loop not vectorized: only vectorizing loops that explicitly request it
+
+Build succeeded.
+Compilation from IR - skipping loading of FCL
+Build succeeded.
+icpx -fsycl -fsycl-targets=spir64 -fsycl-device-code-split=per_kernel -O2 -std=c++20 -fno-fast-math -ffp-contract=fast -fno-math-errno -Iinclude -Isrc -Ixe2 -c src/gguf.cpp -o obj/gguf.o
+icpx -fsycl -fsycl-targets=spir64 -fsycl-device-code-split=per_kernel -O2 -std=c++20 -fno-fast-math -ffp-contract=fast -fno-math-errno -Iinclude -Isrc -Ixe2 -c src/gguf_decode.cpp -o obj/gguf_decode.o
+icpx -fsycl -fsycl-targets=spir64 -fsycl-device-code-split=per_kernel -O2 -std=c++20 -fno-fast-math -ffp-contract=fast -fno-math-errno -Iinclude -Isrc -Ixe2 -c src/gguf_qwen35.cpp -o obj/gguf_qwen35.o
+6 warnings generated.
+icpx -fsycl -fsycl-targets=spir64 -fsycl-device-code-split=per_kernel -O2 -std=c++20 -fno-fast-math -ffp-contract=fast -fno-math-errno -Iinclude -Isrc -Ixe2 -c src/gemm_xmx.cpp -o obj/gemm_xmx.o
+Compilation from IR - skipping loading of FCL
+remark: <unknown>:0:0: loop not vectorized: only vectorizing loops that explicitly request it
+remark: <unknown>:0:0: loop not vectorized: only vectorizing loops that explicitly request it
+remark: <unknown>:0:0: loop not vectorized: only vectorizing loops that explicitly request it
+remark: <unknown>:0:0: loop not vectorized: only vectorizing loops that explicitly request it
+remark: <unknown>:0:0: loop not vectorized: only vectorizing loops that explicitly request it
+remark: <unknown>:0:0: loop not vectorized: only vectorizing loops that explicitly request it
+remark: <unknown>:0:0: loop not vectorized: only vectorizing loops that explicitly request it
+remark: <unknown>:0:0: loop not vectorized: only vectorizing loops that explicitly request it
+remark: <unknown>:0:0: loop not vectorized: only vectorizing loops that explicitly request it
+remark: <unknown>:0:0: loop not vectorized: only vectorizing loops that explicitly request it
+remark: <unknown>:0:0: loop not vectorized: only vectorizing loops that explicitly request it
+remark: <unknown>:0:0: loop not vectorized: only vectorizing loops that explicitly request it
+
+Build succeeded.
+icpx -fsycl -fsycl-targets=spir64 -fsycl-device-code-split=per_kernel -O2 -std=c++20 -fno-fast-math -ffp-contract=fast -fno-math-errno -Iinclude -Isrc -Ixe2 -c src/attention.cpp -o obj/attention.o
+icpx -fsycl -fsycl-targets=spir64 -fsycl-device-code-split=per_kernel -O2 -std=c++20 -fno-fast-math -ffp-contract=fast -fno-math-errno -Iinclude -Isrc -Ixe2 -c src/deltanet.cpp -o obj/deltanet.o
+Compilation from IR - skipping loading of FCL
+warning: Linking two modules of different data layouts: '' is 'e-p:64:64-p3:32:32-p6:32:32-i64:64-n8:16:32:64-G1' whereas 'Deserialized LLVM Module' is 'e-p:64:64-p3:32:32-p6:32:32-i64:64-n8:16:32:64'
+
+warning: Linking two modules of different target triples: '' is 'spir64' whereas 'Deserialized LLVM Module' is 'genx64-unknown-unknown'
+
+remark: <unknown>:0:0: loop not vectorized: only vectorizing loops that explicitly request it
+remark: <unknown>:0:0: loop not vectorized: only vectorizing loops that explicitly request it
+remark: <unknown>:0:0: loop not vectorized: only vectorizing loops that explicitly request it
+remark: <unknown>:0:0: loop not vectorized: only vectorizing loops that explicitly request it
+remark: <unknown>:0:0: loop not vectorized: only vectorizing loops that explicitly request it
+remark: <unknown>:0:0: loop not vectorized: only vectorizing loops that explicitly request it
+remark: <unknown>:0:0: loop not vectorized: only vectorizing loops that explicitly request it
+remark: <unknown>:0:0: loop not vectorized: only vectorizing loops that explicitly request it
+remark: <unknown>:0:0: loop not vectorized: only vectorizing loops that explicitly request it
+remark: <unknown>:0:0: loop not vectorized: only vectorizing loops that explicitly request it
+remark: <unknown>:0:0: loop not vectorized: only vectorizing loops that explicitly request it
+remark: <unknown>:0:0: loop not vectorized: only vectorizing loops that explicitly request it
+remark: <unknown>:0:0: loop not vectorized: only vectorizing loops that explicitly request it
+remark: <unknown>:0:0: loop not vectorized: only vectorizing loops that explicitly request it
+remark: <unknown>:0:0: loop not vectorized: only vectorizing loops that explicitly request it
+remark: <unknown>:0:0: loop not vectorized: only vectorizing loops that explicitly request it
+remark: <unknown>:0:0: loop not vectorized: only vectorizing loops that explicitly request it
+remark: <unknown>:0:0: loop not vectorized: only vectorizing loops that explicitly request it
+remark: <unknown>:0:0: loop not vectorized: only vectorizing loops that explicitly request it
+remark: <unknown>:0:0: loop not vectorized: only vectorizing loops that explicitly request it
+remark: <unknown>:0:0: loop not vectorized: only vectorizing loops that explicitly request it
+remark: <unknown>:0:0: loop not vectorized: only vectorizing loops that explicitly request it
+remark: <unknown>:0:0: loop not vectorized: only vectorizing loops that explicitly request it
+remark: <unknown>:0:0: loop not vectorized: only vectorizing loops that explicitly request it
+remark: <unknown>:0:0: loop not vectorized: only vectorizing loops that explicitly request it
+remark: <unknown>:0:0: loop not vectorized: only vectorizing loops that explicitly request it
+remark: <unknown>:0:0: loop not vectorized: only vectorizing loops that explicitly request it
+remark: <unknown>:0:0: loop not vectorized: only vectorizing loops that explicitly request it
+remark: <unknown>:0:0: loop not vectorized: only vectorizing loops that explicitly request it
+remark: <unknown>:0:0: loop not vectorized: only vectorizing loops that explicitly request it
+remark: <unknown>:0:0: loop not vectorized: only vectorizing loops that explicitly request it
+remark: <unknown>:0:0: loop not vectorized: only vectorizing loops that explicitly request it
+remark: <unknown>:0:0: loop not vectorized: only vectorizing loops that explicitly request it
+remark: <unknown>:0:0: loop not vectorized: only vectorizing loops that explicitly request it
+remark: <unknown>:0:0: loop not vectorized: only vectorizing loops that explicitly request it
+remark: <unknown>:0:0: loop not vectorized: only vectorizing loops that explicitly request it
+remark: <unknown>:0:0: loop not vectorized: only vectorizing loops that explicitly request it
+remark: <unknown>:0:0: loop not vectorized: only vectorizing loops that explicitly request it
+remark: <unknown>:0:0: loop not vectorized: only vectorizing loops that explicitly request it
+remark: <unknown>:0:0: loop not vectorized: only vectorizing loops that explicitly request it
+remark: <unknown>:0:0: loop not vectorized: only vectorizing loops that explicitly request it
+remark: <unknown>:0:0: loop not vectorized: only vectorizing loops that explicitly request it
+remark: <unknown>:0:0: loop not vectorized: only vectorizing loops that explicitly request it
+remark: <unknown>:0:0: loop not vectorized: only vectorizing loops that explicitly request it
+remark: <unknown>:0:0: loop not vectorized: only vectorizing loops that explicitly request it
+remark: <unknown>:0:0: loop not vectorized: only vectorizing loops that explicitly request it
+remark: <unknown>:0:0: loop not vectorized: only vectorizing loops that explicitly request it
+remark: <unknown>:0:0: loop not vectorized: only vectorizing loops that explicitly request it
+remark: <unknown>:0:0: loop not vectorized: only vectorizing loops that explicitly request it
+remark: <unknown>:0:0: loop not vectorized: only vectorizing loops that explicitly request it
+remark: <unknown>:0:0: loop not vectorized: only vectorizing loops that explicitly request it
+remark: <unknown>:0:0: loop not vectorized: only vectorizing loops that explicitly request it
+remark: <unknown>:0:0: loop not vectorized: only vectorizing loops that explicitly request it
+remark: <unknown>:0:0: loop not vectorized: only vectorizing loops that explicitly request it
+remark: <unknown>:0:0: loop not vectorized: only vectorizing loops that explicitly request it
+remark: <unknown>:0:0: loop not vectorized: only vectorizing loops that explicitly request it
+remark: <unknown>:0:0: loop not vectorized: only vectorizing loops that explicitly request it
+remark: <unknown>:0:0: loop not vectorized: only vectorizing loops that explicitly request it
+remark: <unknown>:0:0: loop not vectorized: only vectorizing loops that explicitly request it
+remark: <unknown>:0:0: loop not vectorized: only vectorizing loops that explicitly request it
+remark: <unknown>:0:0: loop not vectorized: only vectorizing loops that explicitly request it
+remark: <unknown>:0:0: loop not vectorized: only vectorizing loops that explicitly request it
+remark: <unknown>:0:0: loop not vectorized: only vectorizing loops that explicitly request it
+remark: <unknown>:0:0: loop not vectorized: only vectorizing loops that explicitly request it
+remark: <unknown>:0:0: loop not vectorized: only vectorizing loops that explicitly request it
+remark: <unknown>:0:0: loop not vectorized: only vectorizing loops that explicitly request it
+remark: <unknown>:0:0: loop not vectorized: only vectorizing loops that explicitly request it
+remark: <unknown>:0:0: loop not vectorized: only vectorizing loops that explicitly request it
+remark: <unknown>:0:0: loop not vectorized: only vectorizing loops that explicitly request it
+remark: <unknown>:0:0: loop not vectorized: only vectorizing loops that explicitly request it
+remark: <unknown>:0:0: loop not vectorized: only vectorizing loops that explicitly request it
+remark: <unknown>:0:0: loop not vectorized: only vectorizing loops that explicitly request it
+remark: <unknown>:0:0: loop not vectorized: only vectorizing loops that explicitly request it
+remark: <unknown>:0:0: loop not vectorized: only vectorizing loops that explicitly request it
+remark: <unknown>:0:0: loop not vectorized: only vectorizing loops that explicitly request it
+remark: <unknown>:0:0: loop not vectorized: only vectorizing loops that explicitly request it
+remark: <unknown>:0:0: loop not vectorized: only vectorizing loops that explicitly request it
+remark: <unknown>:0:0: loop not vectorized: only vectorizing loops that explicitly request it
+remark: <unknown>:0:0: loop not vectorized: only vectorizing loops that explicitly request it
+remark: <unknown>:0:0: loop not vectorized: only vectorizing loops that explicitly request it
+remark: <unknown>:0:0: loop not vectorized: only vectorizing loops that explicitly request it
+remark: <unknown>:0:0: loop not vectorized: only vectorizing loops that explicitly request it
+remark: <unknown>:0:0: loop not vectorized: only vectorizing loops that explicitly request it
+remark: <unknown>:0:0: loop not vectorized: only vectorizing loops that explicitly request it
+remark: <unknown>:0:0: loop not vectorized: only vectorizing loops that explicitly request it
+remark: <unknown>:0:0: loop not vectorized: only vectorizing loops that explicitly request it
+remark: <unknown>:0:0: loop not vectorized: only vectorizing loops that explicitly request it
+remark: <unknown>:0:0: loop not vectorized: only vectorizing loops that explicitly request it
+remark: <unknown>:0:0: loop not vectorized: only vectorizing loops that explicitly request it
+remark: <unknown>:0:0: loop not vectorized: only vectorizing loops that explicitly request it
+remark: <unknown>:0:0: loop not vectorized: only vectorizing loops that explicitly request it
+remark: <unknown>:0:0: loop not vectorized: only vectorizing loops that explicitly request it
+remark: <unknown>:0:0: loop not vectorized: only vectorizing loops that explicitly request it
+remark: <unknown>:0:0: loop not vectorized: only vectorizing loops that explicitly request it
+remark: <unknown>:0:0: loop not vectorized: only vectorizing loops that explicitly request it
+remark: <unknown>:0:0: loop not vectorized: only vectorizing loops that explicitly request it
+remark: <unknown>:0:0: loop not vectorized: only vectorizing loops that explicitly request it
+remark: <unknown>:0:0: loop not vectorized: only vectorizing loops that explicitly request it
+remark: <unknown>:0:0: loop not vectorized: only vectorizing loops that explicitly request it
+remark: <unknown>:0:0: loop not vectorized: only vectorizing loops that explicitly request it
+remark: <unknown>:0:0: loop not vectorized: only vectorizing loops that explicitly request it
+
+Build succeeded.
+icpx -fsycl -fsycl-targets=spir64 -fsycl-device-code-split=per_kernel -O2 -std=c++20 -fno-fast-math -ffp-contract=fast -fno-math-errno -Iinclude -Isrc -Ixe2 -c src/moe_kernels.cpp -o obj/moe_kernels.o
+Compilation from IR - skipping loading of FCL
+Build succeeded.
+icpx -fsycl -fsycl-targets=spir64 -fsycl-device-code-split=per_kernel -O2 -std=c++20 -fno-fast-math -ffp-contract=fast -fno-math-errno -Iinclude -Isrc -Ixe2 -c src/tiered_moe.cpp -o obj/tiered_moe.o
+icpx -fsycl -fsycl-targets=spir64 -fsycl-device-code-split=per_kernel -O2 -std=c++20 -fno-fast-math -ffp-contract=fast -fno-math-errno -Iinclude -Isrc -Ixe2 -c src/cpu_experts.cpp -o obj/cpu_experts.o
+Compilation from IR - skipping loading of FCL
+Build succeeded.
+icpx -fsycl -fsycl-targets=spir64 -fsycl-device-code-split=per_kernel -O2 -std=c++20 -fno-fast-math -ffp-contract=fast -fno-math-errno -Iinclude -Isrc -Ixe2 -c src/moe_ref.cpp -o obj/moe_ref.o
+Compilation from IR - skipping loading of FCL
+Build succeeded.
+icpx -fsycl -fsycl-targets=spir64 -fsycl-device-code-split=per_kernel -O2 -std=c++20 -fno-fast-math -ffp-contract=fast -fno-math-errno -Iinclude -Isrc -Ixe2 -c src/ops.cpp -o obj/ops.o
+icpx -fsycl -fsycl-targets=spir64 -fsycl-device-code-split=per_kernel -O2 -std=c++20 -fno-fast-math -ffp-contract=fast -fno-math-errno -Iinclude -Isrc -Ixe2 -c src/prefill.cpp -o obj/prefill.o
+src/prefill.cpp:2850:16: warning: 'barrier' is deprecated: use sycl::group_barrier() free function instead [-Wdeprecated-declarations]
+ 2850 |             it.barrier(sycl::access::fence_space::local_space);
+      |                ^
+/opt/intel/oneapi/compiler/2026.2/bin/compiler/../../include/sycl/nd_item.hpp:214:3: note: 'barrier' has been explicitly marked deprecated here
+  214 |   __SYCL2020_DEPRECATED("use sycl::group_barrier() free function instead")
+      |   ^
+/opt/intel/oneapi/compiler/2026.2/bin/compiler/../../include/sycl/detail/defines_elementary.hpp:75:40: note: expanded from macro '__SYCL2020_DEPRECATED'
+   75 | #define __SYCL2020_DEPRECATED(message) __SYCL_DEPRECATED(message)
+      |                                        ^
+/opt/intel/oneapi/compiler/2026.2/bin/compiler/../../include/sycl/detail/defines_elementary.hpp:66:38: note: expanded from macro '__SYCL_DEPRECATED'
+   66 | #define __SYCL_DEPRECATED(message) [[deprecated(message)]]
+      |                                      ^
+src/prefill.cpp:2860:16: warning: 'barrier' is deprecated: use sycl::group_barrier() free function instead [-Wdeprecated-declarations]
+ 2860 |             it.barrier(sycl::access::fence_space::local_space);
+      |                ^
+/opt/intel/oneapi/compiler/2026.2/bin/compiler/../../include/sycl/nd_item.hpp:214:3: note: 'barrier' has been explicitly marked deprecated here
+  214 |   __SYCL2020_DEPRECATED("use sycl::group_barrier() free function instead")
+      |   ^
+/opt/intel/oneapi/compiler/2026.2/bin/compiler/../../include/sycl/detail/defines_elementary.hpp:75:40: note: expanded from macro '__SYCL2020_DEPRECATED'
+   75 | #define __SYCL2020_DEPRECATED(message) __SYCL_DEPRECATED(message)
+      |                                        ^
+/opt/intel/oneapi/compiler/2026.2/bin/compiler/../../include/sycl/detail/defines_elementary.hpp:66:38: note: expanded from macro '__SYCL_DEPRECATED'
+   66 | #define __SYCL_DEPRECATED(message) [[deprecated(message)]]
+      |                                      ^
+src/prefill.cpp:2870:16: warning: 'barrier' is deprecated: use sycl::group_barrier() free function instead [-Wdeprecated-declarations]
+ 2870 |             it.barrier(sycl::access::fence_space::local_space);
+      |                ^
+/opt/intel/oneapi/compiler/2026.2/bin/compiler/../../include/sycl/nd_item.hpp:214:3: note: 'barrier' has been explicitly marked deprecated here
+  214 |   __SYCL2020_DEPRECATED("use sycl::group_barrier() free function instead")
+      |   ^
+/opt/intel/oneapi/compiler/2026.2/bin/compiler/../../include/sycl/detail/defines_elementary.hpp:75:40: note: expanded from macro '__SYCL2020_DEPRECATED'
+   75 | #define __SYCL2020_DEPRECATED(message) __SYCL_DEPRECATED(message)
+      |                                        ^
+/opt/intel/oneapi/compiler/2026.2/bin/compiler/../../include/sycl/detail/defines_elementary.hpp:66:38: note: expanded from macro '__SYCL_DEPRECATED'
+   66 | #define __SYCL_DEPRECATED(message) [[deprecated(message)]]
+      |                                      ^
+src/prefill.cpp:2882:16: warning: 'barrier' is deprecated: use sycl::group_barrier() free function instead [-Wdeprecated-declarations]
+ 2882 |             it.barrier(sycl::access::fence_space::local_space);
+      |                ^
+/opt/intel/oneapi/compiler/2026.2/bin/compiler/../../include/sycl/nd_item.hpp:214:3: note: 'barrier' has been explicitly marked deprecated here
+  214 |   __SYCL2020_DEPRECATED("use sycl::group_barrier() free function instead")
+      |   ^
+/opt/intel/oneapi/compiler/2026.2/bin/compiler/../../include/sycl/detail/defines_elementary.hpp:75:40: note: expanded from macro '__SYCL2020_DEPRECATED'
+   75 | #define __SYCL2020_DEPRECATED(message) __SYCL_DEPRECATED(message)
+      |                                        ^
+/opt/intel/oneapi/compiler/2026.2/bin/compiler/../../include/sycl/detail/defines_elementary.hpp:66:38: note: expanded from macro '__SYCL_DEPRECATED'
+   66 | #define __SYCL_DEPRECATED(message) [[deprecated(message)]]
+      |                                      ^
+4 warnings generated.
+src/prefill.cpp:2850:16: warning: 'barrier' is deprecated: use sycl::group_barrier() free function instead [-Wdeprecated-declarations]
+ 2850 |             it.barrier(sycl::access::fence_space::local_space);
+      |                ^
+/opt/intel/oneapi/compiler/2026.2/bin/compiler/../../include/sycl/nd_item.hpp:214:3: note: 'barrier' has been explicitly marked deprecated here
+  214 |   __SYCL2020_DEPRECATED("use sycl::group_barrier() free function instead")
+      |   ^
+/opt/intel/oneapi/compiler/2026.2/bin/compiler/../../include/sycl/detail/defines_elementary.hpp:75:40: note: expanded from macro '__SYCL2020_DEPRECATED'
+   75 | #define __SYCL2020_DEPRECATED(message) __SYCL_DEPRECATED(message)
+      |                                        ^
+/opt/intel/oneapi/compiler/2026.2/bin/compiler/../../include/sycl/detail/defines_elementary.hpp:66:38: note: expanded from macro '__SYCL_DEPRECATED'
+   66 | #define __SYCL_DEPRECATED(message) [[deprecated(message)]]
+      |                                      ^
+src/prefill.cpp:2860:16: warning: 'barrier' is deprecated: use sycl::group_barrier() free function instead [-Wdeprecated-declarations]
+ 2860 |             it.barrier(sycl::access::fence_space::local_space);
+      |                ^
+/opt/intel/oneapi/compiler/2026.2/bin/compiler/../../include/sycl/nd_item.hpp:214:3: note: 'barrier' has been explicitly marked deprecated here
+  214 |   __SYCL2020_DEPRECATED("use sycl::group_barrier() free function instead")
+      |   ^
+/opt/intel/oneapi/compiler/2026.2/bin/compiler/../../include/sycl/detail/defines_elementary.hpp:75:40: note: expanded from macro '__SYCL2020_DEPRECATED'
+   75 | #define __SYCL2020_DEPRECATED(message) __SYCL_DEPRECATED(message)
+      |                                        ^
+/opt/intel/oneapi/compiler/2026.2/bin/compiler/../../include/sycl/detail/defines_elementary.hpp:66:38: note: expanded from macro '__SYCL_DEPRECATED'
+   66 | #define __SYCL_DEPRECATED(message) [[deprecated(message)]]
+      |                                      ^
+src/prefill.cpp:2870:16: warning: 'barrier' is deprecated: use sycl::group_barrier() free function instead [-Wdeprecated-declarations]
+ 2870 |             it.barrier(sycl::access::fence_space::local_space);
+      |                ^
+/opt/intel/oneapi/compiler/2026.2/bin/compiler/../../include/sycl/nd_item.hpp:214:3: note: 'barrier' has been explicitly marked deprecated here
+  214 |   __SYCL2020_DEPRECATED("use sycl::group_barrier() free function instead")
+      |   ^
+/opt/intel/oneapi/compiler/2026.2/bin/compiler/../../include/sycl/detail/defines_elementary.hpp:75:40: note: expanded from macro '__SYCL2020_DEPRECATED'
+   75 | #define __SYCL2020_DEPRECATED(message) __SYCL_DEPRECATED(message)
+      |                                        ^
+/opt/intel/oneapi/compiler/2026.2/bin/compiler/../../include/sycl/detail/defines_elementary.hpp:66:38: note: expanded from macro '__SYCL_DEPRECATED'
+   66 | #define __SYCL_DEPRECATED(message) [[deprecated(message)]]
+      |                                      ^
+src/prefill.cpp:2882:16: warning: 'barrier' is deprecated: use sycl::group_barrier() free function instead [-Wdeprecated-declarations]
+ 2882 |             it.barrier(sycl::access::fence_space::local_space);
+      |                ^
+/opt/intel/oneapi/compiler/2026.2/bin/compiler/../../include/sycl/nd_item.hpp:214:3: note: 'barrier' has been explicitly marked deprecated here
+  214 |   __SYCL2020_DEPRECATED("use sycl::group_barrier() free function instead")
+      |   ^
+/opt/intel/oneapi/compiler/2026.2/bin/compiler/../../include/sycl/detail/defines_elementary.hpp:75:40: note: expanded from macro '__SYCL2020_DEPRECATED'
+   75 | #define __SYCL2020_DEPRECATED(message) __SYCL_DEPRECATED(message)
+      |                                        ^
+/opt/intel/oneapi/compiler/2026.2/bin/compiler/../../include/sycl/detail/defines_elementary.hpp:66:38: note: expanded from macro '__SYCL_DEPRECATED'
+   66 | #define __SYCL_DEPRECATED(message) [[deprecated(message)]]
+      |                                      ^
+Compilation from IR - skipping loading of FCL
+
+warning: in kernel 'typeinfo name for sycl::_V1::event b70::(anonymous namespace)::dn_chunk_main<64, true>(sycl::_V1::queue&, b70::DeltaNetPrefillParams const&, float const*, std::vector<sycl::_V1::event, std::allocator<sycl::_V1::event>> const&)::'lambda'(sycl::_V1::handler&)::operator()(sycl::_V1::handler&) const::'lambda'(sycl::_V1::nd_item<1>)': [RetryManager] Start recompilation of the kernel
+
+warning: in kernel 'typeinfo name for sycl::_V1::event b70::(anonymous namespace)::dn_chunk_main<128, true>(sycl::_V1::queue&, b70::DeltaNetPrefillParams const&, float const*, std::vector<sycl::_V1::event, std::allocator<sycl::_V1::event>> const&)::'lambda'(sycl::_V1::handler&)::operator()(sycl::_V1::handler&) const::'lambda'(sycl::_V1::nd_item<1>)': compiled SIMD16 allocated 256 regs and spilled around 23
+
+warning: in kernel 'typeinfo name for sycl::_V1::event b70::(anonymous namespace)::dn_chunk_main<128, false>(sycl::_V1::queue&, b70::DeltaNetPrefillParams const&, float const*, std::vector<sycl::_V1::event, std::allocator<sycl::_V1::event>> const&)::'lambda'(sycl::_V1::handler&)::operator()(sycl::_V1::handler&) const::'lambda'(sycl::_V1::nd_item<1>)': compiled SIMD16 allocated 256 regs and spilled around 14
+
+Build succeeded.
+icpx -fsycl -fsycl-targets=spir64 -fsycl-device-code-split=per_kernel -O2 -std=c++20 -fno-fast-math -ffp-contract=fast -fno-math-errno -Iinclude -Isrc -Ixe2 -c src/tokenizer.cpp -o obj/tokenizer.o
+icpx -fsycl -fsycl-targets=spir64 -fsycl-device-code-split=per_kernel -O2 -std=c++20 -fno-fast-math -ffp-contract=fast -fno-math-errno -Iinclude -Isrc -Ixe2 -c src/qfn_small_moe.cpp -o obj/qfn_small_moe.o
+4 warnings generated.
+icpx -fsycl -fsycl-targets=spir64 -fsycl-device-code-split=per_kernel -O2 -std=c++20 -fno-fast-math -ffp-contract=fast -fno-math-errno -Iinclude -Isrc -Ixe2 -c src/gemm_fast.cpp -o obj/gemm_fast.o
+icpx -fsycl -fsycl-targets=spir64 -fsycl-device-code-split=per_kernel -O2 -std=c++20 -fno-fast-math -ffp-contract=fast -fno-math-errno -Iinclude -Isrc -Ixe2 -c tools/grimoire_main.cpp -o obj/grimoire_main.o
+icpx -fsycl -fsycl-targets=spir64 -fsycl-device-code-split=per_kernel -O2 -std=c++20 -fno-fast-math -ffp-contract=fast -fno-math-errno -Iinclude -Isrc -Ixe2 -DCUTLASS_ENABLE_HEADERS_ONLY -DCUTLASS_ENABLE_SYCL -DSYCL_INTEL_TARGET -DCUTLASS_VERSIONS_GENERATED \
+  -isystem /home/haxor/AI/GRIMOIRE-qfn-qgate/diagnostics/act-xe2-O5gnlh/sycl-tla/include -isystem /home/haxor/AI/GRIMOIRE-qfn-qgate/diagnostics/act-xe2-O5gnlh/sycl-tla/tools/util/include -isystem /home/haxor/AI/GRIMOIRE-qfn-qgate/diagnostics/act-xe2-O5gnlh/sycl-tla/applications \
+  -isystem xe2/qualified -c xe2/bench.cpp -o obj/xe2-bench.o
+src/gemm_fast.cpp:1028:20: warning: 'barrier' is deprecated: use sycl::group_barrier() free function instead [-Wdeprecated-declarations]
+ 1028 |                 it.barrier(sycl::access::fence_space::local_space);
+      |                    ^
+/opt/intel/oneapi/compiler/2026.2/bin/compiler/../../include/sycl/nd_item.hpp:214:3: note: 'barrier' has been explicitly marked deprecated here
+  214 |   __SYCL2020_DEPRECATED("use sycl::group_barrier() free function instead")
+      |   ^
+/opt/intel/oneapi/compiler/2026.2/bin/compiler/../../include/sycl/detail/defines_elementary.hpp:75:40: note: expanded from macro '__SYCL2020_DEPRECATED'
+   75 | #define __SYCL2020_DEPRECATED(message) __SYCL_DEPRECATED(message)
+      |                                        ^
+/opt/intel/oneapi/compiler/2026.2/bin/compiler/../../include/sycl/detail/defines_elementary.hpp:66:38: note: expanded from macro '__SYCL_DEPRECATED'
+   66 | #define __SYCL_DEPRECATED(message) [[deprecated(message)]]
+      |                                      ^
+src/gemm_fast.cpp:1060:20: warning: 'barrier' is deprecated: use sycl::group_barrier() free function instead [-Wdeprecated-declarations]
+ 1060 |                 it.barrier(sycl::access::fence_space::local_space);
+      |                    ^
+/opt/intel/oneapi/compiler/2026.2/bin/compiler/../../include/sycl/nd_item.hpp:214:3: note: 'barrier' has been explicitly marked deprecated here
+  214 |   __SYCL2020_DEPRECATED("use sycl::group_barrier() free function instead")
+      |   ^
+/opt/intel/oneapi/compiler/2026.2/bin/compiler/../../include/sycl/detail/defines_elementary.hpp:75:40: note: expanded from macro '__SYCL2020_DEPRECATED'
+   75 | #define __SYCL2020_DEPRECATED(message) __SYCL_DEPRECATED(message)
+      |                                        ^
+/opt/intel/oneapi/compiler/2026.2/bin/compiler/../../include/sycl/detail/defines_elementary.hpp:66:38: note: expanded from macro '__SYCL_DEPRECATED'
+   66 | #define __SYCL_DEPRECATED(message) [[deprecated(message)]]
+      |                                      ^
+src/gemm_fast.cpp:1028:20: warning: 'barrier' is deprecated: use sycl::group_barrier() free function instead [-Wdeprecated-declarations]
+ 1028 |                 it.barrier(sycl::access::fence_space::local_space);
+      |                    ^
+src/gemm_fast.cpp:1019:108: note: while substituting into a lambda expression here
+ 1019 |             h.parallel_for(sycl::nd_range<1>(size_t(KVH) * (Sp / TK) * 256, 256), [=](sycl::nd_item<1> it) {
+      |                                                                                                            ^
+src/gemm_fast.cpp:1016:44: note: while substituting into a lambda expression here
+ 1016 |         e = q.submit([&](sycl::handler& h) {
+      |                                            ^
+src/gemm_fast.cpp:1355:11: note: in instantiation of function template specialization 'b70::(anonymous namespace)::flash_fast_impl<128>' requested here
+ 1355 |         ? flash_fast_impl<128>(q, qv, k_cache, v_cache, out, tokens, start_pos, num_heads,
+      |           ^
+/opt/intel/oneapi/compiler/2026.2/bin/compiler/../../include/sycl/nd_item.hpp:214:3: note: 'barrier' has been explicitly marked deprecated here
+  214 |   __SYCL2020_DEPRECATED("use sycl::group_barrier() free function instead")
+      |   ^
+/opt/intel/oneapi/compiler/2026.2/bin/compiler/../../include/sycl/detail/defines_elementary.hpp:75:40: note: expanded from macro '__SYCL2020_DEPRECATED'
+   75 | #define __SYCL2020_DEPRECATED(message) __SYCL_DEPRECATED(message)
+      |                                        ^
+/opt/intel/oneapi/compiler/2026.2/bin/compiler/../../include/sycl/detail/defines_elementary.hpp:66:38: note: expanded from macro '__SYCL_DEPRECATED'
+   66 | #define __SYCL_DEPRECATED(message) [[deprecated(message)]]
+      |                                      ^
+src/gemm_fast.cpp:1060:20: warning: 'barrier' is deprecated: use sycl::group_barrier() free function instead [-Wdeprecated-declarations]
+ 1060 |                 it.barrier(sycl::access::fence_space::local_space);
+      |                    ^
+src/gemm_fast.cpp:1042:108: note: while substituting into a lambda expression here
+ 1042 |             h.parallel_for(sycl::nd_range<1>(size_t(KVH) * (Sp / TK) * 256, 256), [=](sycl::nd_item<1> it) {
+      |                                                                                                            ^
+src/gemm_fast.cpp:1039:44: note: while substituting into a lambda expression here
+ 1039 |         e = q.submit([&](sycl::handler& h) {
+      |                                            ^
+src/gemm_fast.cpp:1355:11: note: in instantiation of function template specialization 'b70::(anonymous namespace)::flash_fast_impl<128>' requested here
+ 1355 |         ? flash_fast_impl<128>(q, qv, k_cache, v_cache, out, tokens, start_pos, num_heads,
+      |           ^
+/opt/intel/oneapi/compiler/2026.2/bin/compiler/../../include/sycl/nd_item.hpp:214:3: note: 'barrier' has been explicitly marked deprecated here
+  214 |   __SYCL2020_DEPRECATED("use sycl::group_barrier() free function instead")
+      |   ^
+/opt/intel/oneapi/compiler/2026.2/bin/compiler/../../include/sycl/detail/defines_elementary.hpp:75:40: note: expanded from macro '__SYCL2020_DEPRECATED'
+   75 | #define __SYCL2020_DEPRECATED(message) __SYCL_DEPRECATED(message)
+      |                                        ^
+/opt/intel/oneapi/compiler/2026.2/bin/compiler/../../include/sycl/detail/defines_elementary.hpp:66:38: note: expanded from macro '__SYCL_DEPRECATED'
+   66 | #define __SYCL_DEPRECATED(message) [[deprecated(message)]]
+      |                                      ^
+src/gemm_fast.cpp:1028:20: warning: 'barrier' is deprecated: use sycl::group_barrier() free function instead [-Wdeprecated-declarations]
+ 1028 |                 it.barrier(sycl::access::fence_space::local_space);
+      |                    ^
+src/gemm_fast.cpp:1019:108: note: while substituting into a lambda expression here
+ 1019 |             h.parallel_for(sycl::nd_range<1>(size_t(KVH) * (Sp / TK) * 256, 256), [=](sycl::nd_item<1> it) {
+      |                                                                                                            ^
+src/gemm_fast.cpp:1016:44: note: while substituting into a lambda expression here
+ 1016 |         e = q.submit([&](sycl::handler& h) {
+      |                                            ^
+src/gemm_fast.cpp:1357:11: note: in instantiation of function template specialization 'b70::(anonymous namespace)::flash_fast_impl<256>' requested here
+ 1357 |         : flash_fast_impl<256>(q, qv, k_cache, v_cache, out, tokens, start_pos, num_heads,
+      |           ^
+/opt/intel/oneapi/compiler/2026.2/bin/compiler/../../include/sycl/nd_item.hpp:214:3: note: 'barrier' has been explicitly marked deprecated here
+  214 |   __SYCL2020_DEPRECATED("use sycl::group_barrier() free function instead")
+      |   ^
+/opt/intel/oneapi/compiler/2026.2/bin/compiler/../../include/sycl/detail/defines_elementary.hpp:75:40: note: expanded from macro '__SYCL2020_DEPRECATED'
+   75 | #define __SYCL2020_DEPRECATED(message) __SYCL_DEPRECATED(message)
+      |                                        ^
+/opt/intel/oneapi/compiler/2026.2/bin/compiler/../../include/sycl/detail/defines_elementary.hpp:66:38: note: expanded from macro '__SYCL_DEPRECATED'
+   66 | #define __SYCL_DEPRECATED(message) [[deprecated(message)]]
+      |                                      ^
+src/gemm_fast.cpp:1060:20: warning: 'barrier' is deprecated: use sycl::group_barrier() free function instead [-Wdeprecated-declarations]
+ 1060 |                 it.barrier(sycl::access::fence_space::local_space);
+      |                    ^
+src/gemm_fast.cpp:1042:108: note: while substituting into a lambda expression here
+ 1042 |             h.parallel_for(sycl::nd_range<1>(size_t(KVH) * (Sp / TK) * 256, 256), [=](sycl::nd_item<1> it) {
+      |                                                                                                            ^
+src/gemm_fast.cpp:1039:44: note: while substituting into a lambda expression here
+ 1039 |         e = q.submit([&](sycl::handler& h) {
+      |                                            ^
+src/gemm_fast.cpp:1357:11: note: in instantiation of function template specialization 'b70::(anonymous namespace)::flash_fast_impl<256>' requested here
+ 1357 |         : flash_fast_impl<256>(q, qv, k_cache, v_cache, out, tokens, start_pos, num_heads,
+      |           ^
+/opt/intel/oneapi/compiler/2026.2/bin/compiler/../../include/sycl/nd_item.hpp:214:3: note: 'barrier' has been explicitly marked deprecated here
+  214 |   __SYCL2020_DEPRECATED("use sycl::group_barrier() free function instead")
+      |   ^
+/opt/intel/oneapi/compiler/2026.2/bin/compiler/../../include/sycl/detail/defines_elementary.hpp:75:40: note: expanded from macro '__SYCL2020_DEPRECATED'
+   75 | #define __SYCL2020_DEPRECATED(message) __SYCL_DEPRECATED(message)
+      |                                        ^
+/opt/intel/oneapi/compiler/2026.2/bin/compiler/../../include/sycl/detail/defines_elementary.hpp:66:38: note: expanded from macro '__SYCL_DEPRECATED'
+   66 | #define __SYCL_DEPRECATED(message) [[deprecated(message)]]
+      |                                      ^
+6 warnings generated.
+src/gemm_fast.cpp:1028:20: warning: 'barrier' is deprecated: use sycl::group_barrier() free function instead [-Wdeprecated-declarations]
+ 1028 |                 it.barrier(sycl::access::fence_space::local_space);
+      |                    ^
+/opt/intel/oneapi/compiler/2026.2/bin/compiler/../../include/sycl/nd_item.hpp:214:3: note: 'barrier' has been explicitly marked deprecated here
+  214 |   __SYCL2020_DEPRECATED("use sycl::group_barrier() free function instead")
+      |   ^
+/opt/intel/oneapi/compiler/2026.2/bin/compiler/../../include/sycl/detail/defines_elementary.hpp:75:40: note: expanded from macro '__SYCL2020_DEPRECATED'
+   75 | #define __SYCL2020_DEPRECATED(message) __SYCL_DEPRECATED(message)
+      |                                        ^
+/opt/intel/oneapi/compiler/2026.2/bin/compiler/../../include/sycl/detail/defines_elementary.hpp:66:38: note: expanded from macro '__SYCL_DEPRECATED'
+   66 | #define __SYCL_DEPRECATED(message) [[deprecated(message)]]
+      |                                      ^
+src/gemm_fast.cpp:1060:20: warning: 'barrier' is deprecated: use sycl::group_barrier() free function instead [-Wdeprecated-declarations]
+ 1060 |                 it.barrier(sycl::access::fence_space::local_space);
+      |                    ^
+/opt/intel/oneapi/compiler/2026.2/bin/compiler/../../include/sycl/nd_item.hpp:214:3: note: 'barrier' has been explicitly marked deprecated here
+  214 |   __SYCL2020_DEPRECATED("use sycl::group_barrier() free function instead")
+      |   ^
+/opt/intel/oneapi/compiler/2026.2/bin/compiler/../../include/sycl/detail/defines_elementary.hpp:75:40: note: expanded from macro '__SYCL2020_DEPRECATED'
+   75 | #define __SYCL2020_DEPRECATED(message) __SYCL_DEPRECATED(message)
+      |                                        ^
+/opt/intel/oneapi/compiler/2026.2/bin/compiler/../../include/sycl/detail/defines_elementary.hpp:66:38: note: expanded from macro '__SYCL_DEPRECATED'
+   66 | #define __SYCL_DEPRECATED(message) [[deprecated(message)]]
+      |                                      ^
+src/gemm_fast.cpp:1028:20: warning: 'barrier' is deprecated: use sycl::group_barrier() free function instead [-Wdeprecated-declarations]
+ 1028 |                 it.barrier(sycl::access::fence_space::local_space);
+      |                    ^
+src/gemm_fast.cpp:1019:108: note: while substituting into a lambda expression here
+ 1019 |             h.parallel_for(sycl::nd_range<1>(size_t(KVH) * (Sp / TK) * 256, 256), [=](sycl::nd_item<1> it) {
+      |                                                                                                            ^
+src/gemm_fast.cpp:1016:44: note: while substituting into a lambda expression here
+ 1016 |         e = q.submit([&](sycl::handler& h) {
+      |                                            ^
+src/gemm_fast.cpp:1355:11: note: in instantiation of function template specialization 'b70::(anonymous namespace)::flash_fast_impl<128>' requested here
+ 1355 |         ? flash_fast_impl<128>(q, qv, k_cache, v_cache, out, tokens, start_pos, num_heads,
+      |           ^
+/opt/intel/oneapi/compiler/2026.2/bin/compiler/../../include/sycl/nd_item.hpp:214:3: note: 'barrier' has been explicitly marked deprecated here
+  214 |   __SYCL2020_DEPRECATED("use sycl::group_barrier() free function instead")
+      |   ^
+/opt/intel/oneapi/compiler/2026.2/bin/compiler/../../include/sycl/detail/defines_elementary.hpp:75:40: note: expanded from macro '__SYCL2020_DEPRECATED'
+   75 | #define __SYCL2020_DEPRECATED(message) __SYCL_DEPRECATED(message)
+      |                                        ^
+/opt/intel/oneapi/compiler/2026.2/bin/compiler/../../include/sycl/detail/defines_elementary.hpp:66:38: note: expanded from macro '__SYCL_DEPRECATED'
+   66 | #define __SYCL_DEPRECATED(message) [[deprecated(message)]]
+      |                                      ^
+src/gemm_fast.cpp:1060:20: warning: 'barrier' is deprecated: use sycl::group_barrier() free function instead [-Wdeprecated-declarations]
+ 1060 |                 it.barrier(sycl::access::fence_space::local_space);
+      |                    ^
+src/gemm_fast.cpp:1042:108: note: while substituting into a lambda expression here
+ 1042 |             h.parallel_for(sycl::nd_range<1>(size_t(KVH) * (Sp / TK) * 256, 256), [=](sycl::nd_item<1> it) {
+      |                                                                                                            ^
+src/gemm_fast.cpp:1039:44: note: while substituting into a lambda expression here
+ 1039 |         e = q.submit([&](sycl::handler& h) {
+      |                                            ^
+src/gemm_fast.cpp:1355:11: note: in instantiation of function template specialization 'b70::(anonymous namespace)::flash_fast_impl<128>' requested here
+ 1355 |         ? flash_fast_impl<128>(q, qv, k_cache, v_cache, out, tokens, start_pos, num_heads,
+      |           ^
+/opt/intel/oneapi/compiler/2026.2/bin/compiler/../../include/sycl/nd_item.hpp:214:3: note: 'barrier' has been explicitly marked deprecated here
+  214 |   __SYCL2020_DEPRECATED("use sycl::group_barrier() free function instead")
+      |   ^
+/opt/intel/oneapi/compiler/2026.2/bin/compiler/../../include/sycl/detail/defines_elementary.hpp:75:40: note: expanded from macro '__SYCL2020_DEPRECATED'
+   75 | #define __SYCL2020_DEPRECATED(message) __SYCL_DEPRECATED(message)
+      |                                        ^
+/opt/intel/oneapi/compiler/2026.2/bin/compiler/../../include/sycl/detail/defines_elementary.hpp:66:38: note: expanded from macro '__SYCL_DEPRECATED'
+   66 | #define __SYCL_DEPRECATED(message) [[deprecated(message)]]
+      |                                      ^
+src/gemm_fast.cpp:1028:20: warning: 'barrier' is deprecated: use sycl::group_barrier() free function instead [-Wdeprecated-declarations]
+ 1028 |                 it.barrier(sycl::access::fence_space::local_space);
+      |                    ^
+src/gemm_fast.cpp:1019:108: note: while substituting into a lambda expression here
+ 1019 |             h.parallel_for(sycl::nd_range<1>(size_t(KVH) * (Sp / TK) * 256, 256), [=](sycl::nd_item<1> it) {
+      |                                                                                                            ^
+src/gemm_fast.cpp:1016:44: note: while substituting into a lambda expression here
+ 1016 |         e = q.submit([&](sycl::handler& h) {
+      |                                            ^
+src/gemm_fast.cpp:1357:11: note: in instantiation of function template specialization 'b70::(anonymous namespace)::flash_fast_impl<256>' requested here
+ 1357 |         : flash_fast_impl<256>(q, qv, k_cache, v_cache, out, tokens, start_pos, num_heads,
+      |           ^
+/opt/intel/oneapi/compiler/2026.2/bin/compiler/../../include/sycl/nd_item.hpp:214:3: note: 'barrier' has been explicitly marked deprecated here
+  214 |   __SYCL2020_DEPRECATED("use sycl::group_barrier() free function instead")
+      |   ^
+/opt/intel/oneapi/compiler/2026.2/bin/compiler/../../include/sycl/detail/defines_elementary.hpp:75:40: note: expanded from macro '__SYCL2020_DEPRECATED'
+   75 | #define __SYCL2020_DEPRECATED(message) __SYCL_DEPRECATED(message)
+      |                                        ^
+/opt/intel/oneapi/compiler/2026.2/bin/compiler/../../include/sycl/detail/defines_elementary.hpp:66:38: note: expanded from macro '__SYCL_DEPRECATED'
+   66 | #define __SYCL_DEPRECATED(message) [[deprecated(message)]]
+      |                                      ^
+src/gemm_fast.cpp:1060:20: warning: 'barrier' is deprecated: use sycl::group_barrier() free function instead [-Wdeprecated-declarations]
+ 1060 |                 it.barrier(sycl::access::fence_space::local_space);
+      |                    ^
+src/gemm_fast.cpp:1042:108: note: while substituting into a lambda expression here
+ 1042 |             h.parallel_for(sycl::nd_range<1>(size_t(KVH) * (Sp / TK) * 256, 256), [=](sycl::nd_item<1> it) {
+      |                                                                                                            ^
+src/gemm_fast.cpp:1039:44: note: while substituting into a lambda expression here
+ 1039 |         e = q.submit([&](sycl::handler& h) {
+      |                                            ^
+src/gemm_fast.cpp:1357:11: note: in instantiation of function template specialization 'b70::(anonymous namespace)::flash_fast_impl<256>' requested here
+ 1357 |         : flash_fast_impl<256>(q, qv, k_cache, v_cache, out, tokens, start_pos, num_heads,
+      |           ^
+/opt/intel/oneapi/compiler/2026.2/bin/compiler/../../include/sycl/nd_item.hpp:214:3: note: 'barrier' has been explicitly marked deprecated here
+  214 |   __SYCL2020_DEPRECATED("use sycl::group_barrier() free function instead")
+      |   ^
+/opt/intel/oneapi/compiler/2026.2/bin/compiler/../../include/sycl/detail/defines_elementary.hpp:75:40: note: expanded from macro '__SYCL2020_DEPRECATED'
+   75 | #define __SYCL2020_DEPRECATED(message) __SYCL_DEPRECATED(message)
+      |                                        ^
+/opt/intel/oneapi/compiler/2026.2/bin/compiler/../../include/sycl/detail/defines_elementary.hpp:66:38: note: expanded from macro '__SYCL_DEPRECATED'
+   66 | #define __SYCL_DEPRECATED(message) [[deprecated(message)]]
+      |                                      ^
+src/gemm_fast.cpp:145:66: warning: loop not unrolled: the optimizer was unable to perform the requested transformation; the transformation might be disabled or specified as part of an unsupported transformation ordering [-Wpass-failed=transform-warning]
+  145 |         h.parallel_for(sycl::range<2>(size_t(K / 2), size_t(N)), [=](sycl::id<2> id) {
+      |                                                                  ^
+7 warnings generated.
+icpx -fsycl -fsycl-targets=spir64 -fsycl-device-code-split=per_kernel -O2 -std=c++20 -fno-fast-math -ffp-contract=fast -fno-math-errno -Iinclude -Isrc -Ixe2 -Xspirv-translator -spirv-ext=+SPV_INTEL_split_barrier,+SPV_INTEL_2d_block_io,+SPV_INTEL_subgroup_matrix_multiply_accumulate -fsycl-max-parallel-link-jobs=4 obj/grimoire.o obj/qwen35_loader.o obj/native_model.o obj/safetensors.o obj/quantize.o obj/gptq.o obj/gemv_decode.o obj/gguf.o obj/gguf_decode.o obj/gguf_qwen35.o obj/gemm_xmx.o obj/attention.o obj/deltanet.o obj/moe_kernels.o obj/tiered_moe.o obj/cpu_experts.o obj/moe_ref.o obj/ops.o obj/prefill.o obj/tokenizer.o obj/qfn_small_moe.o obj/gemm_fast.o obj/grimoire_main.o obj/xe2-bench.o -pthread -L. -lgrimoire_gemm -lgrimoire_attn '-Wl,-rpath,$ORIGIN' -o qfn-combined
+fa1f94ac1ccdd941578ae24a185ad234030fe07982c8798cd576c8b0b4f61694  qfn-combined
+112e8b0cca1d3e4a37996e62eb14b482106dbcafb40f6d0b078d025d7dcb73e9  libgrimoire_attn.so
+55b9f1558a25632e33c91de10027c04500937cbc4f79a16047a091ffff40d445  libgrimoire_gemm.so
