@@ -1,0 +1,92 @@
+QFN TP prefill reduce rank=0 pos=0 rows=2048 kind=ple elems=5242880 calls=1 comm_ms=1.831 drain_ms=0.273 copy_ms=1.331 ready_ms=0.234 sum_ms=0.097 reuse_ms=0.067 gather_ms=0.101 peer_bytes=31457280
+QFN TP prefill reduce rank=0 pos=0 rows=2048 kind=deltanet elems=5242880 calls=36 comm_ms=66.172 drain_ms=0.011 copy_ms=48.752 ready_ms=7.888 sum_ms=3.502 reuse_ms=2.344 gather_ms=3.657 peer_bytes=1132462080
+QFN TP prefill reduce rank=0 pos=0 rows=2048 kind=attention elems=5242880 calls=12 comm_ms=21.791 drain_ms=0.005 copy_ms=15.872 ready_ms=2.821 sum_ms=1.096 reuse_ms=0.781 gather_ms=1.211 peer_bytes=377487360
+QFN TP prefill reduce rank=0 pos=0 rows=2048 kind=moe elems=5242880 calls=48 comm_ms=98.206 drain_ms=0.014 copy_ms=63.405 ready_ms=22.488 sum_ms=4.321 reuse_ms=3.129 gather_ms=4.826 peer_bytes=1509949440
+QFN TP prefill profile rank=0 pos=0 rows=2048 calls=97 grouped=48 span_ms=1192.519 communication_ms=187.999 routed_plan_ms=4.591 routed_device_ms=135.633 rest_ms=864.296
+QFN DN prefill profile: rank=0 rows=2048 qkv_ms=68.805 conv_norm_ms=45.204 gates_ms=0.554 scan_ms=12.142 z_ms=41.768 other_ms=979.910
+QFN TP prefill reduce rank=0 pos=2048 rows=658 kind=ple elems=1684480 calls=1 comm_ms=1.266 drain_ms=0.501 copy_ms=0.846 ready_ms=0.170 sum_ms=0.095 reuse_ms=0.154 gather_ms=0.000 peer_bytes=20213760
+QFN TP prefill reduce rank=0 pos=2048 rows=658 kind=deltanet elems=1684480 calls=36 comm_ms=49.036 drain_ms=0.012 copy_ms=30.344 ready_ms=11.730 sum_ms=3.651 reuse_ms=3.280 gather_ms=0.000 peer_bytes=727695360
+QFN TP prefill reduce rank=0 pos=2048 rows=658 kind=attention elems=1684480 calls=12 comm_ms=14.520 drain_ms=0.004 copy_ms=10.233 ready_ms=2.005 sum_ms=1.210 reuse_ms=1.061 gather_ms=0.000 peer_bytes=242565120
+QFN TP prefill reduce rank=0 pos=2048 rows=658 kind=moe elems=1684480 calls=48 comm_ms=118.865 drain_ms=0.015 copy_ms=40.214 ready_ms=68.603 sum_ms=5.126 reuse_ms=4.873 gather_ms=0.000 peer_bytes=970260480
+QFN TP prefill profile rank=0 pos=2048 rows=658 calls=97 grouped=48 span_ms=951.672 communication_ms=183.687 routed_plan_ms=2.218 routed_device_ms=381.552 rest_ms=384.215
+QFN DN prefill profile: rank=0 rows=658 qkv_ms=30.447 conv_norm_ms=13.394 gates_ms=0.634 scan_ms=3.115 z_ms=20.897 other_ms=846.694
+QFN MTP3 verify head: rank=0 pos=2706 rows=4 prepare_ms=0.061 head_ms=2.569 agreement_ms=0.015 draft_warm_ms=0.503
+QFN MTP3 verify head: rank=0 pos=2708 rows=4 prepare_ms=0.061 head_ms=2.562 agreement_ms=0.008 draft_warm_ms=0.501
+QFN MTP3 verify head: rank=0 pos=2709 rows=4 prepare_ms=0.065 head_ms=2.574 agreement_ms=0.004 draft_warm_ms=0.499
+QFN MTP3 verify head: rank=0 pos=2713 rows=4 prepare_ms=0.064 head_ms=2.564 agreement_ms=0.004 draft_warm_ms=0.499
+QFN MTP3 verify head: rank=0 pos=2716 rows=4 prepare_ms=0.063 head_ms=2.569 agreement_ms=0.011 draft_warm_ms=0.500
+QFN MTP3 verify head: rank=0 pos=2720 rows=4 prepare_ms=0.065 head_ms=2.551 agreement_ms=0.026 draft_warm_ms=0.498
+QFN MTP3 verify head: rank=0 pos=2724 rows=4 prepare_ms=0.065 head_ms=2.585 agreement_ms=0.006 draft_warm_ms=0.500
+QFN MTP3 verify head: rank=0 pos=2728 rows=4 prepare_ms=0.065 head_ms=2.559 agreement_ms=0.014 draft_warm_ms=0.498
+QFN MTP3 verify head: rank=0 pos=2729 rows=4 prepare_ms=0.063 head_ms=2.558 agreement_ms=0.019 draft_warm_ms=0.500
+QFN MTP3 verify head: rank=0 pos=2732 rows=4 prepare_ms=0.065 head_ms=2.564 agreement_ms=0.027 draft_warm_ms=0.498
+QFN MTP3 verify head: rank=0 pos=2734 rows=4 prepare_ms=0.065 head_ms=2.560 agreement_ms=0.013 draft_warm_ms=0.500
+QFN TP prefill reduce rank=1 pos=0 rows=2048 kind=ple elems=5242880 calls=1 comm_ms=4.670 drain_ms=0.482 copy_ms=1.385 ready_ms=3.029 sum_ms=0.089 reuse_ms=0.064 gather_ms=0.103 peer_bytes=31457280
+QFN TP prefill reduce rank=1 pos=0 rows=2048 kind=deltanet elems=5242880 calls=36 comm_ms=65.857 drain_ms=0.011 copy_ms=50.888 ready_ms=5.545 sum_ms=3.397 reuse_ms=2.222 gather_ms=3.776 peer_bytes=1132462080
+QFN TP prefill reduce rank=1 pos=0 rows=2048 kind=attention elems=5242880 calls=12 comm_ms=21.776 drain_ms=0.005 copy_ms=16.629 ready_ms=2.072 sum_ms=1.075 reuse_ms=0.739 gather_ms=1.253 peer_bytes=377487360
+QFN TP prefill reduce rank=1 pos=0 rows=2048 kind=moe elems=5242880 calls=48 comm_ms=94.648 drain_ms=0.014 copy_ms=66.057 ready_ms=16.377 sum_ms=4.229 reuse_ms=3.028 gather_ms=4.921 peer_bytes=1509949440
+QFN TP prefill profile rank=1 pos=0 rows=2048 calls=97 grouped=48 span_ms=1190.108 communication_ms=186.952 routed_plan_ms=4.589 routed_device_ms=137.974 rest_ms=860.594
+QFN DN prefill profile: rank=1 rows=2048 qkv_ms=68.896 conv_norm_ms=45.192 gates_ms=0.544 scan_ms=12.102 z_ms=41.814 other_ms=977.347
+QFN TP prefill reduce rank=1 pos=2048 rows=658 kind=ple elems=1684480 calls=1 comm_ms=10.580 drain_ms=0.163 copy_ms=0.901 ready_ms=9.434 sum_ms=0.157 reuse_ms=0.086 gather_ms=0.000 peer_bytes=20213760
+QFN TP prefill reduce rank=1 pos=2048 rows=658 kind=deltanet elems=1684480 calls=36 comm_ms=43.793 drain_ms=0.012 copy_ms=31.995 ready_ms=4.849 sum_ms=3.644 reuse_ms=3.272 gather_ms=0.000 peer_bytes=727695360
+QFN TP prefill reduce rank=1 pos=2048 rows=658 kind=attention elems=1684480 calls=12 comm_ms=14.662 drain_ms=0.008 copy_ms=10.845 ready_ms=1.537 sum_ms=1.192 reuse_ms=1.078 gather_ms=0.000 peer_bytes=242565120
+QFN TP prefill reduce rank=1 pos=2048 rows=658 kind=moe elems=1684480 calls=48 comm_ms=98.340 drain_ms=0.016 copy_ms=42.230 ready_ms=46.077 sum_ms=5.058 reuse_ms=4.927 gather_ms=0.000 peer_bytes=970260480
+QFN TP prefill profile rank=1 pos=2048 rows=658 calls=97 grouped=48 span_ms=947.116 communication_ms=167.375 routed_plan_ms=2.228 routed_device_ms=402.568 rest_ms=374.945
+QFN DN prefill profile: rank=1 rows=658 qkv_ms=31.185 conv_norm_ms=13.755 gates_ms=0.548 scan_ms=3.103 z_ms=21.266 other_ms=840.784
+QFN MTP3 verify head: rank=1 pos=2706 rows=4 prepare_ms=0.065 head_ms=2.573 agreement_ms=0.007 draft_warm_ms=0.504
+QFN MTP3 verify head: rank=1 pos=2708 rows=4 prepare_ms=0.061 head_ms=2.564 agreement_ms=0.006 draft_warm_ms=0.503
+QFN MTP3 verify head: rank=1 pos=2709 rows=4 prepare_ms=0.062 head_ms=2.560 agreement_ms=0.022 draft_warm_ms=0.506
+QFN MTP3 verify head: rank=1 pos=2713 rows=4 prepare_ms=0.065 head_ms=2.559 agreement_ms=0.009 draft_warm_ms=0.501
+QFN MTP3 verify head: rank=1 pos=2716 rows=4 prepare_ms=0.066 head_ms=2.569 agreement_ms=0.007 draft_warm_ms=0.502
+QFN MTP3 verify head: rank=1 pos=2720 rows=4 prepare_ms=0.065 head_ms=2.570 agreement_ms=0.007 draft_warm_ms=0.502
+QFN MTP3 verify head: rank=1 pos=2724 rows=4 prepare_ms=0.066 head_ms=2.564 agreement_ms=0.025 draft_warm_ms=0.504
+QFN MTP3 verify head: rank=1 pos=2728 rows=4 prepare_ms=0.065 head_ms=2.568 agreement_ms=0.006 draft_warm_ms=0.502
+QFN MTP3 verify head: rank=1 pos=2729 rows=4 prepare_ms=0.066 head_ms=2.568 agreement_ms=0.006 draft_warm_ms=0.502
+QFN MTP3 verify head: rank=1 pos=2732 rows=4 prepare_ms=0.061 head_ms=2.571 agreement_ms=0.024 draft_warm_ms=0.503
+QFN MTP3 verify head: rank=1 pos=2734 rows=4 prepare_ms=0.065 head_ms=2.565 agreement_ms=0.006 draft_warm_ms=0.504
+QFN TP prefill reduce rank=2 pos=0 rows=2048 kind=ple elems=5242880 calls=1 comm_ms=4.673 drain_ms=0.486 copy_ms=1.398 ready_ms=3.027 sum_ms=0.079 reuse_ms=0.069 gather_ms=0.099 peer_bytes=31457280
+QFN TP prefill reduce rank=2 pos=0 rows=2048 kind=deltanet elems=5242880 calls=36 comm_ms=66.125 drain_ms=0.011 copy_ms=51.773 ready_ms=4.900 sum_ms=3.424 reuse_ms=2.258 gather_ms=3.740 peer_bytes=1132462080
+QFN TP prefill reduce rank=2 pos=0 rows=2048 kind=attention elems=5242880 calls=12 comm_ms=21.967 drain_ms=0.004 copy_ms=16.848 ready_ms=2.067 sum_ms=1.050 reuse_ms=0.744 gather_ms=1.249 peer_bytes=377487360
+QFN TP prefill reduce rank=2 pos=0 rows=2048 kind=moe elems=5242880 calls=48 comm_ms=91.494 drain_ms=0.015 copy_ms=66.821 ready_ms=12.621 sum_ms=4.067 reuse_ms=3.014 gather_ms=4.933 peer_bytes=1509949440
+QFN TP prefill profile rank=2 pos=0 rows=2048 calls=97 grouped=48 span_ms=1189.754 communication_ms=184.259 routed_plan_ms=4.579 routed_device_ms=141.156 rest_ms=859.760
+QFN DN prefill profile: rank=2 rows=2048 qkv_ms=68.842 conv_norm_ms=45.141 gates_ms=0.569 scan_ms=12.086 z_ms=41.742 other_ms=977.200
+QFN TP prefill reduce rank=2 pos=2048 rows=658 kind=ple elems=1684480 calls=1 comm_ms=10.584 drain_ms=0.160 copy_ms=0.897 ready_ms=9.448 sum_ms=0.147 reuse_ms=0.091 gather_ms=0.000 peer_bytes=20213760
+QFN TP prefill reduce rank=2 pos=2048 rows=658 kind=deltanet elems=1684480 calls=36 comm_ms=45.633 drain_ms=0.012 copy_ms=32.694 ready_ms=5.992 sum_ms=3.472 reuse_ms=3.443 gather_ms=0.000 peer_bytes=727695360
+QFN TP prefill reduce rank=2 pos=2048 rows=658 kind=attention elems=1684480 calls=12 comm_ms=14.758 drain_ms=0.004 copy_ms=11.003 ready_ms=1.474 sum_ms=1.134 reuse_ms=1.137 gather_ms=0.000 peer_bytes=242565120
+QFN TP prefill reduce rank=2 pos=2048 rows=658 kind=moe elems=1684480 calls=48 comm_ms=91.183 drain_ms=0.015 copy_ms=43.080 ready_ms=38.098 sum_ms=4.784 reuse_ms=5.172 gather_ms=0.000 peer_bytes=970260480
+QFN TP prefill profile rank=2 pos=2048 rows=658 calls=97 grouped=48 span_ms=948.905 communication_ms=162.157 routed_plan_ms=2.212 routed_device_ms=409.803 rest_ms=374.733
+QFN DN prefill profile: rank=2 rows=658 qkv_ms=31.144 conv_norm_ms=13.745 gates_ms=0.589 scan_ms=3.127 z_ms=21.250 other_ms=842.563
+QFN MTP3 verify head: rank=2 pos=2706 rows=4 prepare_ms=0.064 head_ms=2.562 agreement_ms=0.019 draft_warm_ms=0.506
+QFN MTP3 verify head: rank=2 pos=2708 rows=4 prepare_ms=0.064 head_ms=2.558 agreement_ms=0.010 draft_warm_ms=0.501
+QFN MTP3 verify head: rank=2 pos=2709 rows=4 prepare_ms=0.063 head_ms=2.546 agreement_ms=0.035 draft_warm_ms=0.500
+QFN MTP3 verify head: rank=2 pos=2713 rows=4 prepare_ms=0.062 head_ms=2.562 agreement_ms=0.009 draft_warm_ms=0.502
+QFN MTP3 verify head: rank=2 pos=2716 rows=4 prepare_ms=0.065 head_ms=2.555 agreement_ms=0.024 draft_warm_ms=0.503
+QFN MTP3 verify head: rank=2 pos=2720 rows=4 prepare_ms=0.062 head_ms=2.569 agreement_ms=0.012 draft_warm_ms=0.500
+QFN MTP3 verify head: rank=2 pos=2724 rows=4 prepare_ms=0.062 head_ms=2.553 agreement_ms=0.041 draft_warm_ms=0.503
+QFN MTP3 verify head: rank=2 pos=2728 rows=4 prepare_ms=0.064 head_ms=2.566 agreement_ms=0.010 draft_warm_ms=0.504
+QFN MTP3 verify head: rank=2 pos=2729 rows=4 prepare_ms=0.062 head_ms=2.568 agreement_ms=0.011 draft_warm_ms=0.500
+QFN MTP3 verify head: rank=2 pos=2732 rows=4 prepare_ms=0.062 head_ms=2.557 agreement_ms=0.036 draft_warm_ms=0.499
+QFN MTP3 verify head: rank=2 pos=2734 rows=4 prepare_ms=0.061 head_ms=2.561 agreement_ms=0.015 draft_warm_ms=0.502
+QFN TP prefill reduce rank=3 pos=0 rows=2048 kind=ple elems=5242880 calls=1 comm_ms=4.669 drain_ms=0.483 copy_ms=1.374 ready_ms=3.040 sum_ms=0.086 reuse_ms=0.065 gather_ms=0.102 peer_bytes=31457280
+QFN TP prefill reduce rank=3 pos=0 rows=2048 kind=deltanet elems=5242880 calls=36 comm_ms=66.060 drain_ms=0.011 copy_ms=49.446 ready_ms=7.163 sum_ms=3.418 reuse_ms=2.267 gather_ms=3.735 peer_bytes=1132462080
+QFN TP prefill reduce rank=3 pos=0 rows=2048 kind=attention elems=5242880 calls=12 comm_ms=21.655 drain_ms=0.004 copy_ms=16.120 ready_ms=2.490 sum_ms=1.043 reuse_ms=0.741 gather_ms=1.252 peer_bytes=377487360
+QFN TP prefill reduce rank=3 pos=0 rows=2048 kind=moe elems=5242880 calls=48 comm_ms=90.778 drain_ms=0.015 copy_ms=64.083 ready_ms=14.601 sum_ms=4.097 reuse_ms=3.032 gather_ms=4.924 peer_bytes=1509949440
+QFN TP prefill profile rank=3 pos=0 rows=2048 calls=97 grouped=48 span_ms=1197.120 communication_ms=183.162 routed_plan_ms=4.584 routed_device_ms=141.929 rest_ms=867.444
+QFN DN prefill profile: rank=3 rows=2048 qkv_ms=68.788 conv_norm_ms=45.180 gates_ms=0.560 scan_ms=12.104 z_ms=41.768 other_ms=984.573
+QFN TP prefill reduce rank=3 pos=2048 rows=658 kind=ple elems=1684480 calls=1 comm_ms=10.581 drain_ms=0.162 copy_ms=0.860 ready_ms=9.481 sum_ms=0.153 reuse_ms=0.086 gather_ms=0.000 peer_bytes=20213760
+QFN TP prefill reduce rank=3 pos=2048 rows=658 kind=deltanet elems=1684480 calls=36 comm_ms=43.135 drain_ms=0.011 copy_ms=31.116 ready_ms=5.062 sum_ms=3.574 reuse_ms=3.352 gather_ms=0.000 peer_bytes=727695360
+QFN TP prefill reduce rank=3 pos=2048 rows=658 kind=attention elems=1684480 calls=12 comm_ms=14.784 drain_ms=0.004 copy_ms=10.506 ready_ms=1.995 sum_ms=1.196 reuse_ms=1.076 gather_ms=0.000 peer_bytes=242565120
+QFN TP prefill reduce rank=3 pos=2048 rows=658 kind=moe elems=1684480 calls=48 comm_ms=79.967 drain_ms=0.016 copy_ms=41.226 ready_ms=28.637 sum_ms=4.920 reuse_ms=5.136 gather_ms=0.000 peer_bytes=970260480
+QFN TP prefill profile rank=3 pos=2048 rows=658 calls=97 grouped=48 span_ms=946.304 communication_ms=148.466 routed_plan_ms=2.235 routed_device_ms=420.921 rest_ms=374.681
+QFN DN prefill profile: rank=3 rows=658 qkv_ms=31.129 conv_norm_ms=13.755 gates_ms=0.562 scan_ms=3.092 z_ms=21.232 other_ms=840.045
+QFN MTP3 verify head: rank=3 pos=2706 rows=4 prepare_ms=0.062 head_ms=2.572 agreement_ms=0.012 draft_warm_ms=0.504
+QFN MTP3 verify head: rank=3 pos=2708 rows=4 prepare_ms=0.064 head_ms=2.563 agreement_ms=0.006 draft_warm_ms=0.497
+QFN MTP3 verify head: rank=3 pos=2709 rows=4 prepare_ms=0.063 head_ms=2.561 agreement_ms=0.020 draft_warm_ms=0.502
+QFN MTP3 verify head: rank=3 pos=2713 rows=4 prepare_ms=0.062 head_ms=2.563 agreement_ms=0.008 draft_warm_ms=0.498
+QFN MTP3 verify head: rank=3 pos=2716 rows=4 prepare_ms=0.067 head_ms=2.567 agreement_ms=0.010 draft_warm_ms=0.502
+QFN MTP3 verify head: rank=3 pos=2720 rows=4 prepare_ms=0.063 head_ms=2.569 agreement_ms=0.010 draft_warm_ms=0.502
+QFN MTP3 verify head: rank=3 pos=2724 rows=4 prepare_ms=0.064 head_ms=2.568 agreement_ms=0.025 draft_warm_ms=0.500
+QFN MTP3 verify head: rank=3 pos=2728 rows=4 prepare_ms=0.061 head_ms=2.564 agreement_ms=0.015 draft_warm_ms=0.500
+QFN MTP3 verify head: rank=3 pos=2729 rows=4 prepare_ms=0.064 head_ms=2.559 agreement_ms=0.017 draft_warm_ms=0.502
+QFN MTP3 verify head: rank=3 pos=2732 rows=4 prepare_ms=0.063 head_ms=2.587 agreement_ms=0.005 draft_warm_ms=0.501
+QFN MTP3 verify head: rank=3 pos=2734 rows=4 prepare_ms=0.065 head_ms=2.561 agreement_ms=0.011 draft_warm_ms=0.504

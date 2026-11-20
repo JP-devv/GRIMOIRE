@@ -1,0 +1,98 @@
+[l0-peer-shim pid=1] active scope=large-nonccl-tracked-device-allocation-peer-residency path=loader-tracer pool_ceiling=4194304 report_interval=15s
+[l0-peer-shim pid=7] active scope=large-nonccl-tracked-device-allocation-peer-residency path=loader-tracer pool_ceiling=4194304 report_interval=15s
+[l0-peer-shim pid=56] active scope=large-nonccl-tracked-device-allocation-peer-residency path=loader-tracer pool_ceiling=4194304 report_interval=15s
+(APIServer pid=7) INFO 11-20 21:24:36 [api_utils.py:347] 
+(APIServer pid=7) INFO 11-20 21:24:36 [api_utils.py:347]        █     █     █▄   ▄█
+(APIServer pid=7) INFO 11-20 21:24:36 [api_utils.py:347]  ▄▄ ▄█ █     █     █ ▀▄▀ █  version 0.30.0
+(APIServer pid=7) INFO 11-20 21:24:36 [api_utils.py:347]   █▄█▀ █     █     █     █  model   /models/qwen38-w4a16-snapshot
+(APIServer pid=7) INFO 11-20 21:24:36 [api_utils.py:347]    ▀▀  ▀▀▀▀▀ ▀▀▀▀▀ ▀     ▀
+(APIServer pid=7) INFO 11-20 21:24:36 [api_utils.py:347] 
+(APIServer pid=7) INFO 11-20 21:24:36 [api_utils.py:286] non-default args: {'model_tag': '/models/qwen38-w4a16-snapshot', 'enable_prompt_tokens_details': True, 'host': '127.0.0.1', 'port': 37159, 'model': '/models/qwen38-w4a16-snapshot', 'trust_remote_code': True, 'dtype': 'bfloat16', 'max_model_len': 32768, 'enforce_eager': True, 'served_model_name': ['qwen38-flash-next-c1'], 'generation_config': 'vllm', 'tensor_parallel_size': 4, 'enable_expert_parallel': True, 'gpu_memory_utilization': 0.95, 'enable_prefix_caching': False, 'limit_mm_per_prompt': {'image': 4, 'video': 2}, 'max_num_batched_tokens': 1024, 'max_num_seqs': 16, 'async_scheduling': True, 'compilation_config': {'mode': None, 'debug_dump_path': None, 'cache_dir': '', 'compile_cache_save_format': 'binary', 'backend': 'inductor', 'custom_ops': [], 'ir_enable_torch_wrap': None, 'splitting_ops': None, 'compile_mm_encoder': False, 'cudagraph_mm_encoder': False, 'encoder_cudagraph_token_budgets': [], 'encoder_cudagraph_max_vision_items_per_batch': 0, 'encoder_cudagraph_max_frames_per_batch': None, 'compile_sizes': None, 'compile_ranges_endpoints': None, 'inductor_compile_config': {'enable_auto_functionalized_v2': False, 'combo_kernels': True, 'benchmark_combo_kernel': True}, 'inductor_passes': {}, 'cudagraph_mode': <CUDAGraphMode.FULL_AND_PIECEWISE: (2, 1)>, 'cudagraph_num_of_warmups': 0, 'cudagraph_capture_sizes': [1, 2, 4, 8, 16, 256, 512, 1024], 'cudagraph_copy_inputs': False, 'cudagraph_specialize_lora': True, 'use_inductor_graph_partition': None, 'pass_config': {}, 'max_cudagraph_capture_size': None, 'dynamic_shapes_config': {'type': <DynamicShapesType.BACKED: 'backed'>, 'evaluate_guards': False, 'assume_32_bit_indexing': False}, 'local_cache_dir': None, 'fast_moe_cold_start': None, 'static_all_moe_layers': []}}
+(APIServer pid=7) [transformers] Unrecognized keys in `rope_parameters` for 'rope_type'='default': {'mrope_section', 'mrope_interleaved'}
+(APIServer pid=7) [transformers] Unrecognized keys in `rope_parameters` for 'rope_type'='default': {'mrope_section', 'mrope_interleaved'}
+(APIServer pid=7) [transformers] Unrecognized keys in `rope_parameters` for 'rope_type'='default': {'mrope_section', 'mrope_interleaved'}
+(APIServer pid=7) [transformers] Unrecognized keys in `rope_parameters` for 'rope_type'='default': {'mrope_section', 'mrope_interleaved'}
+(APIServer pid=7) [transformers] Unrecognized keys in `rope_parameters` for 'rope_type'='default': {'mrope_section', 'mrope_interleaved'}
+(APIServer pid=7) INFO 11-20 21:24:49 [model.py:692] Resolved architecture: Qwen4ExpForConditionalGeneration
+(APIServer pid=7) INFO 11-20 21:24:49 [model.py:2030] Using max model len 32768
+[l0-peer-shim pid=179] active scope=large-nonccl-tracked-device-allocation-peer-residency path=loader-tracer pool_ceiling=4194304 report_interval=15s
+(APIServer pid=7) [transformers] Unrecognized keys in `rope_parameters` for 'rope_type'='default': {'mrope_section', 'mrope_interleaved'}
+(APIServer pid=7) [transformers] Unrecognized keys in `rope_parameters` for 'rope_type'='default': {'mrope_section', 'mrope_interleaved'}
+(APIServer pid=7) [transformers] Unrecognized keys in `rope_parameters` for 'rope_type'='default': {'mrope_section', 'mrope_interleaved'}
+(APIServer pid=7) [transformers] Unrecognized keys in `rope_parameters` for 'rope_type'='default': {'mrope_section', 'mrope_interleaved'}
+(APIServer pid=7) [transformers] Unrecognized keys in `rope_parameters` for 'rope_type'='default': {'mrope_section', 'mrope_interleaved'}
+(APIServer pid=7) WARNING 11-20 21:24:50 [indexer_topk.py:29] Failed to import the DeepSelect extension (vllm._deepselect_C): No module named 'vllm._deepselect_C'
+(APIServer pid=7) INFO 11-20 21:24:50 [scheduler.py:288] Chunked prefill is enabled with max_num_batched_tokens=1024.
+(APIServer pid=7) WARNING 11-20 21:24:50 [vllm.py:1547] Enforce eager set, disabling torch.compile and CUDAGraphs. This is equivalent to setting -cc.mode=none -cc.cudagraph_mode=none
+(APIServer pid=7) INFO 11-20 21:24:50 [vllm.py:762] Auto-enabling VLLM_USE_BREAKABLE_CUDAGRAPH=1. Set VLLM_USE_BREAKABLE_CUDAGRAPH=0 to opt out.
+(APIServer pid=7) INFO 11-20 21:24:50 [kernel.py:416] Final IR op priority after setting platform defaults: IrOpPriorityConfig(rms_norm=['vllm_c', 'native'], fused_add_rms_norm=['vllm_c', 'native'], gelu_and_mul_sparse=['native'])
+(APIServer pid=7) INFO 11-20 21:24:50 [vllm.py:1780] Cudagraph is disabled under eager mode
+(APIServer pid=7) WARNING 11-20 21:24:50 [xpu.py:308] XPU Graph support is experimental and currently only supports single-GPU execution.
+(APIServer pid=7) INFO 11-20 21:24:50 [xpu.py:382] XPU platform: set server shutdown_timeout=5.
+(APIServer pid=7) INFO 11-20 21:24:50 [compilation.py:336] Enabled custom fusions: norm_quant, act_quant
+(APIServer pid=7) [transformers] Unrecognized keys in `rope_parameters` for 'rope_type'='default': {'mrope_section', 'mrope_interleaved'}
+(APIServer pid=7) [transformers] Unrecognized keys in `rope_parameters` for 'rope_type'='default': {'mrope_section', 'mrope_interleaved'}
+(APIServer pid=7) [transformers] The `use_fast` parameter is deprecated and will be removed in a future version. Use `backend="torchvision"` instead of `use_fast=True`, or `backend="pil"` instead of `use_fast=False`.
+(APIServer pid=7) [transformers] Unrecognized keys in `rope_parameters` for 'rope_type'='default': {'mrope_section', 'mrope_interleaved'}
+(APIServer pid=7) [transformers] Unrecognized keys in `rope_parameters` for 'rope_type'='default': {'mrope_section', 'mrope_interleaved'}
+(APIServer pid=7) Traceback (most recent call last):
+(APIServer pid=7)   File "/opt/venv/bin/vllm", line 10, in <module>
+(APIServer pid=7)     sys.exit(main())
+(APIServer pid=7)              ^^^^^^
+(APIServer pid=7)   File "/opt/venv/lib/python3.12/site-packages/vllm/entrypoints/cli/main.py", line 106, in main
+(APIServer pid=7)     args.dispatch_function(args)
+(APIServer pid=7)   File "/opt/venv/lib/python3.12/site-packages/vllm/entrypoints/cli/serve.py", line 154, in cmd
+(APIServer pid=7)     uvloop.run(run_server(args))
+(APIServer pid=7)   File "/opt/venv/lib/python3.12/site-packages/uvloop/__init__.py", line 96, in run
+(APIServer pid=7)     return __asyncio.run(
+(APIServer pid=7)            ^^^^^^^^^^^^^^
+(APIServer pid=7)   File "/usr/lib/python3.12/asyncio/runners.py", line 194, in run
+(APIServer pid=7)     return runner.run(main)
+(APIServer pid=7)            ^^^^^^^^^^^^^^^^
+(APIServer pid=7)   File "/usr/lib/python3.12/asyncio/runners.py", line 118, in run
+(APIServer pid=7)     return self._loop.run_until_complete(task)
+(APIServer pid=7)            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+(APIServer pid=7)   File "uvloop/loop.pyx", line 1518, in uvloop.loop.Loop.run_until_complete
+(APIServer pid=7)   File "/opt/venv/lib/python3.12/site-packages/uvloop/__init__.py", line 48, in wrapper
+(APIServer pid=7)     return await main
+(APIServer pid=7)            ^^^^^^^^^^
+(APIServer pid=7)   File "/opt/venv/lib/python3.12/site-packages/vllm/entrypoints/launchers/api_server/entry.py", line 176, in run_server
+(APIServer pid=7)     await run_server_worker(listen_address, sock, args, **uvicorn_kwargs)
+(APIServer pid=7)   File "/opt/venv/lib/python3.12/site-packages/vllm/entrypoints/launchers/api_server/entry.py", line 190, in run_server_worker
+(APIServer pid=7)     async with build_async_engine_client(
+(APIServer pid=7)   File "/usr/lib/python3.12/contextlib.py", line 210, in __aenter__
+(APIServer pid=7)     return await anext(self.gen)
+(APIServer pid=7)            ^^^^^^^^^^^^^^^^^^^^^
+(APIServer pid=7)   File "/opt/venv/lib/python3.12/site-packages/vllm/entrypoints/launchers/api_server/entry.py", line 58, in build_async_engine_client
+(APIServer pid=7)     async with build_async_engine_client_from_engine_args(
+(APIServer pid=7)   File "/usr/lib/python3.12/contextlib.py", line 210, in __aenter__
+(APIServer pid=7)     return await anext(self.gen)
+(APIServer pid=7)            ^^^^^^^^^^^^^^^^^^^^^
+(APIServer pid=7)   File "/opt/venv/lib/python3.12/site-packages/vllm/entrypoints/launchers/api_server/entry.py", line 94, in build_async_engine_client_from_engine_args
+(APIServer pid=7)     async_llm = AsyncLLM.from_vllm_config(
+(APIServer pid=7)                 ^^^^^^^^^^^^^^^^^^^^^^^^^^
+(APIServer pid=7)   File "/opt/venv/lib/python3.12/site-packages/vllm/v1/engine/async_llm.py", line 235, in from_vllm_config
+(APIServer pid=7)     return cls(
+(APIServer pid=7)            ^^^^
+(APIServer pid=7)   File "/opt/venv/lib/python3.12/site-packages/vllm/v1/engine/async_llm.py", line 169, in __init__
+(APIServer pid=7)     self.engine_core = EngineCoreClient.make_async_mp_client(
+(APIServer pid=7)                        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+(APIServer pid=7)   File "/opt/venv/lib/python3.12/site-packages/vllm/tracing/otel.py", line 178, in sync_wrapper
+(APIServer pid=7)     return func(*args, **kwargs)
+(APIServer pid=7)            ^^^^^^^^^^^^^^^^^^^^^
+(APIServer pid=7)   File "/opt/venv/lib/python3.12/site-packages/vllm/v1/engine/core_client.py", line 163, in make_async_mp_client
+(APIServer pid=7)     return AsyncMPClient(
+(APIServer pid=7)            ^^^^^^^^^^^^^^
+(APIServer pid=7)   File "/opt/venv/lib/python3.12/site-packages/vllm/tracing/otel.py", line 178, in sync_wrapper
+(APIServer pid=7)     return func(*args, **kwargs)
+(APIServer pid=7)            ^^^^^^^^^^^^^^^^^^^^^
+(APIServer pid=7)   File "/opt/venv/lib/python3.12/site-packages/vllm/v1/engine/core_client.py", line 1060, in __init__
+(APIServer pid=7)     super().__init__(
+(APIServer pid=7)   File "/opt/venv/lib/python3.12/site-packages/vllm/v1/engine/core_client.py", line 656, in __init__
+(APIServer pid=7)     with launch_core_engines(
+(APIServer pid=7)   File "/usr/lib/python3.12/contextlib.py", line 139, in __enter__
+(APIServer pid=7)     raise RuntimeError("generator didn't yield") from None
+(APIServer pid=7) RuntimeError: generator didn't yield
+[l0-peer-shim pid=188] active scope=large-nonccl-tracked-device-allocation-peer-residency path=loader-tracer pool_ceiling=4194304 report_interval=15s
+[l0-peer-shim pid=7] summary reason=exit path=loader-tracer alloc_calls=8 tracked=8 freed=0 live=4 owner_allowed=8 peer_preserved=24 peer_suppressed=0 peer_bytes=0 other_passthrough=0
+[l0-peer-shim pid=188] summary reason=exit path=loader-tracer alloc_calls=0 tracked=0 freed=0 live=0 owner_allowed=0 peer_preserved=0 peer_suppressed=0 peer_bytes=0 other_passthrough=0
