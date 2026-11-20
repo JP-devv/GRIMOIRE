@@ -26,6 +26,69 @@ test-correctness: bin/test_generation bin/test_http
 HOST_MODEL_SRC = src/quantize.cpp src/qwen35_loader.cpp src/safetensors.cpp src/native_model.cpp src/gguf.cpp src/gguf_decode.cpp src/gguf_qwen35.cpp src/tokenizer.cpp
 tools: bin/grimoire-quantize bin/inspect_native_model bin/gguf_inspect bin/tok_dump
 
+QFN_REG = regressions/2026-11-19-qfn
+QFN_TOOLS = bin/qfn_freeze_inputs bin/qfn_parity_receipt bin/qfn_compare_prefill_activations bin/qfn_compare_moe_row bin/qfn_compare_dn_prefix
+QFN_TESTS = bin/test_qfn_indexed_load bin/test_qfn_moe_routes bin/test_qfn_shard_plan bin/test_qfn_k8v4 bin/test_qfn_draft_int4 bin/test_qfn_qgate bin/test_qfn_inputs bin/test_qfn_prefill_activations bin/test_qfn_compare_moe_row
+
+.PHONY: qfn-tools
+qfn-tools: $(QFN_TOOLS)
+
+$(QFN_TOOLS): bin/%: tools/%.cpp
+	@mkdir -p bin
+	$(CXX) $(CXXFLAGS) $< -o $@
+
+bin/qfn_freeze_inputs: include/b70/qfn_inputs.hpp include/b70/json.hpp
+
+bin/test_qfn_inputs: $(QFN_REG)-manifest/test_qfn_inputs.cpp include/b70/qfn_inputs.hpp include/b70/json.hpp
+	@mkdir -p bin
+	$(CXX) $(CXXFLAGS) $< -o $@
+
+bin/test_qfn_prefill_activations: $(QFN_REG)-prefill-activations/test_qfn_prefill_activations.cpp tools/qfn_compare_prefill_activations.cpp
+	@mkdir -p bin
+	$(CXX) $(CXXFLAGS) $< -o $@
+
+bin/test_qfn_compare_moe_row: $(QFN_REG)-prefill-activations/test_qfn_compare_moe_row.cpp tools/qfn_compare_moe_row.cpp
+	@mkdir -p bin
+	$(CXX) $(CXXFLAGS) $< -o $@
+
+bin/test_qfn_indexed_load: $(QFN_REG)-indexed-load/test_qfn_indexed_load.cpp $(HOST_MODEL_SRC) $(wildcard include/b70/*.hpp)
+	@mkdir -p bin
+	$(CXX) $(CXXFLAGS) $(filter %.cpp,$^) -o $@
+
+bin/test_qfn_moe_routes: $(QFN_REG)-moe-routes/test_qfn_moe_routes.cpp include/b70/qfn_moe_routes.hpp
+	@mkdir -p bin
+	$(CXX) $(CXXFLAGS) $< -o $@
+
+bin/test_qfn_shard_plan: $(QFN_REG)-shard-plan/test_qfn_shard_plan.cpp include/b70/qfn_shard_plan.hpp
+	@mkdir -p bin
+	$(CXX) $(CXXFLAGS) $< -o $@
+
+bin/test_qfn_k8v4: $(QFN_REG)-k8v4/test_qfn_k8v4.cpp
+	@mkdir -p bin
+	$(CXX) $(CXXFLAGS) $< -o $@
+
+bin/test_qfn_draft_int4: $(QFN_REG)-draft-int4/test_qfn_draft_int4.cpp include/b70/weights.hpp include/b70/formats.hpp
+	@mkdir -p bin
+	$(CXX) $(CXXFLAGS) $< -o $@
+
+bin/test_qfn_qgate: $(QFN_REG)-qgate/test_qfn_qgate.cpp include/b70/qgate_layout.hpp include/b70/qfn_shard_plan.hpp
+	@mkdir -p bin
+	$(CXX) $(CXXFLAGS) $< -o $@
+
+.PHONY: test-qfn
+test-qfn: $(QFN_TESTS) $(QFN_TOOLS)
+	env -u GRIMOIRE_QFN_PLE_SOURCE -u GRIMOIRE_MODEL_ROOT ./bin/test_qfn_indexed_load
+	./bin/test_qfn_moe_routes
+	./bin/test_qfn_shard_plan
+	./bin/test_qfn_qgate $(QFN_REG)-qgate/vllm-qgate.i32 $(QFN_REG)-qgate/vllm-loader-rank-rows.i32
+	./bin/test_qfn_k8v4
+	./bin/test_qfn_draft_int4
+	./bin/qfn_parity_receipt --self-test
+	./bin/qfn_compare_dn_prefix --self-test
+	./bin/test_qfn_inputs
+	./bin/test_qfn_prefill_activations
+	./bin/test_qfn_compare_moe_row
+
 GGUF_SRC = src/gguf.cpp src/gguf_decode.cpp
 GGUF_DECODE_HEADERS = include/b70/gguf.hpp include/b70/gguf_decode.hpp src/gguf_decode_grids.hpp
 

@@ -32,6 +32,7 @@
 #include "kernels.hpp"
 #include "kv_k8.hpp"
 #include "b70/int8_embedding.hpp"
+#include "b70/qgate_layout.hpp"
 #include "gemv_step.hpp"
 #include <climits>
 #include <cmath>
@@ -1596,12 +1597,10 @@ sycl::event launch_split_qgate(sycl::queue& q, const float* src, float* qout,
         h.depends_on(deps);
         h.parallel_for(sycl::range<1>(size_t(n_heads) * head_dim),
             [=](sycl::id<1> id) {
-                const int t    = int(id[0]);
-                const int head = t / head_dim;
-                const int d    = t % head_dim;
-                const int64_t base = int64_t(head) * 2 * head_dim;
-                qout[t] = src[base + d];
-                gout[t] = src[base + head_dim + d];
+                const auto i = int64_t(id[0]);
+                const auto p = qgate_offsets(i, head_dim);
+                qout[i] = src[p.q];
+                gout[i] = src[p.gate];
             });
     });
 }

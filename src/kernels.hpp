@@ -209,6 +209,10 @@ sycl::event launch_gemv_batch(sycl::queue& q, const QuantWeight& w,
 sycl::event launch_gemm_xmx(sycl::queue& q, const QuantWeight& w,
                             const sycl_bf16* x, float* y, int M,
                             const std::vector<sycl::event>& deps = {});
+struct QfnMoeTile;
+sycl::event launch_qfn_int4_grouped(sycl::queue& q, const QuantWeight& w, int expert_width,
+                                   const sycl_bf16* x, float* y, const QfnMoeTile* tiles,
+                                   int tile_count, const std::vector<sycl::event>& deps = {});
 // Large-M prompt GEMM (src/gemm_fast.cpp; bin/libgrimoire_gemm.so in the
 // AOT binaries).  launch_gemm_xmx() takes it whenever the shape fits.
 // Large-M GEMM with SwiGLU fused into the epilogue (gemm_fast.cpp): w is

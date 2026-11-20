@@ -69,6 +69,13 @@ struct Engine {
         assert(std::equal(ids.begin(),ids.end(),history.begin()));
         snap=ids;
     }
+    // These fakes model end-of-request snapshots, not prompt-head caching.
+    bool prefix_head_at_end(size_t,int) const {return false;}
+    int prefix_head_split(size_t,int) const {return 0;}
+    bool save_prefix_head(const std::vector<int32_t>&,bool=false){
+        assert(false && "prompt-head caching is disabled in this fake");
+        return false;
+    }
     void sync(){}
     bool pp_enabled()const{return false;}
     void pp_expect_next_rows(int){}
@@ -365,6 +372,25 @@ int main(){
     generate_tokens(one,prompt,o,out,{},reason);assert(one.forward_calls==4);
     Engine eos;o.max_tokens=10;o.eos=9;
     generate_tokens(eos,prompt,o,out,{},reason);assert(out==std::vector<int32_t>({7,8})&&reason==FinishReason::Stop);
+    {   // Split clock: the first emitted token belongs to prefill, not decode throughput.
+        GenerationTiming timing;
+        for(int limit:{1,4}) {
+            Engine timed;
+            GenerationOptions go{limit};
+            go.timing=&timing;
+            int seen=0;
+            assert(generate_tokens(timed,prompt,go,out,[&](int) {
+                ++seen;
+                assert(timing.prefill_tokens==prompt.size());
+                assert(timing.start<=timing.prompt_ready && timing.prompt_ready<=timing.first_token);
+                assert(timing.first_token<=timing.last_token);
+                assert(timed.forward_calls==int(prompt.size())+seen-1);
+                if(seen==1) assert(timing.first_token==timing.last_token);
+                return true;
+            },reason)==limit);
+            assert(seen==limit);
+        }
+    }
     // ---- speculation accounting -------------------------------------
     // An A/B between two drafters is only readable as accepted-per-step;
     // tok/s moves for two reasons at once.  Pin the arithmetic: the anchor

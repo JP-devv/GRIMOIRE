@@ -43,8 +43,10 @@
 //  math. If you want 4-bit weights AND the int8 XMX rate, use INT4.
 // =====================================================================
 #include "kernels.hpp"
+#include "b70/qfn_moe_routes.hpp"
 #include <sycl/ext/oneapi/matrix/matrix.hpp>
 #include <cstdlib>
+#include <stdexcept>
 
 namespace b70 {
 
@@ -74,14 +76,16 @@ inline int vnni_off_int8(int k, int n) { return (k >> 2) * WG_N * 4 + n * 4 + (k
 // ---------------------------------------------------------------------
 // Float pipeline
 // ---------------------------------------------------------------------
-template <Fmt F, int MPSG, int NPSG>
+template <Fmt F, int MPSG, int NPSG, bool Grouped = false>
 sycl::event gemm_flt(sycl::queue& q, const QuantWeight& w,
                      const sycl_bf16* x, float* y, int M,
-                     const std::vector<sycl::event>& deps) {
-    const int N = w.N, K = w.K;
-    constexpr int WGM = TM * MPSG * XMX_SUBGROUPS;
+                     const std::vector<sycl::event>& deps,
+                     const QfnMoeTile* tiles = nullptr, int tile_count = 0, int expert_width = 0) {
+    const int N = Grouped ? expert_width : w.N, K = w.K;
+    constexpr int SG = Grouped ? qfn_moe_tile_rows / (TM * MPSG) : XMX_SUBGROUPS;
+    constexpr int WGM = TM * MPSG * SG;
     constexpr int WGN = TN * NPSG;
-    const int gm = (M + WGM - 1) / WGM;
+    const int gm = Grouped ? tile_count : (M + WGM - 1) / WGM;
     const int gn = (N + WGN - 1) / WGN;
 
     return q.submit([&](sycl::handler& h) {
@@ -91,18 +95,21 @@ sycl::event gemm_flt(sycl::queue& q, const QuantWeight& w,
         sycl::local_accessor<sycl_bf16, 1> slmA(WGM * WG_K_BF16, h);
         sycl::local_accessor<sycl_bf16, 1> slmB(WG_K_BF16 * WGN, h);
         // fp32 epilogue scratch, one TM x TN tile per sub-group
-        sycl::local_accessor<float, 1> slmEpi(XMX_SUBGROUPS * TM * TN, h);
+        sycl::local_accessor<float, 1> slmEpi(SG * TM * TN, h);
 
         h.parallel_for(
-            sycl::nd_range<2>(sycl::range<2>(size_t(gm), size_t(gn) * XMX_SUBGROUPS * SG_SIZE),
-                              sycl::range<2>(1, size_t(XMX_SUBGROUPS) * SG_SIZE)),
+            sycl::nd_range<2>(sycl::range<2>(size_t(gm), size_t(gn) * SG * SG_SIZE),
+                              sycl::range<2>(1, size_t(SG) * SG_SIZE)),
             [=](sycl::nd_item<2> it) [[sycl::reqd_sub_group_size(SG_SIZE)]] {
                 const auto sg    = it.get_sub_group();
                 const int  sgid  = int(sg.get_group_id()[0]);
                 const int  lane  = int(sg.get_local_id()[0]);
                 const int  lid   = int(it.get_local_id(1));
-                const int  m_wg  = int(it.get_group(0)) * WGM;
-                const int  n_wg  = int(it.get_group(1)) * WGN;
+                const int mg = int(it.get_group(0));
+                const int m_wg = Grouped ? tiles[mg].first_row : mg * WGM;
+                const int m_end = Grouped ? m_wg + tiles[mg].rows : M;
+                const int64_t w_base = Grouped ? int64_t(tiles[mg].expert) * N : 0;
+                const int n_wg = int(it.get_group(1)) * WGN;
 
                 matrix::joint_matrix<sycl::sub_group, sycl_bf16,
                                      matrix::use::a, TM, TK_BF16,
@@ -125,27 +132,28 @@ sycl::event gemm_flt(sycl::queue& q, const QuantWeight& w,
                 for (int k_wg = 0; k_wg < K; k_wg += WG_K_BF16) {
 
                     // ---- stage A: plain bf16 activations ----------------
-                    for (int i = lid; i < WGM * WG_K_BF16; i += XMX_SUBGROUPS * SG_SIZE) {
+                    for (int i = lid; i < WGM * WG_K_BF16; i += SG * SG_SIZE) {
                         const int mr = i / WG_K_BF16, kc = i % WG_K_BF16;
                         const int gmi = m_wg + mr, gki = k_wg + kc;
-                        slmA[i] = (gmi < M && gki < K)
+                        slmA[i] = (gmi < m_end && gki < K)
                                 ? x[int64_t(gmi) * K + gki] : sycl_bf16(0.0f);
                     }
 
                     // ---- stage B: dequantize straight into VNNI order ---
                     // Each thread owns whole (n, k-block) strips so the
                     // scale lookup is hoisted out of the element loop.
-                    for (int i = lid; i < WGN * WG_K_BF16; i += XMX_SUBGROUPS * SG_SIZE) {
+                    for (int i = lid; i < WGN * WG_K_BF16; i += SG * SG_SIZE) {
                         const int nc = i / WG_K_BF16, kc = i % WG_K_BF16;
-                        const int gni = n_wg + nc, gki = k_wg + kc;
+                        const int ni = n_wg + nc, gki = k_wg + kc;
+                        const int64_t gni = w_base + ni;
                         // The dispatch already specialized F.  Calling
                         // QuantWeight::at() here re-ran two seven-way
                         // switches for every staged element and dominated
                         // short-K projections.  Resolve layout and scale at
                         // compile time instead.
                         float v = 0.0f;
-                        if (gni < N && gki < K) {
-                            const uint8_t* row = wc.payload + int64_t(gni) * wc.row_bytes;
+                        if (ni < N && gki < K) {
+                            const uint8_t* row = wc.payload + gni * wc.row_bytes;
                             float scale = 1.0f;
                             if constexpr (F == Fmt::FP8_E4M3 || F == Fmt::FP8_E5M2 ||
                                           F == Fmt::INT8) {
@@ -174,6 +182,7 @@ sycl::event gemm_flt(sycl::queue& q, const QuantWeight& w,
                     // arithmetic intensity comes from.
                     #pragma unroll
                     for (int kk = 0; kk < WG_K_BF16; kk += TK_BF16) {
+                        if (Grouped && m_wg + sgid * TM * MPSG >= m_end) continue;
                         #pragma unroll
                         for (int m = 0; m < MPSG; ++m) {
                             matrix::joint_matrix_load(
@@ -206,7 +215,7 @@ sycl::event gemm_flt(sycl::queue& q, const QuantWeight& w,
                 for (int j = 0; j < NPSG; ++j) {
                     const int m_base = m_wg + (sgid * MPSG + m) * TM;
                     const int n_base = n_wg + j * TN;
-                    if (m_base + TM <= M && n_base + TN <= N) {
+                    if (m_base + TM <= m_end && n_base + TN <= N) {
                         matrix::joint_matrix_store(
                             sg, accC[m][j],
                             sycl::address_space_cast<sycl::access::address_space::global_space,
@@ -230,7 +239,7 @@ sycl::event gemm_flt(sycl::queue& q, const QuantWeight& w,
                         sycl::group_barrier(sg);
                         for (int e = lane; e < TM * TN; e += SG_SIZE) {
                             const int r = e / TN, c = e % TN;
-                            if (m_base + r < M && n_base + c < N)
+                            if (m_base + r < m_end && n_base + c < N)
                                 y[int64_t(m_base + r) * N + n_base + c] = scratch[e];
                         }
                         sycl::group_barrier(sg);
@@ -466,6 +475,16 @@ sycl::event gemm_flt_dispatch(sycl::queue& q, const QuantWeight& w,
     }
 }
 } // namespace
+
+sycl::event launch_qfn_int4_grouped(sycl::queue& q, const QuantWeight& w, int expert_width,
+                                   const sycl_bf16* x, float* y, const QfnMoeTile* tiles,
+                                   int tile_count, const std::vector<sycl::event>& deps) {
+    if (tile_count == 0) return {};
+    if (w.fmt != Fmt::INT4 || expert_width <= 0 || w.N % expert_width != 0 ||
+        !w.payload || !w.scales || !w.zeros || !tiles || tile_count < 0)
+        throw std::invalid_argument("invalid QFN grouped INT4 GEMM operands");
+    return gemm_flt<Fmt::INT4, 1, 4, true>(q, w, x, y, 0, deps, tiles, tile_count, expert_width);
+}
 
 sycl::event launch_gemm_xmx(sycl::queue& q, const QuantWeight& w,
                             const sycl_bf16* x, float* y, int M,
