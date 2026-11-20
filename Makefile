@@ -51,6 +51,11 @@ bin/test_qfn_prefill_activations: $(QFN_REG)-prefill-activations/test_qfn_prefil
 	@mkdir -p bin
 	$(CXX) $(CXXFLAGS) $< -o $@
 
+QFN_TESTS += bin/test_qfn_layer0_projection
+bin/test_qfn_layer0_projection: $(QFN_REG)-prefill-activations/test_qfn_layer0_projection.cpp include/b70/qfn_layer0_projection.hpp
+	@mkdir -p bin
+	$(CXX) $(CXXFLAGS) $< -o $@
+
 bin/test_qfn_compare_moe_row: $(QFN_REG)-prefill-activations/test_qfn_compare_moe_row.cpp tools/qfn_compare_moe_row.cpp
 	@mkdir -p bin
 	$(CXX) $(CXXFLAGS) $< -o $@
@@ -92,6 +97,7 @@ test-qfn: $(QFN_TESTS) $(QFN_TOOLS)
 	./bin/test_qfn_inputs
 	./bin/test_qfn_prefill_activations
 	./bin/test_qfn_compare_moe_row
+	./bin/test_qfn_layer0_projection
 
 GGUF_SRC = src/gguf.cpp src/gguf_decode.cpp
 GGUF_DECODE_HEADERS = include/b70/gguf.hpp include/b70/gguf_decode.hpp src/gguf_decode_grids.hpp

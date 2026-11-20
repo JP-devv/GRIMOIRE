@@ -51,6 +51,7 @@
 #include "b70/dflash_config.hpp"
 #include "b70/qwen4_exp.hpp"
 #include "b70/qfn_moe_routes.hpp"
+#include "b70/qfn_layer0_projection.hpp"
 #include "b70/qgate_layout.hpp"
 #include "b70/moe_route_remap.hpp"
 #include "b70/qfn_shard_plan.hpp"
@@ -19131,6 +19132,18 @@ bool Grimoire::prefill_qwen4_exp(const std::vector<int32_t>& tokens,
     };
     if (!pp_later) act_residual(ActTap::embed, 0, false);
 
+    std::vector<float> layer0_projection;
+    if (const char* dir = std::getenv("GRIMOIRE_QFN_LAYER0_PROJECTION_DIR"); dir && *dir) {
+        if (!tp_mega || tp_world != 4 || H != int(qfn_layer0_projection_width) || !noxmx ||
+            verify || seqb || mtp4.ok || qfn_xmx || start_pos < 0 || L.empty() || L.front().kind != LayerKind::LINEAR_ATTN ||
+            std::getenv("GRIMOIRE_QFN_MOE_ROW_DIR") || std::getenv("GRIMOIRE_QFN_MOE_ROW_STOP"))
+            throw std::runtime_error("QFN layer-0 projection substitution requires frozen TP4 GEMV prefill");
+        const std::string path = std::string(dir) + "/r0-p" + std::to_string(start_pos) + ".bin";
+        std::ifstream capture(path, std::ios::binary);
+        if (!capture) throw std::runtime_error("missing QFN layer-0 projection capture: " + path);
+        layer0_projection = read_qfn_layer0_projection(capture, start_pos, M);
+    }
+
     const char* moe_dir = std::getenv("GRIMOIRE_QFN_MOE_ROW_DIR");
     const char* moe_input = std::getenv("GRIMOIRE_QFN_MOE_ROW_INPUT");
     const char* moe_entry = std::getenv("GRIMOIRE_QFN_MOE_ROW_ENTRY");
@@ -19686,6 +19699,15 @@ bool Grimoire::prefill_qwen4_exp(const std::vector<int32_t>& tokens,
         if (override_entry && probe_row >= 0) moe_row_write("dn-projection-local", PE + hx, H);
         if (tp_mega && !tp_block_reduce(PE, size_t(MR) * H)) { ok = false; break; }
         fence("mixer.host_reduce");
+        // Keep the native recurrent state and collective; replace only this
+        // projection's contribution to the residual and the following MoE.
+        if (i == 0 && !layer0_projection.empty()) {
+            q.memcpy(PE, layer0_projection.data() + size_t(R0) * H,
+                     size_t(MR) * H * sizeof(float)).wait_and_throw();
+            if (R0 + MR == M)
+                std::fprintf(stderr, "QFN diagnostic layer-0 projection rank=%d start=%d rows=%d\n",
+                             tp_rank, start_pos, M);
+        }
         if (override_entry && probe_row >= 0) moe_row_write("dn-projection-reduced", PE + hx, H);
         if (act_layer >= 0) act_dump(ActTap::mixer, i, R0, MR, H, PE);
         q4xlap(0);

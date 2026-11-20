@@ -28,3 +28,14 @@ Wait with `timeout <seconds> tmux wait-for <NEW_EMPTY_DIR-basename>-done`
 unless `NEW_EMPTY_DIR/receipt` already exists. The receipt records the terminating
 stage and exit status plus the isolated binary SHA-256. See [the recorded
 comparison](tp4-row-361.md) for interpretation.
+
+For the layer-0 projection control, use the same isolated JIT binary and
+frozen 2,706-token input for three 32-token runs: PP4 with `GRIMOIRE_QFN_ACT_LAYER=0`
+and `GRIMOIRE_QFN_ACT_DIR` set to a fresh capture directory, native TP4, and
+TP4 with `GRIMOIRE_QFN_LAYER0_PROJECTION_DIR` pointing to that PP4 capture.
+Use the matched GEMV settings and fixed 512-row chunks. The override keeps
+TP4's recurrence and reduction, then substitutes only the layer-0 projection
+output just before the residual/MoE. Each TP4 rank must report exactly five
+512-row substitutions and one 146-row substitution. Compare both TP4 runs
+against PP4 with `bin/qfn_parity_receipt`; a match under substitution is not
+an unmodified-engine parity pass.

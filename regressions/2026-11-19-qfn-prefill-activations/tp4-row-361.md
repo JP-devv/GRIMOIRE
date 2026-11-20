@@ -49,6 +49,19 @@ ordinary FP32 accumulation-order differences, not incorrect output-projection
 shards or a broken collective. They do not yet explain where the native
 layer-1 mixer amplifies the small layer-zero residual delta.
 
+## Projection-only control over the frozen prompt
+
+Run `diagnostics/act-l0-NIudNS` verified all 24 substitutions (four TP4 ranks,
+six chunks per rank) with isolated JIT SHA-256
+`34cf85c200b95ae8d774a0924e10ff316bac2dd71f99a76175269839bf03e5e7`.
+The same binary supplied the PP4 capture, native TP4 baseline, and TP4
+substitution arm. Both TP4 arms first disagreed with PP4 at generated token 19
+(PP4 `364`, TP4 `15060`). The substitution changed TP4's position-2706 top
+logit from `29.1116219` to `29.1238651` (PP4: `29.2102795`) and changed
+its generated sequence starting at token 23 relative to the TP4 baseline.
+Substituting only layer 0's projection output is therefore not sufficient to
+remove the token-19 flip; this is diagnostic evidence, not a parity pass.
+
 ## Transport qualification
 
 The peer-push design study in `qfn-enhanced/tp4ep4p2p.md` uses dedicated
