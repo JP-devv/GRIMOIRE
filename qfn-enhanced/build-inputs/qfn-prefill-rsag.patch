@@ -1,0 +1,130 @@
+--- a/include/b70/peer_copy.hpp
++++ b/include/b70/peer_copy.hpp
+@@ -501,13 +501,13 @@
+     }
+ 
+     struct Timing {
+-        size_t calls = 0;
+-        double drain_ms = 0, copy_ms = 0, ready_ms = 0, sum_ms = 0, reuse_ms = 0;
++        size_t calls = 0, peer_bytes = 0;
++        double drain_ms = 0, copy_ms = 0, ready_ms = 0, sum_ms = 0, reuse_ms = 0, gather_ms = 0;
+     };
+     // When recording timings the caller has already drained the queue.
+     bool allreduce(sycl::queue& q, float* data, size_t elems, int rank, Timing* timing = nullptr,
+-                   bool fanout = false) {
+-        if (!enabled || broken || (use_events && timing)) return false;
++                   bool fanout = false, bool reduce_scatter = false) {
++        if (!enabled || broken || (use_events && (timing || reduce_scatter))) return false;
+         const auto exchange = [&](const PeerCopy::Packet& own) {
+             if (fanout) return ipc::exchange_small_fanout(fds, rank, own, [](const auto& a, const auto& b) {
+                 return a.seq == b.seq && a.bytes == b.bytes && a.kind == b.kind && a.format == b.format;
+@@ -531,6 +531,72 @@
+         } guard{*this};
+         const size_t limit = links[rank == 0 ? 1 : 0].capacity / sizeof(float);
+         if (!timing) q.wait_and_throw();
++        if (reduce_scatter) {
++            // Each pair already owns two IPC banks. First scatter partials
++            // into bank zero, then send the canonical reduced slices back
++            // through bank one. Peer copies and local copies are distinct.
++            for (int peer = 0; peer < 4; ++peer)
++                if (peer != rank && links[peer].capacity != limit * sizeof(float)) return false;
++            for (size_t at = 0; at < elems; at += 4 * limit) {
++                const size_t n = std::min(4 * limit, elems - at);
++                const size_t bytes = n * sizeof(float);
++                float* const local = data + at;
++                std::array<size_t, 5> offset{};
++                for (size_t shard = 0; shard <= 4; ++shard) offset[shard] = n * shard / 4;
++                auto shard_size = [&](int peer) { return offset[peer + 1] - offset[peer]; };
++                const size_t own_count = shard_size(rank);
++                const auto send_shards = [&](bool gather) {
++                    bool ok = true;
++                    for (int peer = 0; peer < 4; ++peer) if (peer != rank) {
++                        auto& link = links[peer];
++                        const int shard = gather ? rank : peer;
++                        const size_t payload = shard_size(shard) * sizeof(float);
++                        if (!payload) continue;
++                        auto* dest = static_cast<uint8_t*>(link.imported) + (gather ? link.capacity : 0);
++                        if (link.api.copy(link.copies, dest, local + offset[shard],
++                                          payload, nullptr, 0, nullptr) != ZE_RESULT_SUCCESS)
++                            ok = false;
++                        if (timing) timing->peer_bytes += payload;
++                    }
++                    for (int peer = 0; peer < 4; ++peer) if (peer != rank) {
++                        auto& link = links[peer];
++                        if (link.api.sync(link.copies, 120000000000ULL) != ZE_RESULT_SUCCESS)
++                            ok = false;
++                    }
++                    return ok;
++                };
++
++                if (!send_shards(false)) return false;
++                record(&Timing::copy_ms);
++                const uint64_t sequence = ++sequence_;
++                if (!exchange({sequence, bytes, 4, 0})) return false;
++                record(&Timing::ready_ms);
++                if (own_count) {
++                    std::array<const float*, 4> src{};
++                    for (int peer = 0; peer < 4; ++peer)
++                        src[peer] = peer == rank ? local + offset[rank] :
++                            static_cast<const float*>(links[peer].owned);
++                    sum(q, local + offset[rank], own_count, src).wait_and_throw();
++                }
++                record(&Timing::sum_ms);
++                if (!send_shards(true)) return false;
++                record(&Timing::copy_ms);
++                if (!exchange({sequence, bytes, 5, 0})) return false;
++                record(&Timing::ready_ms);
++                for (int peer = 0; peer < 4; ++peer) if (peer != rank && shard_size(peer)) {
++                    const auto& link = links[peer];
++                    q.memcpy(local + offset[peer], static_cast<const uint8_t*>(link.owned) + link.capacity,
++                             shard_size(peer) * sizeof(float));
++                }
++                q.wait_and_throw();
++                record(&Timing::gather_ms);
++                if (!exchange({sequence, bytes, 6, 0})) return false;
++                record(&Timing::reuse_ms);
++            }
++            if (timing) ++timing->calls;
++            guard.done = true;
++            return true;
++        }
+         for (size_t at = 0; at < elems; at += limit) {
+             const size_t n = std::min(limit, elems - at), bytes = n * sizeof(float);
+             float* const local = data + at;
+@@ -550,6 +616,7 @@
+             for (int peer = 0; peer < 4; ++peer) if (peer != rank) {
+                 auto& link = links[peer];
+                 auto* const dst = static_cast<uint8_t*>(link.imported) + link.capacity;
++                if (timing) timing->peer_bytes += bytes;
+                 if (link.api.copy(link.copies, dst, local, bytes, nullptr, 0, nullptr) != ZE_RESULT_SUCCESS)
+                     copies_ok = false;
+             }
+--- a/src/grimoire.cpp
++++ b/src/grimoire.cpp
+@@ -5110,7 +5110,12 @@
+             return e && *e ? size_t(std::strtoull(e, nullptr, 10)) : size_t(65536);
+         }();
+         const bool use_fanout = (fanout || qfn_all_fanout) && size_t(elems) * sizeof(float) <= fanout_max;
+-        return tp_peer_push4.allreduce(q, dev, size_t(elems), tp_rank, timing, use_fanout);
++        static const bool rsag = [] {
++            const char* value = std::getenv("GRIMOIRE_QFN_PREFILL_RSAG");
++            return value && value[0] == '1' && !value[1];
++        }();
++        const bool full_chunk_rsag = rsag && qfn_tp4_plan && elems == 2048 * 2560;
++        return tp_peer_push4.allreduce(q, dev, size_t(elems), tp_rank, timing, use_fanout, full_chunk_rsag);
+     }
+     if(tp_peer_copy.active()) return elems>=0 && tp_peer_copy.allreduce(q,dev,size_t(elems),tp_rank,false);
+     if(!tp_ranked()||tp_peer_fd.empty())return false;
+@@ -20565,9 +20570,10 @@
+             calls += bucket.calls;
+             comm += bucket.ms;
+             std::fprintf(stderr, "QFN TP prefill reduce rank=%d pos=%d rows=%d kind=%s elems=%zu calls=%zu comm_ms=%.3f drain_ms=%.3f "
+-                         "copy_ms=%.3f ready_ms=%.3f sum_ms=%.3f reuse_ms=%.3f\n",
++                         "copy_ms=%.3f ready_ms=%.3f sum_ms=%.3f reuse_ms=%.3f gather_ms=%.3f peer_bytes=%zu\n",
+                          tp_rank, start_pos, M, names[kind], elems, bucket.calls, bucket.ms, bucket.drain,
+-                         bucket.t.copy_ms, bucket.t.ready_ms, bucket.t.sum_ms, bucket.t.reuse_ms);
++                         bucket.t.copy_ms, bucket.t.ready_ms, bucket.t.sum_ms, bucket.t.reuse_ms,
++                         bucket.t.gather_ms, bucket.t.peer_bytes);
+         }
+         std::fprintf(stderr, "QFN TP prefill profile rank=%d pos=%d rows=%d calls=%zu grouped=%zu span_ms=%.3f communication_ms=%.3f "
+                      "routed_plan_ms=%.3f routed_device_ms=%.3f rest_ms=%.3f\n",
