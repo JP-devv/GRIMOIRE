@@ -79,3 +79,22 @@ bash qfn-enhanced/build-inputs/rebuild.sh prefill-combined /path/to/new-build \
 ```
 
 The unprofiled engine-phase data is under `receipts/frozen-pair.{xnvQ6QCQ,RBKzQByx,V391O9oi,XuHOWmlJ}`. The raw-ID HTTP test measures first visible streamed text separately and uses a local-only endpoint. The combined candidate has a native C++/SYCL execution path. The process mappings show the local GRIMOIRE libraries, oneAPI SYCL/UR, and Level Zero. Benchmark clients and the vLLM reference instrumentation are separate tooling.
+
+### Pinned native serving package
+
+The verified executables and shared libraries are in
+`artifacts/prefill-combined/` on haxor. Verify them with
+`(cd artifacts/prefill-combined && sha256sum -c SHA256SUMS)`.
+Use the `prefill-combined` rebuild invocation above to reproduce the package.
+`serving.env` records the effective GRIMOIRE settings. The four-rank
+device placement, socket setup, model argument, Level Zero selector and
+exclusive-window cleanup are in `bench/c1-frozen/run-native-http.sh`
+(relative to this document). Use variant `prefill-combined` and context
+`262144` to reproduce the HTTP smoke.
+
+The final build passed the frozen HTTP gate with one sequence slot at a
+262,144-token configured context. The streamed first visible text took
+1.820441753952764 s. A separate nonstreaming request completed in
+2.75019331893418 s. This smoke used the 2,706-token fixture.
+See `../receipts/native-http.TbGsC5iI/` for the exact build pins,
+effective flags, rank logs, and restoration check.
