@@ -70,7 +70,7 @@
 +        e.q.wait_and_throw();
 +        const double ms = std::chrono::duration<double, std::milli>(
 +            std::chrono::steady_clock::now() - start).count();
-+        const bool match = predicted.size() == rows &&
++        int match = predicted.size() == rows &&
 +            std::equal(predicted.begin(), predicted.end(), expected.begin());
 +        std::fprintf(stderr, "QFN row replay rank=%d sample=%d rows=%zu verify_ms=%.6f target_ids_match=%d\n",
 +                     e.tp_rank, sample++, rows, ms, int(match));
