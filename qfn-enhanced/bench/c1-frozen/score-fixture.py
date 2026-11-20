@@ -1,6 +1,7 @@
 """Score paired MTP-off runs against predeclared raw-ID requests."""
 import argparse
 import json
+import math
 from pathlib import Path
 import re
 
@@ -35,6 +36,43 @@ def read_native(arm, prompt, output):
     return emitted, ranks
 
 
+def read_reference(directory, model, prompt, emitted):
+    response = json.loads((directory / "response.json").read_text())
+    choice, = response["choices"]
+    usage = response["usage"]
+    if (choice.get("prompt_token_ids", response.get("prompt_token_ids")) != prompt
+            or choice["token_ids"] != emitted or choice["finish_reason"] != "length"
+            or usage["prompt_tokens"] != len(prompt) or usage["completion_tokens"] != len(emitted)
+            or usage["prompt_tokens_details"]["cached_tokens"] != 0):
+        raise ValueError("Reference IDs, lengths or cache receipt disagree")
+
+    def sample(path, metric):
+        rows = re.findall(r"^" + re.escape(metric) + r"\{([^}\n]*)\}\s+([^\s]+)\s*$",
+                          path.read_text(), re.M)
+        matches = [float(value) for labels, value in rows
+                   if f'model_name="{model}"' in labels.split(",")]
+        if len(matches) != 1 or not math.isfinite(matches[0]) or matches[0] < 0:
+            raise ValueError(f"Expected one valid {metric} series")
+        return matches[0]
+
+    before, after = directory / "before.prom", directory / "after.prom"
+    durations = []
+    for phase in ("prefill", "decode"):
+        metric = f"vllm:request_{phase}_time_seconds"
+        if sample(after, metric + "_count") - sample(before, metric + "_count") != 1:
+            raise ValueError(f"Expected one {phase} observation")
+        durations.append(sample(after, metric + "_sum") - sample(before, metric + "_sum"))
+    return durations
+
+
+def score(prefill_s, decode_s, prompt_tokens, output_tokens):
+    if not all(math.isfinite(seconds) and seconds > 0 for seconds in (prefill_s, decode_s)):
+        raise ValueError("Invalid phase duration")
+    return {"prefill_s": prefill_s, "decode_s": decode_s,
+            "cold_prefill_tok_s": prompt_tokens / prefill_s,
+            "decode_tok_s": (output_tokens - 1) / decode_s}
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("request", type=Path)
@@ -49,11 +87,9 @@ def main():
         expected = list(map(int, args.expected_prefix.read_text().split()))
         if emitted[:len(expected)] != expected:
             raise ValueError("Frozen output prefix mismatch")
-    c1.PROMPT, c1.OUTPUT = len(prompt), output
-    c1.fixture = lambda: (prompt, emitted)
-    ref = args.reference_arm
-    native = c1.result(*(max(values) for values in zip(*ranks)))
-    vllm = c1.vllm(ref / "response.json", ref / "before.prom", ref / "after.prom")
+    native = score(*(max(values) for values in zip(*ranks)), len(prompt), output)
+    vllm = score(*read_reference(args.reference_arm, request["model"], prompt, emitted),
+                 len(prompt), output)
     print(json.dumps({"native": native, "native_rank_seconds": ranks, "vllm": vllm}, indent=2))
 
 
