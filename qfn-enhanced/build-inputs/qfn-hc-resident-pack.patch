@@ -1,0 +1,120 @@
+--- a/src/kernels.hpp
++++ b/src/kernels.hpp
+@@ -211,6 +211,11 @@
+                             const std::vector<sycl::event>& deps = {});
+ struct QfnMoeTile;
+ // Two independent 5120-wide BF16 products for Flash-Next's HC down projection.
++sycl::event launch_qfn_hc_pack_down(sycl::queue& q, const QuantWeight& w,
++    sycl_bf16* packed);
++sycl::event launch_qfn_hc_down_packed(sycl::queue& q, const QuantWeight& w,
++    const sycl_bf16* packed, const sycl_bf16* x, float* y, int rows,
++    const std::vector<sycl::event>& deps = {});
+ sycl::event launch_qfn_hc_down_tiled(sycl::queue& q, const QuantWeight& w,
+                                     const sycl_bf16* x, float* y, int rows,
+                                     const std::vector<sycl::event>& deps);
+--- a/src/gemm_fast.cpp
++++ b/src/gemm_fast.cpp
+@@ -3923,6 +3923,22 @@
+     return gemm_fast_run<0>(q, w, x, y, M, deps);
+ }
+ 
++sycl::event launch_qfn_hc_pack_down(sycl::queue& q, const QuantWeight& w,
++                                    sycl_bf16* packed) {
++    if (w.fmt != Fmt::BF16 || w.K != 10240 || w.N != 320 || !w.payload || !packed)
++        throw std::invalid_argument("invalid QFN HC down weight for resident packing");
++    return dequant_vnni<Fmt::BF16>(q, w, packed, {}, w.N);
++}
++
++sycl::event launch_qfn_hc_down_packed(sycl::queue& q, const QuantWeight& w,
++                                      const sycl_bf16* packed, const sycl_bf16* x,
++                                      float* y, int rows, const std::vector<sycl::event>& deps) {
++    if (w.fmt != Fmt::BF16 || w.K != 10240 || w.N != 320 || !packed ||
++        !gemm_fast_shape_ok(w, rows))
++        throw std::invalid_argument("invalid QFN HC tiled packed operands");
++    return gemm_bf16_vnni<0, false, 64>(q, x, packed, y, rows, w.N, w.K, deps, w.N);
++}
++
+ sycl::event launch_qfn_hc_down_tiled(sycl::queue& q, const QuantWeight& w,
+                                     const sycl_bf16* x, float* y, int rows,
+                                     const std::vector<sycl::event>& deps) {
+--- a/src/grimoire.cpp
++++ b/src/grimoire.cpp
+@@ -3200,6 +3200,7 @@
+         struct HCDev {
+             bf16_t*  norm = nullptr;    // [hc*H], applied as (1 + w)
+             DevQuant down;              // [lowrank][hc*H]
++            sycl_bf16* down_packed = nullptr;  // optional resident [K/2][N][2]
+             DevQuant inject;            // [hc][hc*H]  -- absent on the mixer
+             DevQuant up;                // [hc*H][lowrank]
+         };
+@@ -7231,6 +7232,9 @@
+     size_t bytes = 0;
+     bool ok = true;
+     auto acct = [&](size_t b) { bytes += b; };
++    const char* packed_hc = std::getenv("GRIMOIRE_QFN_HC_RESIDENT_PACK");
++    const bool resident_hc_pack = qfn_tp4_plan && packed_hc && std::strcmp(packed_hc, "1") == 0;
++
+     auto shard = [&](DevQuant& d,sycl::queue& owner) {
+         if(ok&&!tp_shard_rows(d,owner,err))ok=false;
+     };
+@@ -7559,6 +7563,17 @@
+                                               (std::string(tag)+".inject").c_str(), &ok);
+                 dst.up   = quantize_upload_t(lq, ck, sref.up, Fmt::BF16,
+                                              (std::string(tag)+".up").c_str(), &ok);
++                if (resident_hc_pack && ok) {
++                    const auto& weight = dst.down.w;
++                    if (weight.fmt != Fmt::BF16 || weight.N != 320 || weight.K != 10240)
++                        throw std::runtime_error("QFN resident HC pack requires BF16 320-by-10240 weights");
++                    const size_t entries = size_t(weight.N) * weight.K;
++                    dst.down_packed = sycl::malloc_device<sycl_bf16>(entries, lq);
++                    if (!dst.down_packed) throw std::bad_alloc();
++                    lq.wait_and_throw();
++                    launch_qfn_hc_pack_down(lq, weight, dst.down_packed).wait_and_throw();
++                    acct(entries * sizeof(sycl_bf16));
++                }
+             };
+             up_hc(d.hc_attn, src.hc_attn, "attn_hyper_connection");
+             up_hc(d.hc_mlp,  src.hc_mlp,  "mlp_hyper_connection");
+@@ -12419,6 +12434,7 @@
+                         // does not leak a buffer, it runs the box out of
+                         // RAM on the second load.
+                         (void*)d.hc_attn.norm, (void*)d.hc_mlp.norm,
++                        (void*)d.hc_attn.down_packed, (void*)d.hc_mlp.down_packed,
+                         (void*)d.ix_qn, (void*)d.ix_kn,
+                         (void*)d.ix_raw_base, (void*)d.ix_cmp_base,
+                         (void*)d.ple_nk, (void*)d.ple_nq, (void*)d.ple_nc,
+@@ -19634,7 +19650,7 @@
+     const bool fuse_prefill_hc = hf && std::strcmp(hf, "1") == 0 && qfn_ranked_xmx && qfn_xmx;
+     const char* tile_hc = std::getenv("GRIMOIRE_QFN_HC_DOWN_TILED");
+     const bool tiled_prefill_hc = tile_hc && std::strcmp(tile_hc, "1") == 0 && qfn_ranked_xmx && qfn_xmx;
+-    size_t hc_fused_calls = 0, hc_tiled_calls = 0;
++    size_t hc_fused_calls = 0, hc_tiled_calls = 0, hc_resident_calls = 0;
+     const bool dn_prof = std::getenv("GRIMOIRE_QFN_DN_PROFILE") != nullptr;
+     double dnp_ms[6] = {0, 0, 0, 0, 0, 0};   // qkv conv gates scan z other
+     auto dnp_t = std::chrono::steady_clock::now();
+@@ -19714,7 +19730,14 @@
+             traced("hc.down.activation_bf16", [&] {
+                 launch_f32_to_bf16(q, normed, xb, size_t(MR) * WIDE, none);
+             });
+-            traced("hc.down.tiled", [&] { launch_qfn_hc_down_tiled(q, hc.down.w, xb, lora, MR, none); });
++            if (hc.down_packed) {
++                traced("hc.down.resident_vnni", [&] {
++                    launch_qfn_hc_down_packed(q, hc.down.w, hc.down_packed, xb, lora, MR, none);
++                });
++                ++hc_resident_calls;
++            } else {
++                traced("hc.down.tiled", [&] { launch_qfn_hc_down_tiled(q, hc.down.w, xb, lora, MR, none); });
++            }
+             ++hc_tiled_calls;
+         } else {
+             mm(hc.down, normed, lora);
+@@ -20588,6 +20611,9 @@
+     if (fuse_prefill_hc && std::getenv("GRIMOIRE_BUDGET_DEBUG"))
+         std::fprintf(stderr, "QFN HC prefill fused rank=%d pos=%d rows=%d calls=%zu\n",
+                      tp_rank, start_pos, M, hc_fused_calls);
++    if (hc_resident_calls)
++        std::fprintf(stderr, "QFN HC resident VNNI rank=%d rows=%d calls=%zu\n",
++                     tp_rank, M, hc_resident_calls);
+     if (qfn_grouped_profile && xmx_batches)
+         std::fprintf(stderr, "QFN grouped projection: rank=%d rows=%d gu_calls=%u gu_ms=%.3f down_calls=%u down_ms=%.3f\n",
+                      tp_rank, M, grouped_calls[0], double(grouped_ns[0]) / 1e6,
