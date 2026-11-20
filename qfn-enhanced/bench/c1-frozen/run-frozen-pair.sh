@@ -84,7 +84,15 @@ native() (
     export GRIMOIRE_QFN_HC_DOWN_TILED=1 GRIMOIRE_QFN_HC_FUSED_PREFILL=1
     NATIVE_BIN=/tmp/qfn-catchup.pf1/verifier/qfn-verifier
     case "${NATIVE_MODE:-baseline}" in
-        baseline) ;;
+        baseline)
+            if [[ $fixture == long-decode ]]; then
+                build="$Q/../receipts/long-decode-build"
+                [[ $(< "$build/build-long.exit") == 0 ]]
+                (cd "$build"; sha256sum -c long.sha256)
+                NATIVE_BIN=$build/qfn-combined
+                export GRIMOIRE_BENCH_IGNORE_EOS=1
+            fi
+            ;;
         replay)
             [[ $fixture == frozen && ${PAIR_ORDER:-} == native-only ]]
             build="$Q/../receipts/row-replay-build"

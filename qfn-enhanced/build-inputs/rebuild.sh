@@ -12,6 +12,7 @@ patches=()
 case $variant in
     combined-c1) ;;
     prefill-cost) inputs=$root/prefill-cost; target=qfn-hc-m64 ;;
+    long-decode) patches=(bench-ignore-eos.patch) ;;
     row-replay) patches=(row-replay.patch) ;;
     hc-resident) patches=(qfn-hc-resident-pack.patch) ;;
     hc-fused) patches=(hc-fused-bf16.patch) ;;

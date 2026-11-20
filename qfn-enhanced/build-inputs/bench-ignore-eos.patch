@@ -1,0 +1,13 @@
+--- a/src/grimoire.cpp
++++ b/src/grimoire.cpp
+@@ -24732,7 +24732,9 @@
+         };
+         FinishReason reason;
+         const auto start=std::chrono::steady_clock::now();
+-        int n=generate_ranked(e,ids,n_predict,tk.eos(),out,tk.eos2(),
++        const char* ignore_env = std::getenv("GRIMOIRE_BENCH_IGNORE_EOS");
++        const bool ignore_eos = ignore_env && std::strcmp(ignore_env, "1") == 0;
++        int n=generate_ranked(e,ids,n_predict,ignore_eos ? -1 : tk.eos(),out,ignore_eos ? -1 : tk.eos2(),
+             [&](int32_t t){return decoder.push(t,emit);},&reason,e.qfn_mtp3_diagnostic);
+         decoder.finish(emit);
+         std::printf("\n");
