@@ -74,3 +74,21 @@ The native fenced full-chunk span was 1,192.519 ms. Native and reference instrum
 The integrated verifier's fenced step was about 59.98 ms, with draft 4.17 ms and verify 55.24 ms. Full attention is now roughly 4.2–4.8 ms per verify step, while MoE is roughly 24–25 ms, HC about 6 ms, and DeltaNet about 7 ms. With 31 decode tokens over 11 rounds, 140 tok/s permits 20.12987 ms per round. Eliminating the entire remaining attention bucket would leave the round far above budget. The next decode implementation should prioritize the complete routed stage, including routing and returns, sharing committed row state and traffic across the fixed four-row schedule. Head batching, coalesced V staging, and recent scratch reuse are smaller controlled experiments. Estimate up to 1–2 ms per round for head reuse and V staging separately, bounded by their measured stage spans. Record actual cold and reused allocations in the scratch trial rather than assigning an additive gain.
 
 The HC up/mean candidate packs the four branches together while keeping BF16 input rounding and FP32 accumulation. It avoids roughly 16.1 GB of separate gate writes and reads per rank over 96 mixers at 2,048 rows. Budget 35–70 ms as a hypothesis against the 185.3 ms measured up-plus-mean path. The packed weights cost 600 MiB per rank and full context capacity needs qualification. Neither this estimate nor the causal tile estimate is a serving result.
+
+## Combined native serving candidate, final diagnostic profile
+
+The combined causal-tile, HC up/mean and FP32 RSAG build passed the frozen 32-token output gate in the separate profiling run. This table uses all four ranks. Native fenced and reference current-stream scopes differ.
+
+| Stage | Native 2,048 rows, rank range (ms) | Reference 2,048 rows, rank range (ms) |
+|---|---:|---:|
+| HC | 168.9–170.4 | 93.150–94.601 |
+| Dense attention | 204.4–204.5 | 19.291–19.405 |
+| DeltaNet | 333.8–333.9 | 61.459–62.080 |
+| MoE | 317.8–318.0 | 161.238–162.126 |
+| PLE | 16.3 | 2.168–2.198 layer; 7.726–8.104 prepare |
+| Inclusive collective boundary | 183.293–187.790 | 68.355–82.748 |
+| Whole chunk span | 1041.505–1042.758 | 397.821–400.703 |
+
+The combined HC up-plus-mean path recorded 31.8 ms on rank 0. It uses persistent packed BF16 weights, the existing BF16 activation conversion and an in-kernel FP32 mean. The stage profile alone does not give the serving gain. Fresh full-chunk work is dominated by DeltaNet projections and movement, then the inclusive MoE stage and dense attention. The irregular 658-row chunk spans 937.877–938.783 ms and its inclusive MoE phase is 560.9–561.0 ms. Routed-device work there is 381.825–420.629 ms. Collective spans overlap the phase allocations above, and reference wire-only time is still unmeasured.
+
+The remaining full-width gap calls for stage-specific changes to the QFN forward path. Prioritize the DeltaNet projection layouts and exact dense cache handling before changing recurrence math. Keep the known four-rank placement to avoid full-width intermediates where consumers can use a shard. For irregular chunks, replay live expert rows and measure the complete route/pack/projection/gather sequence before integrating the existing tail Xe2 work. The decode diagnostic still needs a batched routed stage that retains target-only recurrent, convolution, KV and PLE continuation. Its small-M alternative failed the frozen output gate. The authoritative performance measurements remain the unprofiled ABBA phase receipts.

@@ -1,0 +1,48 @@
+QFN TP prefill reduce rank=0 pos=0 rows=2048 kind=ple elems=5242880 calls=1 comm_ms=1.815 drain_ms=0.270 copy_ms=1.327 ready_ms=0.220 sum_ms=0.094 reuse_ms=0.072 gather_ms=0.100 peer_bytes=31457280
+QFN TP prefill reduce rank=0 pos=0 rows=2048 kind=deltanet elems=5242880 calls=36 comm_ms=65.992 drain_ms=0.011 copy_ms=48.762 ready_ms=7.811 sum_ms=3.401 reuse_ms=2.325 gather_ms=3.662 peer_bytes=1132462080
+QFN TP prefill reduce rank=0 pos=0 rows=2048 kind=attention elems=5242880 calls=12 comm_ms=22.019 drain_ms=0.004 copy_ms=15.948 ready_ms=2.951 sum_ms=1.094 reuse_ms=0.774 gather_ms=1.242 peer_bytes=377487360
+QFN TP prefill reduce rank=0 pos=0 rows=2048 kind=moe elems=5242880 calls=48 comm_ms=97.489 drain_ms=0.015 copy_ms=63.483 ready_ms=21.736 sum_ms=4.248 reuse_ms=3.171 gather_ms=4.812 peer_bytes=1509949440
+QFN TP prefill profile rank=0 pos=0 rows=2048 calls=97 grouped=48 span_ms=1042.758 communication_ms=187.315 routed_plan_ms=4.740 routed_device_ms=135.767 rest_ms=714.936
+QFN DN prefill profile: rank=0 rows=2048 qkv_ms=124.811 conv_norm_ms=45.643 gates_ms=0.634 scan_ms=12.061 z_ms=41.757 other_ms=780.923
+QFN TP prefill reduce rank=0 pos=2048 rows=658 kind=ple elems=1684480 calls=1 comm_ms=1.291 drain_ms=0.095 copy_ms=0.872 ready_ms=0.219 sum_ms=0.106 reuse_ms=0.092 gather_ms=0.000 peer_bytes=20213760
+QFN TP prefill reduce rank=0 pos=2048 rows=658 kind=deltanet elems=1684480 calls=36 comm_ms=44.218 drain_ms=0.012 copy_ms=30.511 ready_ms=6.682 sum_ms=3.685 reuse_ms=3.308 gather_ms=0.000 peer_bytes=727695360
+QFN TP prefill reduce rank=0 pos=2048 rows=658 kind=attention elems=1684480 calls=12 comm_ms=14.936 drain_ms=0.005 copy_ms=10.276 ready_ms=2.272 sum_ms=1.260 reuse_ms=1.116 gather_ms=0.000 peer_bytes=242565120
+QFN TP prefill reduce rank=0 pos=2048 rows=658 kind=moe elems=1684480 calls=48 comm_ms=119.398 drain_ms=0.015 copy_ms=40.332 ready_ms=69.112 sum_ms=5.079 reuse_ms=4.828 gather_ms=0.000 peer_bytes=970260480
+QFN TP prefill profile rank=0 pos=2048 rows=658 calls=97 grouped=48 span_ms=938.783 communication_ms=179.843 routed_plan_ms=2.302 routed_device_ms=381.825 rest_ms=374.813
+QFN DN prefill profile: rank=0 rows=658 qkv_ms=31.038 conv_norm_ms=13.581 gates_ms=0.736 scan_ms=3.109 z_ms=21.553 other_ms=832.700
+QFN TP prefill reduce rank=1 pos=0 rows=2048 kind=ple elems=5242880 calls=1 comm_ms=4.721 drain_ms=0.481 copy_ms=1.363 ready_ms=3.101 sum_ms=0.084 reuse_ms=0.062 gather_ms=0.110 peer_bytes=31457280
+QFN TP prefill reduce rank=1 pos=0 rows=2048 kind=deltanet elems=5242880 calls=36 comm_ms=66.036 drain_ms=0.011 copy_ms=50.990 ready_ms=5.649 sum_ms=3.384 reuse_ms=2.264 gather_ms=3.719 peer_bytes=1132462080
+QFN TP prefill reduce rank=1 pos=0 rows=2048 kind=attention elems=5242880 calls=12 comm_ms=21.746 drain_ms=0.004 copy_ms=16.632 ready_ms=2.033 sum_ms=1.057 reuse_ms=0.781 gather_ms=1.233 peer_bytes=377487360
+QFN TP prefill reduce rank=1 pos=0 rows=2048 kind=moe elems=5242880 calls=48 comm_ms=95.287 drain_ms=0.015 copy_ms=66.586 ready_ms=16.398 sum_ms=4.292 reuse_ms=3.084 gather_ms=4.888 peer_bytes=1509949440
+QFN TP prefill profile rank=1 pos=0 rows=2048 calls=97 grouped=48 span_ms=1041.662 communication_ms=187.790 routed_plan_ms=4.755 routed_device_ms=138.070 rest_ms=711.048
+QFN DN prefill profile: rank=1 rows=2048 qkv_ms=125.023 conv_norm_ms=45.682 gates_ms=0.614 scan_ms=11.621 z_ms=41.736 other_ms=780.052
+QFN TP prefill reduce rank=1 pos=2048 rows=658 kind=ple elems=1684480 calls=1 comm_ms=3.579 drain_ms=0.160 copy_ms=0.955 ready_ms=2.424 sum_ms=0.112 reuse_ms=0.087 gather_ms=0.000 peer_bytes=20213760
+QFN TP prefill reduce rank=1 pos=2048 rows=658 kind=deltanet elems=1684480 calls=36 comm_ms=44.237 drain_ms=0.011 copy_ms=32.587 ready_ms=4.636 sum_ms=3.608 reuse_ms=3.374 gather_ms=0.000 peer_bytes=727695360
+QFN TP prefill reduce rank=1 pos=2048 rows=658 kind=attention elems=1684480 calls=12 comm_ms=14.870 drain_ms=0.019 copy_ms=11.076 ready_ms=1.416 sum_ms=1.244 reuse_ms=1.123 gather_ms=0.000 peer_bytes=242565120
+QFN TP prefill reduce rank=1 pos=2048 rows=658 kind=moe elems=1684480 calls=48 comm_ms=98.348 drain_ms=0.014 copy_ms=43.010 ready_ms=45.376 sum_ms=4.913 reuse_ms=5.001 gather_ms=0.000 peer_bytes=970260480
+QFN TP prefill profile rank=1 pos=2048 rows=658 calls=97 grouped=48 span_ms=938.420 communication_ms=161.035 routed_plan_ms=2.300 routed_device_ms=402.998 rest_ms=372.087
+QFN DN prefill profile: rank=1 rows=658 qkv_ms=30.834 conv_norm_ms=13.500 gates_ms=0.619 scan_ms=3.103 z_ms=21.434 other_ms=832.913
+QFN TP prefill reduce rank=2 pos=0 rows=2048 kind=ple elems=5242880 calls=1 comm_ms=4.723 drain_ms=0.478 copy_ms=1.384 ready_ms=3.084 sum_ms=0.081 reuse_ms=0.066 gather_ms=0.106 peer_bytes=31457280
+QFN TP prefill reduce rank=2 pos=0 rows=2048 kind=deltanet elems=5242880 calls=36 comm_ms=65.686 drain_ms=0.011 copy_ms=51.555 ready_ms=4.733 sum_ms=3.384 reuse_ms=2.345 gather_ms=3.639 peer_bytes=1132462080
+QFN TP prefill reduce rank=2 pos=0 rows=2048 kind=attention elems=5242880 calls=12 comm_ms=21.773 drain_ms=0.004 copy_ms=16.826 ready_ms=1.878 sum_ms=1.040 reuse_ms=0.824 gather_ms=1.196 peer_bytes=377487360
+QFN TP prefill reduce rank=2 pos=0 rows=2048 kind=moe elems=5242880 calls=48 comm_ms=92.076 drain_ms=0.014 copy_ms=67.040 ready_ms=12.702 sum_ms=4.326 reuse_ms=3.114 gather_ms=4.855 peer_bytes=1509949440
+QFN TP prefill profile rank=2 pos=0 rows=2048 calls=97 grouped=48 span_ms=1041.505 communication_ms=184.258 routed_plan_ms=4.745 routed_device_ms=141.305 rest_ms=711.198
+QFN DN prefill profile: rank=2 rows=2048 qkv_ms=124.895 conv_norm_ms=45.675 gates_ms=0.692 scan_ms=12.085 z_ms=41.759 other_ms=779.470
+QFN TP prefill reduce rank=2 pos=2048 rows=658 kind=ple elems=1684480 calls=1 comm_ms=3.581 drain_ms=0.156 copy_ms=0.943 ready_ms=2.438 sum_ms=0.105 reuse_ms=0.094 gather_ms=0.000 peer_bytes=20213760
+QFN TP prefill reduce rank=2 pos=2048 rows=658 kind=deltanet elems=1684480 calls=36 comm_ms=44.260 drain_ms=0.012 copy_ms=32.607 ready_ms=4.631 sum_ms=3.454 reuse_ms=3.536 gather_ms=0.000 peer_bytes=727695360
+QFN TP prefill reduce rank=2 pos=2048 rows=658 kind=attention elems=1684480 calls=12 comm_ms=15.008 drain_ms=0.005 copy_ms=11.044 ready_ms=1.586 sum_ms=1.185 reuse_ms=1.180 gather_ms=0.000 peer_bytes=242565120
+QFN TP prefill reduce rank=2 pos=2048 rows=658 kind=moe elems=1684480 calls=48 comm_ms=91.589 drain_ms=0.015 copy_ms=42.861 ready_ms=38.793 sum_ms=4.668 reuse_ms=5.219 gather_ms=0.000 peer_bytes=970260480
+QFN TP prefill profile rank=2 pos=2048 rows=658 calls=97 grouped=48 span_ms=938.369 communication_ms=154.438 routed_plan_ms=2.285 routed_device_ms=409.850 rest_ms=371.796
+QFN DN prefill profile: rank=2 rows=658 qkv_ms=30.790 conv_norm_ms=13.465 gates_ms=0.624 scan_ms=3.104 z_ms=21.449 other_ms=832.889
+QFN TP prefill reduce rank=3 pos=0 rows=2048 kind=ple elems=5242880 calls=1 comm_ms=4.726 drain_ms=0.478 copy_ms=1.332 ready_ms=3.139 sum_ms=0.081 reuse_ms=0.063 gather_ms=0.109 peer_bytes=31457280
+QFN TP prefill reduce rank=3 pos=0 rows=2048 kind=deltanet elems=5242880 calls=36 comm_ms=65.707 drain_ms=0.011 copy_ms=49.612 ready_ms=6.731 sum_ms=3.346 reuse_ms=2.268 gather_ms=3.720 peer_bytes=1132462080
+QFN TP prefill reduce rank=3 pos=0 rows=2048 kind=attention elems=5242880 calls=12 comm_ms=21.775 drain_ms=0.005 copy_ms=16.261 ready_ms=2.444 sum_ms=1.042 reuse_ms=0.794 gather_ms=1.225 peer_bytes=377487360
+QFN TP prefill reduce rank=3 pos=0 rows=2048 kind=moe elems=5242880 calls=48 comm_ms=91.085 drain_ms=0.014 copy_ms=64.798 ready_ms=14.028 sum_ms=4.242 reuse_ms=3.108 gather_ms=4.871 peer_bytes=1509949440
+QFN TP prefill profile rank=3 pos=0 rows=2048 calls=97 grouped=48 span_ms=1042.266 communication_ms=183.293 routed_plan_ms=4.783 routed_device_ms=142.284 rest_ms=711.907
+QFN DN prefill profile: rank=3 rows=2048 qkv_ms=126.224 conv_norm_ms=44.780 gates_ms=0.596 scan_ms=11.861 z_ms=41.728 other_ms=780.199
+QFN TP prefill reduce rank=3 pos=2048 rows=658 kind=ple elems=1684480 calls=1 comm_ms=3.578 drain_ms=0.160 copy_ms=0.914 ready_ms=2.463 sum_ms=0.103 reuse_ms=0.097 gather_ms=0.000 peer_bytes=20213760
+QFN TP prefill reduce rank=3 pos=2048 rows=658 kind=deltanet elems=1684480 calls=36 comm_ms=43.730 drain_ms=0.012 copy_ms=31.272 ready_ms=5.430 sum_ms=3.639 reuse_ms=3.357 gather_ms=0.000 peer_bytes=727695360
+QFN TP prefill reduce rank=3 pos=2048 rows=658 kind=attention elems=1684480 calls=12 comm_ms=14.981 drain_ms=0.004 copy_ms=10.488 ready_ms=2.111 sum_ms=1.245 reuse_ms=1.124 gather_ms=0.000 peer_bytes=242565120
+QFN TP prefill reduce rank=3 pos=2048 rows=658 kind=moe elems=1684480 calls=48 comm_ms=80.752 drain_ms=0.016 copy_ms=41.278 ready_ms=29.471 sum_ms=4.935 reuse_ms=5.016 gather_ms=0.000 peer_bytes=970260480
+QFN TP prefill profile rank=3 pos=2048 rows=658 calls=97 grouped=48 span_ms=937.877 communication_ms=143.041 routed_plan_ms=2.315 routed_device_ms=420.629 rest_ms=371.892
+QFN DN prefill profile: rank=3 rows=658 qkv_ms=30.825 conv_norm_ms=13.470 gates_ms=0.628 scan_ms=3.107 z_ms=21.445 other_ms=832.357

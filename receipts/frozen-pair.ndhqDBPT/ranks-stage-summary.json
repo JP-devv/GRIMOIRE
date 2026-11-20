@@ -1,0 +1,118 @@
+[
+  {
+    "rank": 0,
+    "chunks": {
+      "2048": {
+        "ple": 16.3,
+        "hc": 170.4,
+        "deltanet": 333.9,
+        "dense_attention": 204.4,
+        "moe": 317.8,
+        "span_ms": 1042.758,
+        "inclusive_collective_ms": 187.315,
+        "routed_plan_ms": 4.74,
+        "routed_device_ms": 135.767,
+        "rounds": 97
+      },
+      "658": {
+        "ple": 8.2,
+        "hc": 105.3,
+        "deltanet": 132.9,
+        "dense_attention": 131.4,
+        "moe": 561.0,
+        "span_ms": 938.783,
+        "inclusive_collective_ms": 179.843,
+        "routed_plan_ms": 2.302,
+        "routed_device_ms": 381.825,
+        "rounds": 97
+      }
+    }
+  },
+  {
+    "rank": 1,
+    "chunks": {
+      "2048": {
+        "ple": 16.3,
+        "hc": 169.2,
+        "deltanet": 333.8,
+        "dense_attention": 204.4,
+        "moe": 317.9,
+        "span_ms": 1041.662,
+        "inclusive_collective_ms": 187.79,
+        "routed_plan_ms": 4.755,
+        "routed_device_ms": 138.07,
+        "rounds": 97
+      },
+      "658": {
+        "ple": 8.2,
+        "hc": 105.5,
+        "deltanet": 132.4,
+        "dense_attention": 131.4,
+        "moe": 560.9,
+        "span_ms": 938.42,
+        "inclusive_collective_ms": 161.035,
+        "routed_plan_ms": 2.3,
+        "routed_device_ms": 402.998,
+        "rounds": 97
+      }
+    }
+  },
+  {
+    "rank": 2,
+    "chunks": {
+      "2048": {
+        "ple": 16.3,
+        "hc": 168.9,
+        "deltanet": 333.8,
+        "dense_attention": 204.5,
+        "moe": 318.0,
+        "span_ms": 1041.505,
+        "inclusive_collective_ms": 184.258,
+        "routed_plan_ms": 4.745,
+        "routed_device_ms": 141.305,
+        "rounds": 97
+      },
+      "658": {
+        "ple": 8.2,
+        "hc": 105.5,
+        "deltanet": 132.3,
+        "dense_attention": 131.4,
+        "moe": 561.0,
+        "span_ms": 938.369,
+        "inclusive_collective_ms": 154.438,
+        "routed_plan_ms": 2.285,
+        "routed_device_ms": 409.85,
+        "rounds": 97
+      }
+    }
+  },
+  {
+    "rank": 3,
+    "chunks": {
+      "2048": {
+        "ple": 16.3,
+        "hc": 169.7,
+        "deltanet": 333.8,
+        "dense_attention": 204.5,
+        "moe": 318.0,
+        "span_ms": 1042.266,
+        "inclusive_collective_ms": 183.293,
+        "routed_plan_ms": 4.783,
+        "routed_device_ms": 142.284,
+        "rounds": 97
+      },
+      "658": {
+        "ple": 8.2,
+        "hc": 105.5,
+        "deltanet": 131.8,
+        "dense_attention": 131.4,
+        "moe": 561.0,
+        "span_ms": 937.877,
+        "inclusive_collective_ms": 143.041,
+        "routed_plan_ms": 2.315,
+        "routed_device_ms": 420.629,
+        "rounds": 97
+      }
+    }
+  }
+]
