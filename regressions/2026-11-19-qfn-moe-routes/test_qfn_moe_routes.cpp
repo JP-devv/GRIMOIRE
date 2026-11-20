@@ -140,6 +140,26 @@ void expect_error(Call call) {
     assert(false && "expected route plan construction to reject the input");
 }
 
+void test_tp4_resident_windows() {
+    const std::vector<std::int32_t> global{0, 127, 128, 255, 256, 383, 384, 511, 128, 0, 255, -1};
+    const auto original = global;
+    for (int rank = 0; rank < 4; ++rank) {
+        const int begin = rank * 128;
+        auto local = global;
+        for (auto& id : local) id = id >= begin && id < begin+128 ? id-begin : -1;
+        const auto actual = make_qfn_moe_route_plan(global.data(), global.size(), 3, 4, 512, begin, 128);
+        check_plan(actual, local, 4, 128);
+        check_gather(actual, local, 4, 3);
+        const auto expected = make_qfn_moe_route_plan(local.data(), local.size(), 3, 4, 128);
+        assert(actual.inverse == expected.inverse && actual.perm_token == expected.perm_token);
+        assert(global == original);
+    }
+    for (const int begin : {-1, 385, std::numeric_limits<int>::max()})
+        expect_error<std::invalid_argument>([&] { make_qfn_moe_route_plan(global.data(), global.size(), 3, 4, 512, begin, 128); });
+    const std::int32_t bad[]{512};
+    expect_error<std::out_of_range>([&] { make_qfn_moe_route_plan(bad, 1, 1, 1, 512, 0, 128); });
+}
+
 void test_bad_inputs() {
     std::int32_t ids[]{0, 0};
     expect_error<std::invalid_argument>([&] { make_qfn_moe_route_plan(ids, 2, -1, 2, 512); });
@@ -167,6 +187,7 @@ int main() {
     test_flash_next();
     test_grouped_tiles();
     test_empty_and_non_top10();
+    test_tp4_resident_windows();
     test_bad_inputs();
     std::puts("QFN MoE route/gather regression passed");
 }

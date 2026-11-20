@@ -51,3 +51,9 @@ still match the gate and writes raw spans and derived throughputs to
 `timing.tsv`. Prefill is 2,706 tokens to prompt-ready. Decode is the 31
 subsequent tokens, from first token to last. Each rate uses the longest
 observed span across the four ranks for that phase.
+
+Set `QFN_BENCH_MODE=grouped` to keep peer transport fixed and compare dense
+XMX + routed GEMV (`dense`) against dense XMX + routed grouped XMX (`grouped`).
+The grouped gate checks that every rank used the grouped kernel in every
+chunk, and compares all 32 greedy IDs before timing. Use `QFN_BENCH_PAIRS=1`
+for an initial screening pair; the default uses both execution orders.

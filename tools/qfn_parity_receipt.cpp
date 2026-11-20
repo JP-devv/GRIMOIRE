@@ -131,18 +131,21 @@ int main(int argc, char** argv) {
             std::cout << "QFN parity receipt parser PASS\n";
             return 0;
         }
-        const bool transport = argc == 4 && std::string(argv[1]) == "--tp4";
-        if (!transport && argc != 3) throw std::runtime_error("usage: qfn_parity_receipt [--tp4] RUN_DIR 1|32");
-        const std::string len = argv[transport ? 3 : 2];
+        const std::string mode = argc == 4 ? argv[1] : "";
+        if (argc != 3 && mode != "--tp4" && mode != "--grouped")
+            throw std::runtime_error("usage: qfn_parity_receipt [--tp4|--grouped] RUN_DIR 1|32");
+        const std::string len = argv[argc == 4 ? 3 : 2];
         if (len != "1" && len != "32") throw std::runtime_error("expected output length 1 or 32");
-        const auto root = argv[transport ? 2 : 1];
-        const auto left = layout(root, transport ? "host" : "pp4", std::stoi(len));
-        const auto right = layout(root, transport ? "peer" : "tp4", std::stoi(len));
+        const auto root = argv[argc == 4 ? 2 : 1];
+        const std::string left_name = mode == "--tp4" ? "host" : mode == "--grouped" ? "dense" : "pp4";
+        const std::string right_name = mode == "--tp4" ? "peer" : mode == "--grouped" ? "grouped" : "tp4";
+        const auto left = layout(root, left_name, std::stoi(len));
+        const auto right = layout(root, right_name, std::stoi(len));
         const auto mismatch = std::mismatch(left.begin(), left.end(), right.begin());
         if (mismatch.first != left.end()) {
             std::cout << "FAIL: first differing generated token " << (mismatch.first - left.begin() + 1)
-                      << (transport ? " (TP4 host " : " (PP4 ") << *mismatch.first
-                      << (transport ? ", TP4 peer " : ", TP4 ") << *mismatch.second << ")\n";
+                      << " (" << (mode.empty() ? "PP4" : left_name) << ' ' << *mismatch.first
+                      << ", " << (mode.empty() ? "TP4" : right_name) << ' ' << *mismatch.second << ")\n";
             return 1;
         }
         std::cout << "PASS: all " << len << " greedy IDs match\n";

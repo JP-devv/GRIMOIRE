@@ -20,10 +20,14 @@ struct QfnMoeRoutePlan {
 // absent; every other ID must be in [0, num_experts). Active slots retain their
 // input order within each expert. Gather with the original top_k stride and
 // weights, skipping inverse == -1. offsets.back() is the active row count.
-// Zero rows and all-absent tables are valid; top_k and num_experts must be positive.
+// Only experts in [expert_begin, expert_begin + expert_count) have local rows;
+// tile expert indexes are relative to expert_begin, and nonlocal slots keep -1.
+// Zero rows and all-absent tables are valid.
 inline QfnMoeRoutePlan make_qfn_moe_route_plan(const std::int32_t* ids, std::size_t id_count,
-                                              int rows, int top_k, int num_experts) {
-    if (rows < 0 || top_k <= 0 || num_experts <= 0) {
+                                              int rows, int top_k, int num_experts,
+                                              int expert_begin, int expert_count) {
+    if (rows < 0 || top_k <= 0 || num_experts <= 0 || expert_count <= 0 ||
+        expert_begin < 0 || expert_begin > num_experts || expert_count > num_experts - expert_begin) {
         throw std::invalid_argument("invalid QFN MoE route shape");
     }
     if (rows > std::numeric_limits<std::int32_t>::max() / top_k) {
@@ -35,14 +39,15 @@ inline QfnMoeRoutePlan make_qfn_moe_route_plan(const std::int32_t* ids, std::siz
     }
 
     QfnMoeRoutePlan plan;
-    plan.counts.resize(static_cast<std::size_t>(num_experts));
+    plan.counts.resize(static_cast<std::size_t>(expert_count));
+    const int expert_end = expert_begin + expert_count;
     for (std::size_t r = 0; r < slots; ++r) {
         const auto e = ids[r];
         if (e == -1) continue;
         if (e < 0 || e >= num_experts) {
             throw std::out_of_range("invalid QFN MoE expert ID");
         }
-        ++plan.counts[e];
+        if (e >= expert_begin && e < expert_end) ++plan.counts[e - expert_begin];
     }
 
     plan.offsets.resize(plan.counts.size() + 1);
@@ -54,12 +59,17 @@ inline QfnMoeRoutePlan make_qfn_moe_route_plan(const std::int32_t* ids, std::siz
     auto next = plan.offsets;
     for (std::size_t r = 0; r < slots; ++r) {
         const auto e = ids[r];
-        if (e == -1) continue;
-        const auto p = next[e]++;
+        if (e < expert_begin || e >= expert_end) continue;
+        const auto p = next[e - expert_begin]++;
         plan.perm_token[p] = static_cast<std::int32_t>(r / top_k);
         plan.inverse[r] = p;
     }
     return plan;
+}
+
+inline QfnMoeRoutePlan make_qfn_moe_route_plan(const std::int32_t* ids, std::size_t id_count,
+                                             int rows, int top_k, int num_experts) {
+    return make_qfn_moe_route_plan(ids, id_count, rows, top_k, num_experts, 0, num_experts);
 }
 
 // A work-group takes one contiguous expert-major tile. No per-expert

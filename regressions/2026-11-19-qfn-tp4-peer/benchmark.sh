@@ -74,17 +74,38 @@ run() {
         fi
     done
 }
-run host-gate 0 GRIMOIRE_QFN_LOGITS_AT_POS=2706 GRIMOIRE_BUDGET_DEBUG=1
-run peer-gate 1 GRIMOIRE_QFN_LOGITS_AT_POS=2706 GRIMOIRE_BUDGET_DEBUG=1
-stage=parity
-"$root/bin/qfn_parity_receipt" --tp4 "$out" 32 | tee "$out/parity.log"
-printf 'pair\ttransport\tprefill_ms\tdecode_ms\tprefill_tok_s\tdecode_tok_s\n' > "$out/timing.tsv"
-for arm in 1-host 1-peer 2-peer 2-host; do
+gate=(GRIMOIRE_QFN_LOGITS_AT_POS=2706 GRIMOIRE_BUDGET_DEBUG=1)
+mode=${QFN_BENCH_MODE:-transport}
+case $mode in
+    transport)
+        run host-gate 0 "${gate[@]}"
+        run peer-gate 1 "${gate[@]}"
+        stage=parity
+        "$root/bin/qfn_parity_receipt" --tp4 "$out" 32 | tee "$out/parity.log"
+        arms=(1-host 1-peer 2-peer 2-host)
+        ;;
+    grouped)
+        export GRIMOIRE_QFN_PREFILL_GEMV=0
+        run dense-gate 1 "${gate[@]}"
+        run grouped-gate 1 "${gate[@]}" GRIMOIRE_QFN_MOE_XMX=2 GRIMOIRE_QFN_MOE_TRACE=1
+        for rank in 0 1 2 3; do
+            [[ $(grep -c '^  QFN MoE XMX mode=2 .*dispatches=[1-9]' "$out/grouped-gate/matched-r$rank.log") == 6 ]]
+        done
+        stage=parity
+        "$root/bin/qfn_parity_receipt" --grouped "$out" 32 | tee "$out/parity.log"
+        arms=(1-dense 1-grouped 2-grouped 2-dense)
+        ;;
+    *) printf 'unknown QFN_BENCH_MODE: %s\n' "$mode" >&2; exit 2 ;;
+esac
+if [[ ${QFN_BENCH_PAIRS:-2} == 1 ]]; then arms=("${arms[@]:0:2}"); fi
+printf 'pair\tarm\tprefill_ms\tdecode_ms\tprefill_tok_s\tdecode_tok_s\n' > "$out/timing.tsv"
+for arm in "${arms[@]}"; do
     kind=${arm#*-}
-    peer=0; [[ $kind != peer ]] || peer=1
-    run "$arm" "$peer" GRIMOIRE_GENERATION_PHASES=1
+    peer=1; [[ $kind != host ]] || peer=0
+    xmx=0; [[ $kind != grouped ]] || xmx=2
+    run "$arm" "$peer" GRIMOIRE_GENERATION_PHASES=1 GRIMOIRE_QFN_MOE_XMX="$xmx"
     for rank in 0 1 2 3; do
-        cmp "$out/host-gate/matched-r$rank.ids" "$out/$arm/matched-r$rank.ids"
+        cmp "$out/$kind-gate/matched-r$rank.ids" "$out/$arm/matched-r$rank.ids"
     done
     # Use the slowest rank's span per phase, not an average of GPU ranks.
     awk -v pair="${arm%%-*}" -v kind="$kind" '

@@ -18952,8 +18952,10 @@ bool Grimoire::prefill_qwen4_exp(const std::vector<int32_t>& tokens,
     // Both consume the resident INT4 bytes, scales and zero points untouched.
     const char* qfn_xmx_env = std::getenv("GRIMOIRE_QFN_MOE_XMX");
     const bool qfn_grouped = qfn_xmx_env && std::strcmp(qfn_xmx_env, "2") == 0;
+    const bool qfn_ranked_xmx = tp_mega && tp_world == 4 && qfn_grouped;
+    const int xmx_experts = qfn_ranked_xmx ? E / 4 : E;
     const bool qfn_xmx = qfn_xmx_env && (qfn_grouped || std::strcmp(qfn_xmx_env, "1") == 0) &&
-        !noxmx && !verify && !seqb && !tp_ranked() && !ck.gguf_file && SUB >= 32 &&
+        !noxmx && !verify && !seqb && (!tp_ranked() || qfn_ranked_xmx) && !ck.gguf_file && SUB >= 32 &&
         E == 512 && TK == 10 && H == 2560 && MI == 640 && q.is_in_order();
     const size_t route_capacity = qfn_xmx ? size_t(SUB) * TK : 0;
     int32_t* xmx_pt = nullptr;
@@ -18972,7 +18974,7 @@ bool Grimoire::prefill_qwen4_exp(const std::vector<int32_t>& tokens,
         xmx_y = df(route_capacity * H);
         mem.insert(mem.end(), {xmx_pt, xmx_inv, xmx_x, xmx_gu, xmx_y});
         if (qfn_grouped) {
-            xmx_tiles = sycl::malloc_device<QfnMoeTile>(E + route_capacity / qfn_moe_tile_rows, q);
+            xmx_tiles = sycl::malloc_device<QfnMoeTile>(xmx_experts + route_capacity / qfn_moe_tile_rows, q);
             mem.push_back(xmx_tiles);
         }
     }
@@ -19806,12 +19808,14 @@ bool Grimoire::prefill_qwen4_exp(const std::vector<int32_t>& tokens,
                 }
                 launch_tmoe_gate_up(q, tm_view(d), RX, BI, mh, MR, none);
                 launch_tmoe_down(q, tm_view(d), RX, RW, mh, PE, MR, none);
-            } else if (qfn_xmx && MR >= 32 && d.moe.gate_up.fmt == Fmt::INT4 &&
-                       d.moe.down.fmt == Fmt::INT4 && d.moe.gate_up.N == E * 2 * MI &&
-                       d.moe.gate_up.K == H && d.moe.down.N == E * H && d.moe.down.K == MI) {
+            } else if (qfn_xmx && MR >= 32 && d.expert_count == xmx_experts &&
+                       d.moe.gate_up.fmt == Fmt::INT4 && d.moe.down.fmt == Fmt::INT4 &&
+                       d.moe.gate_up.N == xmx_experts * 2 * MI && d.moe.gate_up.K == H &&
+                       d.moe.down.N == xmx_experts * H && d.moe.down.K == MI) {
                 const size_t slots = size_t(MR) * TK;
                 q.memcpy(xmx_ids.data(), RX, slots * sizeof(int32_t)).wait_and_throw();
-                const auto plan = make_qfn_moe_route_plan(xmx_ids.data(), slots, MR, TK, E);
+                const auto plan = make_qfn_moe_route_plan(xmx_ids.data(), slots, MR, TK, E,
+                                                         d.expert_begin, xmx_experts);
                 const int rows = plan.offsets.back();
                 const auto tiles = qfn_grouped ? make_qfn_moe_tiles(plan) : std::vector<QfnMoeTile>{};
                 q.memcpy(xmx_inv, plan.inverse.data(), slots * sizeof(int32_t));
