@@ -98,7 +98,16 @@ vllm() (
     NAME=qfn-c1-$(basename "$D")
     URL=http://127.0.0.1:$BENCH_PORT
     mkdir -p "$D/vllm-work/cache/"{tmp,hf,triton,vllm,xdg}
-    local -a profiler_args=()
+    local -a profiler_args=() reference_args=()
+    case "${REFERENCE_MODE:-graph-off}" in
+        graph-off) ;;
+        eager-off) reference_args=(--enforce-eager) ;;
+        recipe-mtp3)
+            reference_args=(--speculative-config '{"method":"mtp","num_speculative_tokens":3,"model":"/models/qwen38-w4a16-mtp-snapshot","disable_eagle_block_drop":true}')
+            ;;
+        *) echo "Invalid REFERENCE_MODE" >&2; exit 2 ;;
+    esac
+    printf '%s\n' "${REFERENCE_MODE:-graph-off}" > "$D/reference-mode"
     if [[ ${PAIR_ORDER:-} == profile ]]; then
         mkdir "$D/vllm-work/traces"
         timeout --kill-after=5s 60s docker run --rm --pull=never \
@@ -121,7 +130,7 @@ vllm() (
         --gpu-memory-utilization 0.95 --max-model-len 32768 --max-num-batched-tokens 1024 --max-num-seqs 16 \
         --limit-mm-per-prompt '{"image":4,"video":2}' --async-scheduling --generation-config vllm \
         --compilation-config '{"cudagraph_mode":"FULL_AND_PIECEWISE","cudagraph_capture_sizes":[1,2,4,8,16,256,512,1024]}' \
-        --no-enable-prefix-caching --enable-prompt-tokens-details "${profiler_args[@]}")
+        --no-enable-prefix-caching --enable-prompt-tokens-details "${profiler_args[@]}" "${reference_args[@]}")
     trap 'docker logs "$CID" > "$D/vllm.log" 2>&1 || :; docker rm -f "$CID" >/dev/null' EXIT
     trap 'exit 143' TERM INT
     docker inspect --format '{{.Image}} {{json .Path}} {{json .Args}}' "$CID" > "$D/vllm-invocation.txt"
@@ -136,7 +145,7 @@ vllm() (
         curl --noproxy '*' -fsS --max-time 20 -X POST "$URL/start_profile"
     fi
     curl --noproxy '*' -fsS --max-time 5 "$URL/metrics" > "$D/before.prom"
-    curl --noproxy '*' -fsS --max-time "$(remaining 5)" -H 'Content-Type: application/json' \
+    curl --noproxy '*' --fail-with-body --silent --show-error --max-time "$(remaining 5)" -H 'Content-Type: application/json' \
         --data-binary "@$D/request.json" "$URL/v1/completions" > "$D/response.json"
     curl --noproxy '*' -fsS --max-time 5 "$URL/metrics" > "$D/after.prom"
     if [[ ${PAIR_ORDER:-} == profile ]]; then
@@ -149,7 +158,7 @@ vllm() (
 case "${PAIR_ORDER:-native-first}" in
     native-first) native; vllm ;;
     reference-first) vllm; native ;;
-    profile) vllm ;;
+    profile|reference-only) vllm ;;
     *) echo "Invalid PAIR_ORDER" >&2; exit 2 ;;
 esac
 
@@ -158,7 +167,7 @@ sudo -n journalctl -k -q --no-pager --after-cursor "$CURSOR" -o cat > "$D/kernel
 awk '/xe.*(Fault response|Timedout job|GPU HANG|Engine memory CAT error|wedged)/' "$D/kernel.log" > "$D/xe-fault.log"
 [[ ! -s $D/xe-fault.log ]]
 sha256sum -c "$SERVING"
-if [[ ${PAIR_ORDER:-} == profile ]]; then exit 0; fi
+if [[ ${PAIR_ORDER:-} == profile || ${PAIR_ORDER:-} == reference-only ]]; then exit 0; fi
 if [[ $fixture != frozen ]]; then
     score_args=()
     if [[ $fixture == long-decode ]]; then
