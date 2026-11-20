@@ -1,0 +1,32 @@
+--- a/src/grimoire.cpp
++++ b/src/grimoire.cpp
+@@ -20707,7 +20707,20 @@
+         // split head keep decode's GEMV row by row
+         float* vlog=nullptr;
+         const int HN=lm_head.w.N;
+-        if(vsm&&!vexact&&verify&&!tp_head_split&&lm_head.w.payload&&!lm_head.has_i4()&&HN>=cfg.vocab){
++        const int valid_logits = tp_head_split ? head_valid : cfg.vocab;
++        const char* head_batch_flag = std::getenv("GRIMOIRE_QFN_VERIFY_BATCH_HEAD");
++        const bool batch_split_head = head_batch_flag && std::strcmp(head_batch_flag, "1") == 0 &&
++            qfn_mtp3_diagnostic && vsm && !vexact && verify && tp_head_split && q.is_in_order() &&
++            M == 4 && lm_head.w.fmt == Fmt::BF16 && lm_head.w.payload &&
++            !lm_head.tp_sharded() && !lm_head.has_i4() && HN >= valid_logits;
++        if (batch_split_head) {
++            vlog = df(size_t(M) * size_t(HN));
++            if (!vlog) throw std::bad_alloc();
++            mem.push_back(vlog);
++            // The existing batched GEMV retains FP32 input and accumulation
++            // while sharing the BF16 weight read across the verifier rows.
++            launch_gemv_batch(q, lm_head.w, blk_in, vlog, M, none);
++        } else if(vsm&&!vexact&&verify&&!tp_head_split&&lm_head.w.payload&&!lm_head.has_i4()&&HN>=cfg.vocab){
+             const bool hi4=int4_smallm_ok(lm_head.w,M,xb,nullptr);
+             const bool hf8=!hi4&&fp8_smallm_ok(lm_head.w,M,xb,nullptr);
+             const bool hnq=!hi4&&!hf8&&native_smallm_ok(lm_head.w,M,xb,nullptr);
+@@ -20724,7 +20737,6 @@
+                 else launch_mxfp4_smallm_fast(q,lm_head.w,xb,vlog,M);
+             }
+         }
+-        const int valid_logits = tp_head_split ? head_valid : cfg.vocab;
+         if (verify && qfn_verify_diagnostic) qfn_verify_logits.resize(size_t(M) * valid_logits);
+         for(int r=0;r<M;++r) {
+             float* row=vlog?vlog+int64_t(r)*HN:s.logits;
