@@ -44,9 +44,14 @@ idle
 CURSOR=$(sudo -n journalctl -k -q -n 1 --show-cursor --no-pager | awk '/^-- cursor:/ {print $3}')
 [[ -n $CURSOR ]]
 
+sampling_pid=
 finish() {
     local rc=$?
     trap - EXIT
+    if [[ -n $sampling_pid ]]; then
+        kill -TERM "$sampling_pid" 2>/dev/null || :
+        wait "$sampling_pid" || :
+    fi
     idle >> "$D/restore.log" 2>&1 || rc=1
     sha256sum -c "$SERVING" >> "$D/restore.log" 2>&1 || rc=1
     echo "$rc" > "$D/exit"
@@ -58,6 +63,8 @@ for dev in /sys/bus/pci/devices/0000:{0a,0e,14,18}:00.0; do
     printf "%s\n" "$dev"
     cat "$dev"/hwmon/hwmon*/power1_cap "$dev"/tile0/gt0/freq0/{min_freq,max_freq,cur_freq}
 done > "$D/cards-before.txt" 2>&1
+nice -n 15 python3 -u "$B/sample-clocks.py" > "$D/gpu-clocks.tsv" 2> "$D/gpu-clocks.log" &
+sampling_pid=$!
 native() (
     idle
     unset LD_PRELOAD LD_LIBRARY_PATH
