@@ -1,0 +1,36 @@
+--- a/src/grimoire.cpp
++++ b/src/grimoire.cpp
+@@ -19295,6 +19295,11 @@
+         M >= 1 && M <= kSmallMoeRows && TK == kSmallMoeTopK && E == 4 * kSmallMoeExperts &&
+         H == kSmallMoeHidden && MI == kSmallMoeInner;
+     const bool small_moe_trace = small_moe && std::getenv("GRIMOIRE_QFN_SMALL_MOE_TRACE");
++    const char* small_receipt = std::getenv("GRIMOIRE_QFN_VERIFY_SMALL_MOE_RECEIPT");
++    const bool measure_small_moe = verify && qfn_mtp3_diagnostic && M == 4 &&
++        small_receipt && std::strcmp(small_receipt, "1") == 0;
++    unsigned small_moe_layers = 0;
++
+     SmallMoeRoutes* small_moe_plan = nullptr;
+     float* small_moe_values = nullptr;
+     if (small_moe) {
+@@ -20365,6 +20370,7 @@
+                 launch_tmoe_down(q, tm_view(d), RX, RW, mh, PE, MR, none);
+             } else if (small_moe && probe_row < 0 && d.expert_count == kSmallMoeExperts &&
+                        d.expert_begin == int(qfn_tp4_plan->routed_experts.begin) && small_moe_weights_ok(d.moe)) {
++                if (measure_small_moe) ++small_moe_layers;
+                 if (small_moe_trace)
+                     std::fprintf(stderr, "QFN small-M MoE: rank=%d layer=%d rows=%d verify=%d\n", tp_rank, i, MR, verify);
+                 traced("moe.small_m_live", [&] {
+@@ -20602,6 +20608,13 @@
+     if (fuse_prefill_hc && std::getenv("GRIMOIRE_BUDGET_DEBUG"))
+         std::fprintf(stderr, "QFN HC prefill fused rank=%d pos=%d rows=%d calls=%zu\n",
+                      tp_rank, start_pos, M, hc_fused_calls);
++    if (measure_small_moe) {
++        std::fprintf(stderr, "QFN small-M verifier rank=%d rows=%d layers=%u\n",
++                     tp_rank, M, small_moe_layers);
++        if (small_moe_env && std::strcmp(small_moe_env, "1") == 0 &&
++            small_moe_layers != unsigned(cfg.n_layers))
++            throw std::runtime_error("QFN small-M verifier routed fallback");
++    }
+     if (verify_split_receipt) {
+         std::fprintf(stderr, "QFN split verifier rank=%d pos=%d rows=%d layers=%u\n",
+                      tp_rank, start_pos, M, split_attention_layers);
