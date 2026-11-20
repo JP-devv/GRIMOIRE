@@ -28,3 +28,18 @@ The first installed reference attempt reached oneCCL initialization and exposed 
 ## Scope and restore
 
 The runners use a loopback endpoint, the existing four-GPU lock and a deadline with teardown margin. They verify idle device nodes and the existing serving binary checksum. Test workers and test containers are scoped to the window. The monitor wrapper restores the original tmux pane's `nvtop`. Rollback is stopping the isolated run and verifying idle device nodes before monitor restore. No production symlink, executable or lane configuration is changed.
+
+## Repeated native A/Bs
+
+| Experiment | Same-build control | Candidate | Frozen gate |
+|---|---|---|---|
+| Split-KV MTP3 decode, forward pair | 29.128028962656927 tok/s | 51.124828690594185 tok/s | All ranks, 32 IDs, 21/33 acceptance |
+| Split-KV MTP3 decode, reverse pair | 28.851299471835084 tok/s | 50.53098282761599 tok/s | All ranks, 32 IDs, 21/33 acceptance |
+| FP32 RSAG prefill, forward pair | 2,516.089 ms | 2,211.002 ms | All ranks, 32 IDs, 97 full-chunk RSAG calls per rank |
+| FP32 RSAG prefill, reverse pair | 2,356.040 ms | 2,174.658 ms | All ranks, 32 IDs, 97 full-chunk RSAG calls per rank |
+| HC activation fusion, forward pair | 2,429.226 ms | 2,437.381 ms | All ranks, 32 IDs, 94 fused conversions per rank |
+| HC activation fusion, reverse pair | 2,355.674 ms | 2,408.302 ms | All ranks, 32 IDs, 94 fused conversions per rank |
+
+The best RSAG prefill rate is 1,244.3335917647742 tok/s and it needs another 1,498.158 ms on the frozen prompt. Its same-build MTP-off decode was 48.93796717998911 tok/s on that arm. Split-KV and RSAG measurements above come from separate pinned diagnostic builds. No speed sum is claimed. Native HTTP raw-ID smoke on the base build passed all 32 IDs, a 3.167140727979131 s non-streamed completion and first visible text in 2.152708865934983 s in the separately streamed request.
+
+The original sequential replay receipt reports recurrent, convolution and logit differences after partial rejection despite matching continuation IDs. New fixed-proposal replay matched the first-row and four-row predicted IDs. Serving TP4 MTP admission remains gated by the full sequence-state checks, including each rejection position, full acceptance, EOS, and cancellation. The 32K benchmark context does not establish 262K serving-capacity parity.
