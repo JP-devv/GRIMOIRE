@@ -8,6 +8,7 @@
 #include <sycl/ext/oneapi/backend/level_zero.hpp>
 #include <level_zero/ze_api.h>
 #include <algorithm>
+#include <array>
 #include <cstdint>
 #include <cstdlib>
 #include <dlfcn.h>
@@ -17,6 +18,7 @@
 
 namespace b70 {
 class PeerCopy {
+    friend class PeerPush4;
     struct Api {
         void* library = nullptr;
         decltype(&zeDeviceGetProperties) properties = nullptr;
@@ -96,6 +98,10 @@ public:
         if (std::string(e) == "1" || std::string(e) == "required") return 2;
         return -1;
     }
+    static size_t requested_capacity() {
+        const char* e = std::getenv("GRIMOIRE_P2P_CHUNK_MB");
+        return size_t(e ? std::clamp(std::atoi(e), 1, 64) : 4) << 20;
+    }
     // Returns false only for a protocol error or a required but unavailable
     // path. Both endpoints exchange every decision before choosing fallback.
     // Each process retains its per-worker ZE_AFFINITY_MASK. The remote device
@@ -105,9 +111,7 @@ public:
         reset(); socket = fd; first = initiator;
         Hello own{}, peer{};
         const int mode = requested_mode(); own.mode = mode < 0 ? 3u : uint32_t(mode);
-        own.bytes = size_t(4) << 20;
-        if (const char* e = std::getenv("GRIMOIRE_P2P_CHUNK_MB"))
-            own.bytes = size_t(std::clamp(std::atoi(e), 1, 64)) << 20;
+        own.bytes = requested_capacity();
         try {
             if(mode>0) api.load();
             if (mode > 0 && api.ready() && q.get_backend() == sycl::backend::ext_oneapi_level_zero) {
@@ -271,6 +275,110 @@ public:
         if (exported_live) { api.put(context, exported); exported_live = false; }
         if (owned) { api.free(context, owned); owned = nullptr; }
         capacity = 0; sequence = 0;
+    }
+};
+
+// Dedicated sockets carry only pair setup and the two barriers per push.
+// A receive slot belongs to exactly one sender, and only its owning GPU
+// reads it. The rank-zero hub brokers descriptors but never stages payloads.
+class PeerPush4 {
+    std::array<PeerCopy, 4> links;
+    std::array<int, 4> fds{-1, -1, -1, -1};
+    uint64_t sequence_ = 0;
+    bool enabled = false;
+
+    void disconnect() {
+        for (int fd : fds) if (fd >= 0) ::shutdown(fd, SHUT_RDWR);
+    }
+public:
+    ~PeerPush4() { reset(); }
+    bool active() const { return enabled; }
+    uint64_t sequence() const { return sequence_; }
+    void enable() { enabled = true; }
+
+    bool setup(sycl::queue& q, const std::vector<int>& hub, int rank, std::string& reason) {
+        reset();
+        // Rank 0 creates every pair in fixed order. Each other rank receives
+        // endpoints in peer order from its existing rank-zero connection.
+        if (rank == 0) {
+            for (int a = 0; a < 4; ++a) for (int b = a + 1; b < 4; ++b) {
+                int pair[2];
+                if (::socketpair(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0, pair) != 0) {
+                    reason = "cannot allocate TP4 peer socket pair";
+                    return false;
+                }
+                const bool sent_a = a == 0 || ipc::send_fd(hub[a], pair[0]);
+                if (a == 0) fds[b] = pair[0]; else ::close(pair[0]);
+                const bool sent_b = ipc::send_fd(hub[b], pair[1]);
+                ::close(pair[1]);
+                if (!sent_a || !sent_b) { reason = "cannot send TP4 peer socket"; return false; }
+            }
+        } else {
+            for (int peer = 0; peer < 4; ++peer) if (peer != rank && !ipc::recv_fd(hub[0], fds[peer])) {
+                reason = "cannot receive TP4 peer socket";
+                return false;
+            }
+        }
+        bool available = true;
+        for (int peer = 0; peer < 4; ++peer) if (peer != rank) {
+            std::string why;
+            if (!links[peer].setup(q, fds[peer], rank < peer, why) || !links[peer].active()) {
+                if (available) reason = "rank " + std::to_string(peer) + ": " + why;
+                available = false;
+            }
+        }
+        return available;
+    }
+
+    bool allreduce(sycl::queue& q, float* data, size_t elems, int rank) {
+        if (!enabled) return false;
+        struct Guard {
+            PeerPush4& transport;
+            bool done = false;
+            ~Guard() { if (!done) transport.disconnect(); }
+        } guard{*this};
+        const size_t limit = links[rank == 0 ? 1 : 0].capacity / sizeof(float);
+        q.wait_and_throw();
+        for (size_t at = 0; at < elems; at += limit) {
+            const size_t n = std::min(limit, elems - at), bytes = n * sizeof(float);
+            float* const local = data + at;
+            std::array<const float*, 4> src{};
+            src[rank] = local;
+            bool copies_ok = true;
+            for (int peer = 0; peer < 4; ++peer) if (peer != rank) {
+                auto& link = links[peer];
+                auto* const dst = static_cast<uint8_t*>(link.imported) + link.capacity;
+                src[peer] = reinterpret_cast<const float*>(static_cast<uint8_t*>(link.owned) + link.capacity);
+                if (link.api.copy(link.copies, dst, local, bytes, nullptr, 0, nullptr) != ZE_RESULT_SUCCESS)
+                    copies_ok = false;
+            }
+            for (int peer = 0; peer < 4; ++peer) if (peer != rank) {
+                auto& link = links[peer];
+                if (link.api.sync(link.copies, 120000000000ULL) != ZE_RESULT_SUCCESS) copies_ok = false;
+            }
+            if (!copies_ok) return false;
+            const PeerCopy::Packet ready{++sequence_, bytes, 1, 0};
+            for (int peer = 0; peer < 4; ++peer)
+                if (peer != rank && !links[peer].exchange_packet(ready)) return false;
+            // Same association as the host loop: ((rank0 + rank1) + rank2) + rank3.
+            q.parallel_for(sycl::range<1>(n), [=](sycl::id<1> i) {
+                float sum = src[0][i] + src[1][i];
+                sum = sum + src[2][i];
+                local[i] = sum + src[3][i];
+            }).wait_and_throw();
+            const PeerCopy::Packet consumed{sequence_, bytes, 2, 0};
+            for (int peer = 0; peer < 4; ++peer)
+                if (peer != rank && !links[peer].exchange_packet(consumed)) return false;
+        }
+        guard.done = true;
+        return true;
+    }
+
+    void reset() {
+        enabled = false;
+        sequence_ = 0;
+        for (auto& link : links) link.reset();
+        for (int& fd : fds) if (fd >= 0) { ::close(fd); fd = -1; }
     }
 };
 } // namespace b70

@@ -2495,6 +2495,7 @@ struct Grimoire {
     int pp_prev_fd = -1, pp_next_fd = -1;
     std::vector<int> tp_peer_fd;
     PeerCopy tp_peer_copy, pp_prev_copy, pp_next_copy;
+    PeerPush4 tp_peer_push4;
     bool peer_copy_setup(std::string& err);
     std::string pp_socket;
     bool pp_enabled() const { return pp_rank >= 0; }
@@ -4670,7 +4671,31 @@ bool Grimoire::pp_recv_request(PPRequest& r) {
 // ordered Unix stream. Setup runs before receiver threads can read that stream.
 bool Grimoire::peer_copy_setup(std::string& err) {
     const int mode=PeerCopy::requested_mode();
-    if(tp_ranked()) {
+    if (tp_ranked() && tp_mega && tp_world == 4) {
+        int agreed = mode;
+        if (!tp_agree(agreed) || agreed != mode || agreed < 0) {
+            err = "TP4 P2P: invalid or inconsistent GRIMOIRE_P2P";
+            return false;
+        }
+        if (agreed != 2) {
+            if (agreed) std::printf("  TP4 P2P: host fallback (peer-push requires GRIMOIRE_P2P=1)\n");
+            return true;
+        }
+        int capacity = int(PeerCopy::requested_capacity());
+        if (!tp_agree(capacity) || capacity <= 0) {
+            err = "TP4 P2P: ranks disagree on GRIMOIRE_P2P_CHUNK_MB";
+            return false;
+        }
+        std::string why;
+        int available = tp_peer_push4.setup(q, tp_peer_fd, tp_rank, why) ? 1 : 0;
+        if (!tp_agree_min(available) || !available) {
+            err = "TP4 P2P: " + (why.empty() ? std::string("peer setup failed on another rank") : why);
+            tp_peer_push4.reset();
+            return false;
+        }
+        tp_peer_push4.enable();
+        std::printf("  TP4 P2P: direct peer-push, FP32 payloads and rank-order sum\n");
+    } else if(tp_ranked()) {
         if(!tp_mega || tp_world!=2) {
             if(mode<0 || mode==2) { err="P2P requires Megatron TP with two ranks, or pipeline parallel"; return false; }
             if(mode) std::printf("  P2P: host fallback (requires two Megatron ranks)\n");
@@ -5026,6 +5051,7 @@ bool Grimoire::tp_allgather_multi(const std::vector<std::pair<float*,int>>& spec
 }
 
 bool Grimoire::tp_allreduce_sum(float* dev,int elems){
+    if (tp_peer_push4.active()) return elems >= 0 && tp_peer_push4.allreduce(q, dev, size_t(elems), tp_rank);
     if(tp_peer_copy.active()) return elems>=0 && tp_peer_copy.allreduce(q,dev,size_t(elems),tp_rank,false);
     if(!tp_ranked()||tp_peer_fd.empty())return false;
     const size_t n=size_t(elems);
@@ -9951,7 +9977,7 @@ bool Grimoire::build(const std::string& dir, const UploadOptions& requested_opt,
         pipe_host_elems = size_t(H);
         if (!pp_connect(err)) return false;
         if (!peer_copy_setup(err)) return false;
-        if (!tp_peer_copy.active() && !tp_shm_setup(err)) return false;
+        if (!tp_peer_copy.active() && !tp_peer_push4.active() && !tp_shm_setup(err)) return false;
     }
 
     // ---- KV caches, fitted to the card ----------------------------------
@@ -12134,6 +12160,7 @@ void Grimoire::release() {
                      (void**)&muse_zero_f16})
         if (*p) { sycl::free(*p, q); *p = nullptr; }
     pp_send_wait();
+    tp_peer_push4.reset();
     tp_peer_copy.reset(); pp_prev_copy.reset(); pp_next_copy.reset();
     if(pp_prev_fd>=0)::shutdown(pp_prev_fd,SHUT_RDWR);   // unblock a pending prefetch
     pp_recv_wait();
@@ -23697,9 +23724,69 @@ int grimoire_perplexity(const std::string& dir, Fmt proj_fmt,
     }
 }
 
+// Model-free integration regression: exercise the real setup and collective
+// twice over the same four ranks and check each rank's result on every call.
+static int qfn_tp4_peer_regression() {
+    Grimoire e;
+    try {
+        if (e.tp_world != 4 || e.tp_rank < 0 || e.tp_rank >= 4 || e.pp_enabled())
+            throw std::runtime_error("the peer regression requires four TP ranks");
+        e.tp_mega = true;
+        std::string error;
+        if (!e.pp_connect(error)) throw std::runtime_error(error);
+        constexpr std::array<int, 4> sizes{512 * 2560, 146 * 2560, 146 * 2560, 512 * 2560};
+        std::array<std::vector<float>, sizes.size()> host;
+        const auto free_dev = [&](float* p) { sycl::free(p, e.q); };
+        std::unique_ptr<float, decltype(free_dev)> dev(sycl::malloc_device<float>(sizes.front(), e.q), free_dev);
+        if (!dev) throw std::runtime_error("test device allocation failed");
+        for (bool peer : {false, true}) {
+            if (::setenv("GRIMOIRE_P2P", peer ? "1" : "0", 1) != 0 || !e.peer_copy_setup(error))
+                throw std::runtime_error("peer_copy_setup: " + error);
+            if (peer != e.tp_peer_push4.active()) throw std::runtime_error("wrong collective selected");
+            for (unsigned call = 0; call < sizes.size(); ++call) {
+                const int n = sizes[call];
+                std::vector<float> data(n);
+                for (int i = 0; i < n; ++i) {
+                    if (i % 17 == 0) {
+                        constexpr std::array<float, 4> order{16777216, 1, -16777216, 1};
+                        data[i] = order[e.tp_rank];
+                    } else {
+                        const uint32_t code = uint32_t(i) * 2654435761u + uint32_t(29 * e.tp_rank + 257 * call);
+                        data[i] = std::ldexp(float(int(code % 65521) - 32760), -int((code >> 22) % 23));
+                    }
+                }
+                e.q.memcpy(dev.get(), data.data(), n * sizeof(float)).wait_and_throw();
+                const auto before = e.tp_peer_push4.sequence();
+                if (!e.tp_allreduce_sum(dev.get(), n)) throw std::runtime_error("tp_allreduce_sum failed");
+                if (peer && e.tp_peer_push4.sequence() == before)
+                    throw std::runtime_error("the reduction did not submit a peer push");
+                e.q.memcpy(data.data(), dev.get(), n * sizeof(float)).wait_and_throw();
+                if (data.front() != 1.0f) throw std::runtime_error("rank-order FP32 cancellation check failed");
+                if (!peer) {
+                    host[call] = std::move(data);
+                    std::printf("TP4 host reference rank=%d call=%u bytes=%zu\n", e.tp_rank, call, n * sizeof(float));
+                } else {
+                    if (std::memcmp(data.data(), host[call].data(), n * sizeof(float)) != 0)
+                        throw std::runtime_error("peer and host differ at call " + std::to_string(call));
+                    std::printf("TP4 peer regression rank=%d call=%u bytes=%zu exact\n",
+                                e.tp_rank, call, n * sizeof(float));
+                }
+            }
+        }
+        dev.reset();
+        e.release();
+        return 0;
+    } catch (const std::exception& ex) {
+        std::fprintf(stderr, "TP4 peer regression rank=%d: %s\n", e.tp_rank, ex.what());
+        e.release();
+        return 1;
+    }
+}
+
 int grimoire_generate(const std::string& dir, Fmt proj_fmt, int max_seq,
                       const std::string& prompt, int n_predict) {
     std::setvbuf(stdout,nullptr,_IONBF,0);
+    if (std::getenv("GRIMOIRE_QFN_TP4_PEER_REGRESSION")) return qfn_tp4_peer_regression();
     Tokenizer tk;std::string err;
     if(!tk.load(dir,err)){std::fprintf(stderr,"tokenizer: %s\n",err.c_str());return 1;}
     Grimoire e;
