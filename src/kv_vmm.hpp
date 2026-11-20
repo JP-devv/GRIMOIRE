@@ -136,8 +136,10 @@ public:
         size_t bytes = 0;
         for (const auto& range : ranges) bytes += range.bytes;
         if (bytes > limit_ - used_) return false;
-        // Level Zero may require larger alignment for allocations exceeding 2 MiB.
-        const size_t max_extent = std::max(granularity_, size_t(2) << 20);
+        // Xe requires a 2 MiB-aligned virtual address for a 2 MiB allocation.
+        // A head's next unmapped page may start at any ordinary page boundary.
+        constexpr size_t large_page = size_t(2) << 20;
+        const size_t max_extent = std::max(granularity_, (large_page - 1) / granularity_ * granularity_);
         size_t count = 0;
         for (const auto& range : ranges) count += (range.bytes + max_extent - 1) / max_extent;
         state.mapped.reserve(state.mapped.size() + count);

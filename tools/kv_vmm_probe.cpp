@@ -168,6 +168,25 @@ static void probe_compressed_indexer(sycl::queue& q, size_t page) {
     std::puts("PASS compressed indexer block-boundary growth");
 }
 
+static void probe_long_context(sycl::queue& q) {
+    // Real dense KV strides put the next extent off a 2 MiB boundary after
+    // serving a short prompt, even when the reservation itself is aligned.
+    constexpr size_t capacity = 140000, heads = 4, dim = 256;
+    b70::KvVirtualPool pool(q, capacity, 1, size_t(1) << 30);
+    auto* keys = pool.reserve(heads, dim);
+    auto* values = pool.reserve(heads, dim);
+    if (!pool.grow(0, 4096 + 128)) throw std::runtime_error("short prefix allocation failed");
+    q.single_task([=] { keys[(capacity + 4095) * dim] = 93; }).wait_and_throw();
+
+    if (!pool.grow(0, 16384 + 128) || !pool.grow(0, 131072 + 128))
+        throw std::runtime_error("long context allocation failed");
+    uint8_t old = 0, next = 1;
+    q.memcpy(&old, keys + (capacity + 4095) * dim, 1).wait_and_throw();
+    q.memcpy(&next, values + ((heads - 1) * capacity + 131199) * dim, 1).wait_and_throw();
+    if (old != 93 || next != 0) throw std::runtime_error("long context growth changed slot data");
+    std::puts("PASS long context pool growth through 128K plus decode budget");
+}
+
 int main() {
     std::setvbuf(stdout, nullptr, _IONBF, 0);
     try {
@@ -188,6 +207,7 @@ int main() {
         if (huge != minimum) probe(q, huge, reservation);
         probe_shared_budget(q, std::max(minimum, reservation));
         probe_compressed_indexer(q, std::max(minimum, reservation));
+        probe_long_context(q);
     } catch (const std::exception& ex) {
         std::fprintf(stderr, "probe failed: %s\n", ex.what());
         return 1;
