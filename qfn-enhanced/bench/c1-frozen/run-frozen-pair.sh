@@ -114,6 +114,21 @@ native() (
             # prefill dispatch counters. It enables no event or fence timing.
             export GRIMOIRE_QFN_MOE_TRACE=1
             ;;
+        integrated-mtp3|integrated-profile)
+            [[ $fixture == frozen && ${PAIR_ORDER:-} == native-only ]]
+            build="$Q/../receipts/integrated-build"
+            [[ $(< "$build/build-integrated.exit") == 0 ]]
+            (cd "$build"; sha256sum -c integrated.sha256)
+            NATIVE_BIN=$build/qfn-combined
+            export GRIMOIRE_QFN_PREFILL_RSAG=1 GRIMOIRE_QFN_VERIFY_SPLIT_KV=1 GRIMOIRE_QFN_VERIFY_REQUIRE_SPLIT=1
+            export GRIMOIRE_QFN_TP4_VERIFY_DIAGNOSTIC=mtp3 GRIMOIRE_SPEC_STATS=1
+            export GRIMOIRE_QFN_MTP_SOURCE=/home/haxor/models/qwen38-w4a16-mtp-snapshot
+            export GRIMOIRE_QFN_MOE_TRACE=1
+            if [[ $NATIVE_MODE == integrated-profile ]]; then
+                export GRIMOIRE_Q4_TIMING=1 GRIMOIRE_HC_TIMING=1 GRIMOIRE_QFN_DN_PROFILE=1
+                export GRIMOIRE_QFN_TP_PREFILL_REDUCE_TIMING=1 GRIMOIRE_QFN_VERIFY_PROFILE=1 GRIMOIRE_SPEC_TIME=1
+            fi
+            ;;
         *) echo "Invalid NATIVE_MODE" >&2; exit 2 ;;
     esac
     printf '%s\n' "${NATIVE_MODE:-baseline}" > "$D/native-mode"
@@ -157,16 +172,27 @@ native() (
                 grep -Eq "^QFN HC fused BF16 rank=$rank rows=2048 calls=[1-9][0-9]*$" "$D/native/r$rank.log"
             done
         fi
-        if [[ ${NATIVE_MODE:-} == rsag-* ]]; then
+        if [[ ${NATIVE_MODE:-} == rsag-* || ${NATIVE_MODE:-} == integrated-* ]]; then
             for rank in 0 1 2 3; do
                 grep -Eq "^QFN Xe2 gate/up: rank=$rank rows=2048 calls=48 output=fp32$" "$D/native/r$rank.log"
                 grep -Eq "^QFN Xe2 down: rank=$rank rows=2048 calls=48 output=fp32$" "$D/native/r$rank.log"
-                if [[ $NATIVE_MODE == rsag-on ]]; then
+                if [[ $NATIVE_MODE != rsag-off ]]; then
                     grep -Fxq "QFN prefill RSAG rank=$rank rows=2048 calls=97" "$D/native/r$rank.log"
                 fi
             done
         fi
-        python3 "$B/c1.py" native "$D/native"/r{0,1,2,3}.log > "$D/native-phase.json"
+        if [[ ${NATIVE_MODE:-} == integrated-* ]]; then
+            for rank in 0 1 2 3; do
+                [[ $(grep -Ec "^QFN split verifier rank=$rank pos=[0-9]+ rows=4 layers=12$" "$D/native/r$rank.log") == 11 ]]
+                grep -Fq '(21 of 33 drafted, 63.6%) over 11 steps' "$D/native/r$rank.out"
+            done
+        fi
+        if [[ ${NATIVE_MODE:-} == integrated-profile ]]; then
+            python3 "$B/c1.py" native "$D/native"/r{0,1,2,3}.log > /dev/null
+            grep -hE '^(QFN TP prefill |QFN .*verify |QFN DN |HC prefill |Q4 profile )' "$D/native"/r?.log > "$D/instrumented-stages.txt"
+        else
+            python3 "$B/c1.py" native "$D/native"/r{0,1,2,3}.log > "$D/native-phase.json"
+        fi
     fi
 )
 
@@ -283,7 +309,11 @@ awk '/xe.*(Fault response|Timedout job|GPU HANG|Engine memory CAT error|wedged)/
 sha256sum -c "$SERVING"
 if [[ ${PAIR_ORDER:-} == profile || ${PAIR_ORDER:-} == boundary ]]; then exit 0; fi
 if [[ ${PAIR_ORDER:-} == native-only ]]; then
-    if [[ ${NATIVE_MODE:-} == replay ]]; then [[ -s $D/row-replay.txt ]]; else [[ -s $D/native-phase.json ]]; fi
+    case "${NATIVE_MODE:-}" in
+        replay) [[ -s $D/row-replay.txt ]] ;;
+        integrated-profile) [[ -s $D/instrumented-stages.txt ]] ;;
+        *) [[ -s $D/native-phase.json ]] ;;
+    esac
     exit
 fi
 if [[ ${PAIR_ORDER:-} == reference-only ]]; then [[ -s $D/vllm-phase.json ]]; exit; fi

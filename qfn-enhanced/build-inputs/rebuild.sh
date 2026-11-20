@@ -17,6 +17,7 @@ case $variant in
     hc-fused) patches=(hc-fused-bf16.patch) ;;
     coalesced-v) patches=(qfn-split-kv-coalesced-v.patch) ;;
     batch-head) patches=(qfn-verify-batch-head.patch) ;;
+    integrated) patches=(qfn-prefill-rsag.patch qfn-prefill-rsag-probe.patch qfn-prefill-rsag-receipt.patch qfn-integrated-split-receipt.patch) ;;
     prefill-rsag) patches=(qfn-prefill-rsag.patch qfn-prefill-rsag-probe.patch qfn-prefill-rsag-receipt.patch) ;;
     *) echo "Unknown variant: $variant" >&2; exit 2 ;;
 esac
