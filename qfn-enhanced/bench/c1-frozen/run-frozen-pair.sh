@@ -53,6 +53,10 @@ finish() {
         wait "$sampling_pid" || :
     fi
     idle >> "$D/restore.log" 2>&1 || rc=1
+    sudo -n journalctl -k -q --no-pager --after-cursor "$CURSOR" -o cat > "$D/kernel.log" || rc=1
+    awk '/xe.*(Fault response|Timedout job|GPU HANG|Engine memory CAT error|wedged)/' \
+        "$D/kernel.log" > "$D/xe-fault.log" || rc=1
+    [[ ! -s $D/xe-fault.log ]] || rc=1
     sha256sum -c "$SERVING" >> "$D/restore.log" 2>&1 || rc=1
     echo "$rc" > "$D/exit"
     exit "$rc"
@@ -336,10 +340,6 @@ case "${PAIR_ORDER:-native-first}" in
     *) echo "Invalid PAIR_ORDER" >&2; exit 2 ;;
 esac
 
-idle
-sudo -n journalctl -k -q --no-pager --after-cursor "$CURSOR" -o cat > "$D/kernel.log"
-awk '/xe.*(Fault response|Timedout job|GPU HANG|Engine memory CAT error|wedged)/' "$D/kernel.log" > "$D/xe-fault.log"
-[[ ! -s $D/xe-fault.log ]]
 sha256sum -c "$SERVING"
 if [[ ${PAIR_ORDER:-} == profile || ${PAIR_ORDER:-} == boundary ]]; then exit 0; fi
 if [[ ${PAIR_ORDER:-} == native-only ]]; then
