@@ -1,0 +1,160 @@
+--- a/src/grimoire.cpp
++++ b/src/grimoire.cpp
+@@ -3707,6 +3707,8 @@
+     bool   spec_multi_valid = false;
+     // Only the one-shot CLI can request verifier scratch without a draft head.
+     bool qfn_verify_diagnostic = false;
++    struct VerifyBuffer { void* pointer = nullptr; size_t bytes = 0; };
++    std::vector<VerifyBuffer> qfn_verify_buffers;
+     bool qfn_mtp3_diagnostic = false; // CLI only; GRIMOIRE_MTP remains off
+     static constexpr int kQfnVerifyCheckpointRow = 1; // anchor is row 0; 1156 is row 1
+     float* qfn_verify_direct_dn = nullptr;
+@@ -12260,6 +12262,9 @@
+ 
+ void Grimoire::release() {
+     q.wait();
++    for (auto& buffer : qfn_verify_buffers)
++        if (buffer.pointer) sycl::free(buffer.pointer, q);
++    qfn_verify_buffers.clear();
+     sampling_workspace.release(q);
+     coupled_sampling_store.release(q);
+     if(!draft_slots.empty()) {
+@@ -19197,7 +19202,27 @@
+             if (L[li].ple) { vx_poff[li] = ps; ps += size_t(std::max(0, SLEN) + kSpecBatch) * WIDE; }
+         }
+     }
+-    auto df = [&](size_t n) { return sycl::malloc_device<float>(n, q); };
++    const char* pool_flag = std::getenv("GRIMOIRE_QFN_VERIFY_REUSE_SCRATCH");
++    const bool reuse_verify = verify && qfn_tp4_plan && qfn_mtp3_diagnostic &&
++        M == 4 && n_seq_slots == 1 && q.is_in_order() && pool_flag && std::strcmp(pool_flag, "1") == 0 &&
++        std::none_of(L.begin(), L.end(), [](const auto& layer) { return layer.qsa; });
++    size_t next_buffer = 0, allocated_buffers = 0;
++    auto reserve_verify = [&]<typename T>(size_t count) -> T* {
++        if (!reuse_verify) return sycl::malloc_device<T>(count, q);
++        if (next_buffer == qfn_verify_buffers.size()) qfn_verify_buffers.emplace_back();
++        auto& buffer = qfn_verify_buffers[next_buffer++];
++        const size_t bytes = count * sizeof(T);
++        if (!buffer.pointer || buffer.bytes < bytes) {
++            constexpr size_t alignment = alignof(T) > 64 ? alignof(T) : 64;
++            void* replacement = sycl::aligned_alloc_device(alignment, std::max(size_t(1), bytes), q);
++            if (!replacement) return nullptr;
++            if (buffer.pointer) sycl::free(buffer.pointer, q);
++            buffer = {replacement, bytes};
++            ++allocated_buffers;
++        }
++        return static_cast<T*>(buffer.pointer);
++    };
++    auto df = [&](size_t n) { return reserve_verify.operator()<float>(n); };
+     float* hyper  = df(size_t(M) * WIDE);
+     float* normed = df(size_t(SUB) * WIDE);
+     float* gate   = df(size_t(SUB) * WIDE);
+@@ -19218,26 +19243,26 @@
+     float* mh     = df(size_t(SUB) * TK * MI);
+     float* rlog   = df(size_t(SUB) * E);
+     float* shout  = df(size_t(SUB) * H);
+-    sycl_bf16* xb = sycl::malloc_device<sycl_bf16>(size_t(SUB) * WX, q);
+-    int8_t* a8    = sycl::malloc_device<int8_t>(size_t(SUB) * WX, q);
++    sycl_bf16* xb = reserve_verify.operator()<sycl_bf16>(size_t(SUB) * WX);
++    int8_t* a8    = reserve_verify.operator()<int8_t>(size_t(SUB) * WX);
+     float*  a8s   = df(size_t(SUB));
+     // native GGUF: the out projection's tiled V-head columns, one sub-chunk
+     float* gguf_v_input = gguf_native_enabled(ck) ? df(size_t(SUB) * Hv * Dv) : nullptr;
+-    int32_t* dtok = sycl::malloc_device<int32_t>(size_t(M), q);
+-    int32_t* rex  = sycl::malloc_device<int32_t>(size_t(M) * TK, q);
++    int32_t* dtok = reserve_verify.operator()<int32_t>(size_t(M));
++    int32_t* rex  = reserve_verify.operator()<int32_t>(size_t(M) * TK);
+     float*   rwt  = df(size_t(M) * TK);
+     // QSA
+     float*   ixqk = df(size_t(SUB) * std::max(1, (IH + IKV) * IHD));
+     float*   ixq  = df(size_t(SUB) * std::max(1, IH * IHD));
+     float*   ixk  = df(size_t(SUB) * std::max(1, IHD));
+     float*   lgt  = df(size_t(SUB) * NBLK);
+-    int32_t* bsel = sycl::malloc_device<int32_t>(size_t(SUB) * std::max(1, BTK), q);
+-    int32_t* idx  = sycl::malloc_device<int32_t>(size_t(SUB) * EXPW, q);
+-    int32_t* vis  = sycl::malloc_device<int32_t>(size_t(SUB), q);
+-    int32_t* sql  = sycl::malloc_device<int32_t>(size_t(SUB), q);
+-    int32_t* qps  = sycl::malloc_device<int32_t>(size_t(SUB), q);
++    int32_t* bsel = reserve_verify.operator()<int32_t>(size_t(SUB) * std::max(1, BTK));
++    int32_t* idx  = reserve_verify.operator()<int32_t>(size_t(SUB) * EXPW);
++    int32_t* vis  = reserve_verify.operator()<int32_t>(size_t(SUB));
++    int32_t* sql  = reserve_verify.operator()<int32_t>(size_t(SUB));
++    int32_t* qps  = reserve_verify.operator()<int32_t>(size_t(SUB));
+     // PLE
+-    int64_t* pids = sycl::malloc_device<int64_t>(size_t(SUB) * std::max(1, NH), q);
++    int64_t* pids = reserve_verify.operator()<int64_t>(size_t(SUB) * std::max(1, NH));
+     float*   pemb = df(size_t(SUB) * std::max(1, cfg.ple_embed_dim));
+     float*   pkey = df(size_t(SUB) * WIDE);
+     float*   pval = df(size_t(SUB) * H);
+@@ -19298,7 +19323,7 @@
+     SmallMoeRoutes* small_moe_plan = nullptr;
+     float* small_moe_values = nullptr;
+     if (small_moe) {
+-        small_moe_plan = sycl::malloc_device<SmallMoeRoutes>(1, q);
++        small_moe_plan = reserve_verify.operator()<SmallMoeRoutes>(1);
+         small_moe_values = df(size_t(SUB) * TK * H);
+         mem.insert(mem.end(), {small_moe_plan, small_moe_values});
+     }
+@@ -19369,38 +19394,41 @@
+     size_t xmx_batches = 0, xmx_launches = 0;
+     std::vector<int32_t> xmx_ids(qfn_device_routes ? 0 : route_capacity);
+     if (qfn_xmx) {
+-        xmx_pt = sycl::malloc_device<int32_t>(route_capacity, q);
+-        xmx_inv = sycl::malloc_device<int32_t>(route_capacity, q);
+-        xmx_x = sycl::malloc_device<sycl_bf16>(route_capacity * H, q);
++        xmx_pt = reserve_verify.operator()<int32_t>(route_capacity);
++        xmx_inv = reserve_verify.operator()<int32_t>(route_capacity);
++        xmx_x = reserve_verify.operator()<sycl_bf16>(route_capacity * H);
+         xmx_gu = df(route_capacity * 2 * MI);
+         xmx_y = df(route_capacity * H);
+         mem.insert(mem.end(), {xmx_pt, xmx_inv, xmx_x, xmx_gu, xmx_y});
+         if (qfn_grouped) {
+-            xmx_tiles = sycl::malloc_device<QfnMoeTile>(xmx_experts + route_capacity / qfn_moe_tile_rows, q);
++            xmx_tiles = reserve_verify.operator()<QfnMoeTile>(xmx_experts + route_capacity / qfn_moe_tile_rows);
+             mem.push_back(xmx_tiles);
+         }
+         if (qfn_device_routes) {
+-            xmx_counts = sycl::malloc_device<int32_t>(xmx_experts, q);
+-            xmx_offsets = sycl::malloc_device<int32_t>(xmx_experts + 1, q);
+-            xmx_live_tiles = sycl::malloc_device<int32_t>(1, q);
++            xmx_counts = reserve_verify.operator()<int32_t>(xmx_experts);
++            xmx_offsets = reserve_verify.operator()<int32_t>(xmx_experts + 1);
++            xmx_live_tiles = reserve_verify.operator()<int32_t>(1);
+             mem.insert(mem.end(), {xmx_counts, xmx_offsets, xmx_live_tiles});
+         }
+     }
+     if (xe2_tail) {
+-        xe2_tail_gu = sycl::malloc_device<float>(xe2_tail_rows * 2 * MI, q);
+-        xe2_tail_y = sycl::malloc_device<float>(xe2_tail_rows * H, q);
++        xe2_tail_gu = reserve_verify.operator()<float>(xe2_tail_rows * 2 * MI);
++        xe2_tail_y = reserve_verify.operator()<float>(xe2_tail_rows * H);
+         if (!xe2_tail_gu || !xe2_tail_y) throw std::bad_alloc();
+         mem.insert(mem.end(), {xe2_tail_gu, xe2_tail_y});
+     }
+     if (xe2_gate_up) {
+         if (!xe2_fp32) {
+-            xe2_scratch = sycl::malloc_device<sycl_bf16>(route_capacity * 2 * MI, q);
++            xe2_scratch = reserve_verify.operator()<sycl_bf16>(route_capacity * 2 * MI);
+             mem.push_back(xe2_scratch);
+         }
+-        xe2_atomic = sycl::malloc_device<int32_t>(1, q);
++        xe2_atomic = reserve_verify.operator()<int32_t>(1);
+         mem.push_back(xe2_atomic);
+     }
+-    auto cleanup = [&]() { for (void* p : mem) if (p) sycl::free(p, q); };
++    auto cleanup = [&]() {
++        if (!reuse_verify)
++            for (void* p : mem) if (p) sycl::free(p, q);
++    };
+     for (void* p : mem) if (!p) { cleanup(); return false; }
+ 
+     const std::vector<sycl::event> none{};
+@@ -20602,6 +20630,9 @@
+     if (fuse_prefill_hc && std::getenv("GRIMOIRE_BUDGET_DEBUG"))
+         std::fprintf(stderr, "QFN HC prefill fused rank=%d pos=%d rows=%d calls=%zu\n",
+                      tp_rank, start_pos, M, hc_fused_calls);
++    if (reuse_verify)
++        std::fprintf(stderr, "QFN verifier scratch rank=%d rows=%d buffers=%zu allocations=%zu\n",
++                     tp_rank, M, next_buffer, allocated_buffers);
+     if (verify_split_receipt) {
+         std::fprintf(stderr, "QFN split verifier rank=%d pos=%d rows=%d layers=%u\n",
+                      tp_rank, start_pos, M, split_attention_layers);
