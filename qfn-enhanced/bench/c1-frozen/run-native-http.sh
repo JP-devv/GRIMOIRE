@@ -3,11 +3,20 @@ set -euo pipefail
 : "${APPROVED_DEADLINE_EPOCH:?}" "${BENCH_PORT:?}" "${TMUX:?}"
 B=$(cd -- "$(dirname -- "$0")" && pwd)
 ROOT=$(cd "$B/../../.." && pwd)
-S=$ROOT/qfn-enhanced/build-inputs/combined-c1
+variant=${NATIVE_HTTP_VARIANT:-baseline}
+case "$variant" in
+    baseline) S=$ROOT/qfn-enhanced/build-inputs/combined-c1; manifest=rebuilt.sha256 ;;
+    rsag) S=$ROOT/receipts/prefill-rsag-build; manifest=rsag.sha256 ;;
+    causal) S=$ROOT/receipts/causal-tiles-build; manifest=causal-tiles.sha256 ;;
+    hc-up) S=$ROOT/receipts/hc-up-mean-build; manifest=hc-up-mean.sha256 ;;
+    *) echo "Unknown native serving variant: $variant" >&2; exit 2 ;;
+esac
 SERVING=/home/haxor/AI/GRIMOIRE-qfn-qgate/diagnostics/act-xe2-tilecut-ab-6IU2nP/serving.sha256
 D=$(mktemp -d "$ROOT/receipts/native-http.XXXXXXXX")
 echo "$D"
-(cd "$S"; sha256sum -c rebuilt.sha256)
+(cd "$S"; sha256sum -c "$manifest")
+cp "$S/$manifest" "$D/build.sha256"
+printf '%s\n' "$variant" > "$D/variant"
 (cd "$B"; sha256sum -c inputs.sha256; python3 checkpoint-lock.py)
 sha256sum -c "$SERVING"
 [[ $BENCH_PORT =~ ^[0-9]{4,5}$ ]]
@@ -59,6 +68,9 @@ export GRIMOIRE_PREFILL_CHUNK=2048 GRIMOIRE_QFN_PREFILL_GEMV=0 GRIMOIRE_QFN_MOE_
 export GRIMOIRE_QFN_GROUPED_K_PREFETCH=0 GRIMOIRE_QFN_GROUPED_LIVE_TILES=1
 export GRIMOIRE_QFN_XE2_GATE_UP=fp32 GRIMOIRE_QFN_XE2_DOWN=1
 export GRIMOIRE_QFN_HC_DOWN_TILED=1 GRIMOIRE_QFN_HC_FUSED_PREFILL=1
+if [[ $variant != baseline ]]; then export GRIMOIRE_QFN_PREFILL_RSAG=1; fi
+if [[ $variant == causal ]]; then export GRIMOIRE_QFN_PREFILL_CAUSAL_TILES=1; fi
+if [[ $variant == hc-up ]]; then export GRIMOIRE_QFN_HC_FUSED_UP=1; fi
 compgen -e GRIMOIRE_ | sort | while IFS= read -r key; do printf '%s=%s\n' "$key" "${!key}"; done > "$D/options.env"
 cap=$((APPROVED_DEADLINE_EPOCH - $(date +%s) - 20))
 (( cap >= 120 ))
@@ -83,3 +95,9 @@ done
 timeout --kill-after=2s "$((APPROVED_DEADLINE_EPOCH - $(date +%s) - 20))" \
     python3 -B "$B/served-fixture.py" "$url/v1/completions" "$D/fixtures/frozen.request.json" \
     "$D/fixtures/frozen.expected-prefix.ids" > "$D/served.json"
+
+if [[ $variant != baseline ]]; then
+    for rank in 0 1 2 3; do
+        grep -Fxq "QFN prefill RSAG rank=$rank rows=2048 calls=97" "$D/r$rank.log"
+    done
+fi
