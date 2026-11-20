@@ -1,0 +1,33 @@
+  device: Intel(R) Arc(TM) Pro B70 Graphics | driver 1.17.39758 | 256 EUs | 31.9 GiB
+  multiprocess TP rank 3/4 (Megatron): attention heads [18,24) of 24, KV heads [1,2) of 2, DeltaNet v heads [36,48) of 48, FFN [0,0) of 0; one all-reduce per block
+  checkpoint resolved: 48 layers, vocab 248320, hidden 2560 (mappings released)
+  embed_tokens  1.18 GiB ... ok
+  final_norm    ... ok
+  lm_head       bf16 ... (rows [186240,248320) of 248320 on this rank, GRIMOIRE_TP_HEAD_SPLIT=0 = whole) ok
+  layers        1/48  1.84 GiB   
+  PLE table: 128 shards, 320001536 rows x 160, read from the checkpoint per token (not loaded)
+    layers        2/48  2.26 GiB     layers        3/48  2.62 GiB     layers        4/48  2.98 GiB     layers        5/48  3.34 GiB     layers        6/48  3.70 GiB     layers        7/48  4.07 GiB     layers        8/48  4.42 GiB     layers        9/48  4.79 GiB     layers        10/48  5.15 GiB     layers        11/48  5.51 GiB     layers        12/48  5.87 GiB     layers        13/48  6.23 GiB     layers        14/48  6.59 GiB     layers        15/48  6.95 GiB     layers        16/48  7.31 GiB     layers        17/48  7.67 GiB     layers        18/48  8.03 GiB     layers        19/48  8.39 GiB     layers        20/48  8.75 GiB     layers        21/48  9.11 GiB     layers        22/48  9.47 GiB     layers        23/48  9.83 GiB     layers        24/48  10.19 GiB     layers        25/48  10.55 GiB     layers        26/48  10.91 GiB     layers        27/48  11.27 GiB     layers        28/48  11.63 GiB     layers        29/48  11.99 GiB     layers        30/48  12.35 GiB     layers        31/48  12.72 GiB     layers        32/48  13.07 GiB     layers        33/48  13.43 GiB     layers        34/48  13.80 GiB     layers        35/48  14.16 GiB     layers        36/48  14.51 GiB     layers        37/48  14.88 GiB     layers        38/48  15.24 GiB     layers        39/48  15.60 GiB     layers        40/48  15.96 GiB     layers        41/48  16.32 GiB     layers        42/48  16.68 GiB     layers        43/48  17.04 GiB     layers        44/48  17.40 GiB     layers        45/48  17.76 GiB     layers        46/48  18.12 GiB     layers        47/48  18.48 GiB     layers        48/48  18.84 GiB   
+
+  mtp4 head     ok (0.46 GiB, int4 experts [384,512), attention this rank's heads)
+
+  scratch buffers ...   TP rank 3/4: connected
+  TP4 P2P: direct peer-push, FP32 payloads and rank-order sum
+  QFN TP4 synchronization: socket fan-out
+ok
+  KV cache: 1 slot x --ctx 32768, 0.19 GiB on this card
+  power governor: off (default; GRIMOIRE_POWER_LIMIT_W=<watts> sets one)
+  K cache layout: dim-major [kv head][dim][position]
+  zeroing recurrent state ... ok
+  TP prefill chunk cap: 2048 tokens (the smallest live VRAM budget of the ranks)
+  layer-major prefill: every call in one piece
+  capabilities:
+    parallel      TENSOR (Megatron: 1/4 of the heads and FFN, one all-reduce per block), rank 3 of 4
+    speculation   none -- the Qwen4-Exp MTP head is loaded, no batched verify yet
+    batching      one at a time -- only one sequence slot -- set GRIMOIRE_SEQ_SLOTS
+    prefill       batched
+    prefill chunk up to 2048 tokens per call (VRAM budget; longer prompts and admission batches are split)
+    norms         whole-row, zero-centered (1 + w)
+The user asks which object the passage calls "delicate." Let me look at the passage carefully.
+
+The passage states: "With his long, white,  spec: MTP depth 3 -- 1.91 accepted/step (21 of 33 drafted, 63.6%) over 11 steps
+
