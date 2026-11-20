@@ -1,0 +1,43 @@
+--- a/src/grimoire.cpp
++++ b/src/grimoire.cpp
+@@ -24467,7 +24467,11 @@
+         e.tp_mega = true;
+         std::string error;
+         if (!e.pp_connect(error)) throw std::runtime_error(error);
+-        constexpr std::array<int, 4> sizes{512 * 2560, 146 * 2560, 146 * 2560, 512 * 2560};
++        constexpr int full_chunk = 2048 * 2560;
++        constexpr std::array<int, 6> sizes{full_chunk, 512 * 2560, 146 * 2560,
++                                          146 * 2560, 512 * 2560, full_chunk};
++        const char* flag = std::getenv("GRIMOIRE_QFN_PREFILL_RSAG");
++        const bool test_rsag = flag && std::strcmp(flag, "1") == 0;
+         std::array<std::vector<float>, sizes.size()> host;
+         const auto free_dev = [&](float* p) { sycl::free(p, e.q); };
+         std::unique_ptr<float, decltype(free_dev)> dev(sycl::malloc_device<float>(sizes.front(), e.q), free_dev);
+@@ -24490,7 +24494,14 @@
+                 }
+                 e.q.memcpy(dev.get(), data.data(), n * sizeof(float)).wait_and_throw();
+                 const auto before = e.tp_peer_push4.sequence();
+-                if (!e.tp_allreduce_sum(dev.get(), n)) throw std::runtime_error("tp_allreduce_sum failed");
++                const bool use_rsag = peer && test_rsag && n == full_chunk;
++                PeerPush4::Timing detail;
++                const bool reduced = use_rsag
++                    ? e.tp_peer_push4.allreduce(e.q, dev.get(), n, e.tp_rank, &detail, false, true)
++                    : e.tp_allreduce_sum(dev.get(), n);
++                if (!reduced) throw std::runtime_error("tp_allreduce_sum failed");
++                if (use_rsag && detail.peer_bytes != size_t(n) * sizeof(float) * 3 / 2)
++                    throw std::runtime_error("reduce-scatter peer bytes differ from the shard plan");
+                 if (peer && e.tp_peer_push4.sequence() == before)
+                     throw std::runtime_error("the reduction did not submit a peer push");
+                 e.q.memcpy(data.data(), dev.get(), n * sizeof(float)).wait_and_throw();
+@@ -24501,6 +24512,11 @@
+                 } else {
+                     if (std::memcmp(data.data(), host[call].data(), n * sizeof(float)) != 0)
+                         throw std::runtime_error("peer and host differ at call " + std::to_string(call));
++                    if (use_rsag)
++                        std::printf("TP4 RSAG rank=%d call=%u peer_bytes=%zu copy_ms=%.3f ready_ms=%.3f "
++                                    "sum_ms=%.3f gather_ms=%.3f reuse_ms=%.3f exact\n",
++                                    e.tp_rank, call, detail.peer_bytes, detail.copy_ms, detail.ready_ms,
++                                    detail.sum_ms, detail.gather_ms, detail.reuse_ms);
+                     std::printf("TP4 peer regression rank=%d call=%u bytes=%zu exact\n",
+                                 e.tp_rank, call, n * sizeof(float));
+                 }
