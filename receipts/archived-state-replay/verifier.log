@@ -1,0 +1,88 @@
+QFN verify decision rank=0 start=2706 rows=2 next=16561 batched=1
+QFN verify prefix rank=0 control=same-batch pos=2708 prefix=1 cursor=1
+QFN verify compare rank=0 control=same-batch pos=2708 kind=recurrent elems=7077888 different=0 nonfinite=0 max_abs=0 rms=0
+QFN verify compare rank=0 control=same-batch pos=2708 kind=conv_ring elems=276480 different=0 nonfinite=0 max_abs=0 rms=0
+QFN verify decision rank=0 start=2706 rows=2 next=16561 batched=1
+QFN verify prefix rank=0 control=same-batch-repeat pos=2708 prefix=1 cursor=1
+QFN verify compare rank=0 control=same-batch-repeat pos=2708 kind=recurrent elems=7077888 different=0 nonfinite=0 max_abs=0 rms=0
+QFN verify compare rank=0 control=same-batch-repeat pos=2708 kind=conv_ring elems=276480 different=0 nonfinite=0 max_abs=0 rms=0
+QFN verify prefix rank=0 control=same-batch pos=2709 prefix=1 cursor=1
+QFN verify compare rank=0 control=same-batch pos=2709 kind=recurrent elems=7077888 different=0 nonfinite=0 max_abs=0 rms=0
+QFN verify compare rank=0 control=same-batch pos=2709 kind=conv_ring elems=276480 different=0 nonfinite=0 max_abs=0 rms=0
+QFN verify compare rank=0 control=same-batch pos=2709 kind=next_logits elems=62080 different=0 nonfinite=0 max_abs=0 rms=0
+QFN verify same-batch result rank=0 prefix_tokens=2708 restored_next=864 direct_next=864 commit_exact=1 repeat_checkpoint_exact=1 correction_exact=1 pass=1
+QFN verify prefix rank=0 control=sequential pos=2708 prefix=1 cursor=1
+QFN verify compare rank=0 control=sequential pos=2708 kind=recurrent elems=7077888 different=7077470 nonfinite=0 max_abs=0.00270885229 rms=1.15155548e-05
+QFN verify compare rank=0 control=sequential pos=2708 kind=conv_ring elems=276480 different=184318 nonfinite=0 max_abs=0.0341258049 rms=0.0030035916
+QFN verify compare rank=0 control=sequential pos=2708 kind=next_logits elems=62080 different=62080 nonfinite=0 max_abs=0.0498236418 rms=0.00742552296
+QFN verify prefix rank=0 control=sequential pos=2709 prefix=1 cursor=1
+QFN verify compare rank=0 control=sequential pos=2709 kind=recurrent elems=7077888 different=7077639 nonfinite=0 max_abs=0.00289051235 rms=1.25465428e-05
+QFN verify compare rank=0 control=sequential pos=2709 kind=conv_ring elems=276480 different=273917 nonfinite=0 max_abs=0.0341258049 rms=0.00320594936
+QFN verify compare rank=0 control=sequential pos=2709 kind=next_logits elems=62080 different=62079 nonfinite=0 max_abs=0.0325307846 rms=0.00352472035
+QFN verify sequential result rank=0 prefix_tokens=2708 restored_next=864 target_next=864 tokens_match=1 exact_state_and_logits=0 pass=0
+QFN verify decision rank=1 start=2706 rows=2 next=16561 batched=1
+QFN verify prefix rank=1 control=same-batch pos=2708 prefix=1 cursor=1
+QFN verify compare rank=1 control=same-batch pos=2708 kind=recurrent elems=7077888 different=0 nonfinite=0 max_abs=0 rms=0
+QFN verify compare rank=1 control=same-batch pos=2708 kind=conv_ring elems=276480 different=0 nonfinite=0 max_abs=0 rms=0
+QFN verify decision rank=1 start=2706 rows=2 next=16561 batched=1
+QFN verify prefix rank=1 control=same-batch-repeat pos=2708 prefix=1 cursor=1
+QFN verify compare rank=1 control=same-batch-repeat pos=2708 kind=recurrent elems=7077888 different=0 nonfinite=0 max_abs=0 rms=0
+QFN verify compare rank=1 control=same-batch-repeat pos=2708 kind=conv_ring elems=276480 different=0 nonfinite=0 max_abs=0 rms=0
+QFN verify prefix rank=1 control=same-batch pos=2709 prefix=1 cursor=1
+QFN verify compare rank=1 control=same-batch pos=2709 kind=recurrent elems=7077888 different=0 nonfinite=0 max_abs=0 rms=0
+QFN verify compare rank=1 control=same-batch pos=2709 kind=conv_ring elems=276480 different=0 nonfinite=0 max_abs=0 rms=0
+QFN verify compare rank=1 control=same-batch pos=2709 kind=next_logits elems=62080 different=0 nonfinite=0 max_abs=0 rms=0
+QFN verify same-batch result rank=1 prefix_tokens=2708 restored_next=864 direct_next=864 commit_exact=1 repeat_checkpoint_exact=1 correction_exact=1 pass=1
+QFN verify prefix rank=1 control=sequential pos=2708 prefix=1 cursor=1
+QFN verify compare rank=1 control=sequential pos=2708 kind=recurrent elems=7077888 different=7077591 nonfinite=0 max_abs=0.0029695034 rms=1.10421395e-05
+QFN verify compare rank=1 control=sequential pos=2708 kind=conv_ring elems=276480 different=184315 nonfinite=0 max_abs=0.0496616364 rms=0.00296267028
+QFN verify compare rank=1 control=sequential pos=2708 kind=next_logits elems=62080 different=62078 nonfinite=0 max_abs=0.0461788177 rms=0.00728699556
+QFN verify prefix rank=1 control=sequential pos=2709 prefix=1 cursor=1
+QFN verify compare rank=1 control=sequential pos=2709 kind=recurrent elems=7077888 different=7077662 nonfinite=0 max_abs=0.00296843052 rms=1.23240688e-05
+QFN verify compare rank=1 control=sequential pos=2709 kind=conv_ring elems=276480 different=273910 nonfinite=0 max_abs=0.0496616364 rms=0.00317071347
+QFN verify compare rank=1 control=sequential pos=2709 kind=next_logits elems=62080 different=62078 nonfinite=0 max_abs=0.0269083977 rms=0.00334144063
+QFN verify sequential result rank=1 prefix_tokens=2708 restored_next=864 target_next=864 tokens_match=1 exact_state_and_logits=0 pass=0
+QFN verify decision rank=2 start=2706 rows=2 next=16561 batched=1
+QFN verify prefix rank=2 control=same-batch pos=2708 prefix=1 cursor=1
+QFN verify compare rank=2 control=same-batch pos=2708 kind=recurrent elems=7077888 different=0 nonfinite=0 max_abs=0 rms=0
+QFN verify compare rank=2 control=same-batch pos=2708 kind=conv_ring elems=276480 different=0 nonfinite=0 max_abs=0 rms=0
+QFN verify decision rank=2 start=2706 rows=2 next=16561 batched=1
+QFN verify prefix rank=2 control=same-batch-repeat pos=2708 prefix=1 cursor=1
+QFN verify compare rank=2 control=same-batch-repeat pos=2708 kind=recurrent elems=7077888 different=0 nonfinite=0 max_abs=0 rms=0
+QFN verify compare rank=2 control=same-batch-repeat pos=2708 kind=conv_ring elems=276480 different=0 nonfinite=0 max_abs=0 rms=0
+QFN verify prefix rank=2 control=same-batch pos=2709 prefix=1 cursor=1
+QFN verify compare rank=2 control=same-batch pos=2709 kind=recurrent elems=7077888 different=0 nonfinite=0 max_abs=0 rms=0
+QFN verify compare rank=2 control=same-batch pos=2709 kind=conv_ring elems=276480 different=0 nonfinite=0 max_abs=0 rms=0
+QFN verify compare rank=2 control=same-batch pos=2709 kind=next_logits elems=62080 different=0 nonfinite=0 max_abs=0 rms=0
+QFN verify same-batch result rank=2 prefix_tokens=2708 restored_next=864 direct_next=864 commit_exact=1 repeat_checkpoint_exact=1 correction_exact=1 pass=1
+QFN verify prefix rank=2 control=sequential pos=2708 prefix=1 cursor=1
+QFN verify compare rank=2 control=sequential pos=2708 kind=recurrent elems=7077888 different=7077555 nonfinite=0 max_abs=0.00230498798 rms=9.20608668e-06
+QFN verify compare rank=2 control=sequential pos=2708 kind=conv_ring elems=276480 different=184319 nonfinite=0 max_abs=0.0436415672 rms=0.00248161465
+QFN verify compare rank=2 control=sequential pos=2708 kind=next_logits elems=62080 different=62080 nonfinite=0 max_abs=0.0388627052 rms=0.00664757135
+QFN verify prefix rank=2 control=sequential pos=2709 prefix=1 cursor=1
+QFN verify compare rank=2 control=sequential pos=2709 kind=recurrent elems=7077888 different=7077640 nonfinite=0 max_abs=0.00251701474 rms=8.16197015e-06
+QFN verify compare rank=2 control=sequential pos=2709 kind=conv_ring elems=276480 different=273917 nonfinite=0 max_abs=0.0436415672 rms=0.00265248142
+QFN verify compare rank=2 control=sequential pos=2709 kind=next_logits elems=62080 different=62078 nonfinite=0 max_abs=0.0231127739 rms=0.00296630527
+QFN verify sequential result rank=2 prefix_tokens=2708 restored_next=864 target_next=864 tokens_match=1 exact_state_and_logits=0 pass=0
+QFN verify decision rank=3 start=2706 rows=2 next=16561 batched=1
+QFN verify prefix rank=3 control=same-batch pos=2708 prefix=1 cursor=1
+QFN verify compare rank=3 control=same-batch pos=2708 kind=recurrent elems=7077888 different=0 nonfinite=0 max_abs=0 rms=0
+QFN verify compare rank=3 control=same-batch pos=2708 kind=conv_ring elems=276480 different=0 nonfinite=0 max_abs=0 rms=0
+QFN verify decision rank=3 start=2706 rows=2 next=16561 batched=1
+QFN verify prefix rank=3 control=same-batch-repeat pos=2708 prefix=1 cursor=1
+QFN verify compare rank=3 control=same-batch-repeat pos=2708 kind=recurrent elems=7077888 different=0 nonfinite=0 max_abs=0 rms=0
+QFN verify compare rank=3 control=same-batch-repeat pos=2708 kind=conv_ring elems=276480 different=0 nonfinite=0 max_abs=0 rms=0
+QFN verify prefix rank=3 control=same-batch pos=2709 prefix=1 cursor=1
+QFN verify compare rank=3 control=same-batch pos=2709 kind=recurrent elems=7077888 different=0 nonfinite=0 max_abs=0 rms=0
+QFN verify compare rank=3 control=same-batch pos=2709 kind=conv_ring elems=276480 different=0 nonfinite=0 max_abs=0 rms=0
+QFN verify compare rank=3 control=same-batch pos=2709 kind=next_logits elems=62080 different=0 nonfinite=0 max_abs=0 rms=0
+QFN verify same-batch result rank=3 prefix_tokens=2708 restored_next=864 direct_next=864 commit_exact=1 repeat_checkpoint_exact=1 correction_exact=1 pass=1
+QFN verify prefix rank=3 control=sequential pos=2708 prefix=1 cursor=1
+QFN verify compare rank=3 control=sequential pos=2708 kind=recurrent elems=7077888 different=7077347 nonfinite=0 max_abs=0.00327729248 rms=9.95214096e-06
+QFN verify compare rank=3 control=sequential pos=2708 kind=conv_ring elems=276480 different=184315 nonfinite=0 max_abs=0.0322475433 rms=0.00250577608
+QFN verify compare rank=3 control=sequential pos=2708 kind=next_logits elems=62080 different=62079 nonfinite=0 max_abs=0.0368542671 rms=0.00621427585
+QFN verify prefix rank=3 control=sequential pos=2709 prefix=1 cursor=1
+QFN verify compare rank=3 control=sequential pos=2709 kind=recurrent elems=7077888 different=7077608 nonfinite=0 max_abs=0.00163859129 rms=8.82637953e-06
+QFN verify compare rank=3 control=sequential pos=2709 kind=conv_ring elems=276480 different=273910 nonfinite=0 max_abs=0.0322475433 rms=0.0026717582
+QFN verify compare rank=3 control=sequential pos=2709 kind=next_logits elems=62080 different=62079 nonfinite=0 max_abs=0.0196037292 rms=0.00282451351
+QFN verify sequential result rank=3 prefix_tokens=2708 restored_next=864 target_next=864 tokens_match=1 exact_state_and_logits=0 pass=0

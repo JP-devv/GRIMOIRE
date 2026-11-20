@@ -1,0 +1,12 @@
+loading /home/haxor/models/qwen38-w4a16-snapshot ...
+  rank 0 -> GPU 0/4: Intel(R) Arc(TM) Pro B70 Graphics pci 0000:0a:00.0
+ready. listening on 127.0.0.1:37913
+  scheduler: one request at a time -- only one sequence slot -- set GRIMOIRE_SEQ_SLOTS
+QFN prefill causal tiles rank=0 rows=2048 layers=12
+QFN prefill RSAG rank=0 rows=2048 calls=97
+QFN prefill causal tiles rank=0 rows=658 layers=12
+QFN prefill causal tiles rank=0 rows=2048 layers=12
+QFN prefill RSAG rank=0 rows=2048 calls=97
+QFN prefill causal tiles rank=0 rows=658 layers=12
+signal 15: stopping gracefully -- no new requests, live generations end at their next token, GPU queues drain before memory is freed
+scheduler stopped, workers told to shut down; releasing the engine

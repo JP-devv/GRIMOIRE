@@ -1,0 +1,9 @@
+{
+  "nonstream_completion_s": 2.9149931070860475,
+  "served_first_text_s": 1.9192806459032,
+  "stream_usage": {
+    "prompt_tokens": 2706,
+    "completion_tokens": 32,
+    "total_tokens": 2738
+  }
+}
