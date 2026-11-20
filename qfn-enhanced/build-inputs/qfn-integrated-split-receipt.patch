@@ -1,0 +1,33 @@
+--- a/src/grimoire.cpp
++++ b/src/grimoire.cpp
+@@ -19811,6 +19811,9 @@
+                                    M == kQfnVerifySharedRows;
+     const char* const split_env = verify_attn_trial ? std::getenv("GRIMOIRE_QFN_VERIFY_SPLIT_KV") : nullptr;
+     const bool verify_attn_split = split_env && std::strcmp(split_env, "1") == 0;
++    unsigned split_attention_layers = 0;
++    const char* require_split = std::getenv("GRIMOIRE_QFN_VERIFY_REQUIRE_SPLIT");
++    const bool verify_split_receipt = verify_attn_trial && require_split && std::strcmp(require_split, "1") == 0;
+     const bool verify_attn_exact = verify_attn_trial && std::getenv("GRIMOIRE_MTP_EXACT_VERIFY");
+     const bool verify_attn_trace = verify_attn_trial && std::getenv("GRIMOIRE_QFN_VERIFY_ATTN_TRACE");
+     // and (fenced) the mixer's all-reduce, the MoE's all-reduce, the router + top-k
+@@ -20247,6 +20250,7 @@
+                                                  tp_rank, i, position, splits);
+                             },
+                             [&](int base_seq_len, int splits) {
++                                if (verify_split_receipt) ++split_attention_layers;
+                                 // In-order execution serializes the append, scan/merge and scratch reuse across layers.
+                                 launch_flash_decode_batched(q, queries, kc, vc, output, rows, base_seq_len,
+                                     QH, KVH, HD, max_seq, scale, s.part, s.pm, s.pl, splits, none);
+@@ -20598,6 +20602,12 @@
+     if (fuse_prefill_hc && std::getenv("GRIMOIRE_BUDGET_DEBUG"))
+         std::fprintf(stderr, "QFN HC prefill fused rank=%d pos=%d rows=%d calls=%zu\n",
+                      tp_rank, start_pos, M, hc_fused_calls);
++    if (verify_split_receipt) {
++        std::fprintf(stderr, "QFN split verifier rank=%d pos=%d rows=%d layers=%u\n",
++                     tp_rank, start_pos, M, split_attention_layers);
++        if (split_attention_layers != unsigned(cfg.n_layers / 4))
++            throw std::runtime_error("QFN split verifier failed the full-attention dispatch gate");
++    }
+     if (check_rsag) {
+         const auto calls = tp_peer_push4.scatter_calls() - rsag_at_entry;
+         std::fprintf(stderr, "QFN prefill RSAG rank=%d rows=%d calls=%llu\n",
