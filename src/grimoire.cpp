@@ -19063,7 +19063,9 @@ size_t Grimoire::tm_heat_init() {
 // heat engine then swaps among all of them.  -> the VRAM it took.
 size_t Grimoire::tm_fill() {
     static const bool on = [] { const char* e = std::getenv("GRIMOIRE_EXPERT_FILL"); return !(e && *e == '0'); }();
-    if (!on || !tm_dup || !cfg.is_qwen4_exp || tp_ranked() || pp_enabled()) return 0;
+    // The pool has already budgeted the spare VRAM, but its pages are not
+    // physically allocated yet. Filling that space would oversubscribe it.
+    if (!on || kv_pool || !tm_dup || !cfg.is_qwen4_exp || tp_ranked() || pp_enabled()) return 0;
     const auto dev = q.get_device();
     if (!dev.has(sycl::aspect::ext_intel_free_memory)) return 0;
     double free_b = 0;
