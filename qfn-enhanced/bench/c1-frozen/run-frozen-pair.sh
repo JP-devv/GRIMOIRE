@@ -46,7 +46,7 @@ for dev in /sys/bus/pci/devices/0000:{0a,0e,14,18}:00.0; do
     printf "%s\n" "$dev"
     cat "$dev"/hwmon/hwmon*/power1_cap "$dev"/tile0/gt0/freq0/{min_freq,max_freq,cur_freq}
 done > "$D/cards-before.txt" 2>&1
-(
+native() (
     idle
     unset LD_PRELOAD LD_LIBRARY_PATH
     for key in $(compgen -e GRIMOIRE_); do unset "$key"; done
@@ -83,15 +83,16 @@ done > "$D/cards-before.txt" 2>&1
     done
     python3 "$B/c1.py" native "$D/native"/r{0,1,2,3}.log > "$D/native-phase.json"
 )
-(
+
+vllm() (
     idle
     [[ -z $(ss -H -ltn "sport = :$BENCH_PORT") ]]
-    CAP=$(remaining 360)
+    CAP=$(remaining 360); (( CAP <= 360 )) || CAP=360
     NAME=qfn-c1-$(basename "$D")
     URL=http://127.0.0.1:$BENCH_PORT
     mkdir -p "$D/vllm-work/cache/"{tmp,hf,triton,vllm,xdg}
     CID=$(docker run --pull=never --detach --name "$NAME" --network host --ipc host \
-        --device /dev/dri:/dev/dri --group-add render --group-add video \
+        --device /dev/dri:/dev/dri --mount type=bind,src=/dev/dri/by-path,dst=/dev/dri/by-path,readonly --group-add render --group-add video \
         --ulimit memlock=-1:-1 --ulimit stack=67108864:67108864 \
         --env-file "$B/vllm-c1.env" --mount type=bind,src=/home/haxor/models,dst=/models,readonly \
         --mount "type=bind,src=$D/vllm-work,dst=/work" --entrypoint /usr/bin/timeout "$IMAGE" \
@@ -105,8 +106,12 @@ done > "$D/cards-before.txt" 2>&1
     trap 'docker logs "$CID" > "$D/vllm.log" 2>&1 || :; docker rm -f "$CID" >/dev/null' EXIT
     trap 'exit 143' TERM INT
     docker inspect --format '{{.Image}} {{json .Path}} {{json .Args}}' "$CID" > "$D/vllm-invocation.txt"
-    timeout "$CAP" curl --noproxy '*' --fail --silent --show-error --max-time 2 --retry-all-errors \
-        --retry 600 --retry-delay 1 --retry-max-time "$CAP" "$URL/health" > "$D/health"
+    ready_by=$((SECONDS + CAP - 15))
+    until curl --noproxy '*' -fs --max-time 2 "$URL/health" > "$D/health"; do
+        [[ $(docker inspect --format '{{.State.Running}}' "$CID") == true ]]
+        (( SECONDS < ready_by ))
+        sleep 1
+    done
     unset http_proxy https_proxy HTTP_PROXY HTTPS_PROXY ALL_PROXY
     curl --noproxy '*' -fsS --max-time 5 "$URL/metrics" > "$D/before.prom"
     curl --noproxy '*' -fsS --max-time "$(remaining 5)" -H 'Content-Type: application/json' \
@@ -114,6 +119,12 @@ done > "$D/cards-before.txt" 2>&1
     curl --noproxy '*' -fsS --max-time 5 "$URL/metrics" > "$D/after.prom"
     python3 "$B/c1.py" vllm "$D/response.json" "$D/before.prom" "$D/after.prom" > "$D/vllm-phase.json"
 )
+case "${PAIR_ORDER:-native-first}" in
+    native-first) native; vllm ;;
+    reference-first) vllm; native ;;
+    *) echo "Invalid PAIR_ORDER" >&2; exit 2 ;;
+esac
+
 idle
 sudo -n journalctl -k -q --no-pager --after-cursor "$CURSOR" -o cat > "$D/kernel.log"
 awk '/xe.*(Fault response|Timedout job|GPU HANG|Engine memory CAT error|wedged)/' "$D/kernel.log" > "$D/xe-fault.log"
