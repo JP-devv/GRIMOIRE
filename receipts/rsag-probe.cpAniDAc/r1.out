@@ -1,0 +1,16 @@
+  TP rank 1/4: connected
+TP4 host reference rank=1 call=0 bytes=20971520
+TP4 host reference rank=1 call=1 bytes=5242880
+TP4 host reference rank=1 call=2 bytes=1495040
+TP4 host reference rank=1 call=3 bytes=1495040
+TP4 host reference rank=1 call=4 bytes=5242880
+TP4 host reference rank=1 call=5 bytes=20971520
+  TP4 P2P: direct peer-push, FP32 payloads and rank-order sum
+TP4 RSAG rank=1 call=0 peer_bytes=31457280 copy_ms=2.666 ready_ms=0.153 sum_ms=0.444 gather_ms=0.102 reuse_ms=0.067 exact
+TP4 peer regression rank=1 call=0 bytes=20971520 exact
+TP4 peer regression rank=1 call=1 bytes=5242880 exact
+TP4 peer regression rank=1 call=2 bytes=1495040 exact
+TP4 peer regression rank=1 call=3 bytes=1495040 exact
+TP4 peer regression rank=1 call=4 bytes=5242880 exact
+TP4 RSAG rank=1 call=5 peer_bytes=31457280 copy_ms=1.457 ready_ms=0.155 sum_ms=0.089 gather_ms=0.100 reuse_ms=0.070 exact
+TP4 peer regression rank=1 call=5 bytes=20971520 exact
