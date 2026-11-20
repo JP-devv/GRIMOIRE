@@ -1,0 +1,370 @@
+[l0-peer-shim pid=1] active scope=large-nonccl-tracked-device-allocation-peer-residency path=loader-tracer pool_ceiling=4194304 report_interval=15s
+[l0-peer-shim pid=7] active scope=large-nonccl-tracked-device-allocation-peer-residency path=loader-tracer pool_ceiling=4194304 report_interval=15s
+[l0-peer-shim pid=56] active scope=large-nonccl-tracked-device-allocation-peer-residency path=loader-tracer pool_ceiling=4194304 report_interval=15s
+(APIServer pid=7) INFO 11-20 21:33:36 [api_utils.py:347] 
+(APIServer pid=7) INFO 11-20 21:33:36 [api_utils.py:347]        █     █     █▄   ▄█
+(APIServer pid=7) INFO 11-20 21:33:36 [api_utils.py:347]  ▄▄ ▄█ █     █     █ ▀▄▀ █  version 0.30.0
+(APIServer pid=7) INFO 11-20 21:33:36 [api_utils.py:347]   █▄█▀ █     █     █     █  model   /models/qwen38-w4a16-snapshot
+(APIServer pid=7) INFO 11-20 21:33:36 [api_utils.py:347]    ▀▀  ▀▀▀▀▀ ▀▀▀▀▀ ▀     ▀
+(APIServer pid=7) INFO 11-20 21:33:36 [api_utils.py:347] 
+(APIServer pid=7) INFO 11-20 21:33:36 [api_utils.py:286] non-default args: {'model_tag': '/models/qwen38-w4a16-snapshot', 'enable_prompt_tokens_details': True, 'host': '127.0.0.1', 'port': 59151, 'model': '/models/qwen38-w4a16-snapshot', 'trust_remote_code': True, 'dtype': 'bfloat16', 'max_model_len': 32768, 'enforce_eager': True, 'served_model_name': ['qwen38-flash-next-c1'], 'generation_config': 'vllm', 'tensor_parallel_size': 4, 'enable_expert_parallel': True, 'gpu_memory_utilization': 0.95, 'enable_prefix_caching': False, 'limit_mm_per_prompt': {'image': 4, 'video': 2}, 'max_num_batched_tokens': 2048, 'max_num_seqs': 16, 'async_scheduling': True, 'compilation_config': {'mode': None, 'debug_dump_path': None, 'cache_dir': '', 'compile_cache_save_format': 'binary', 'backend': 'inductor', 'custom_ops': [], 'ir_enable_torch_wrap': None, 'splitting_ops': None, 'compile_mm_encoder': False, 'cudagraph_mm_encoder': False, 'encoder_cudagraph_token_budgets': [], 'encoder_cudagraph_max_vision_items_per_batch': 0, 'encoder_cudagraph_max_frames_per_batch': None, 'compile_sizes': None, 'compile_ranges_endpoints': None, 'inductor_compile_config': {'enable_auto_functionalized_v2': False, 'combo_kernels': True, 'benchmark_combo_kernel': True}, 'inductor_passes': {}, 'cudagraph_mode': <CUDAGraphMode.FULL_AND_PIECEWISE: (2, 1)>, 'cudagraph_num_of_warmups': 0, 'cudagraph_capture_sizes': [1, 2, 4, 8, 16, 256, 512, 1024], 'cudagraph_copy_inputs': False, 'cudagraph_specialize_lora': True, 'use_inductor_graph_partition': None, 'pass_config': {}, 'max_cudagraph_capture_size': None, 'dynamic_shapes_config': {'type': <DynamicShapesType.BACKED: 'backed'>, 'evaluate_guards': False, 'assume_32_bit_indexing': False}, 'local_cache_dir': None, 'fast_moe_cold_start': None, 'static_all_moe_layers': []}}
+(APIServer pid=7) [transformers] Unrecognized keys in `rope_parameters` for 'rope_type'='default': {'mrope_section', 'mrope_interleaved'}
+(APIServer pid=7) [transformers] Unrecognized keys in `rope_parameters` for 'rope_type'='default': {'mrope_section', 'mrope_interleaved'}
+(APIServer pid=7) [transformers] Unrecognized keys in `rope_parameters` for 'rope_type'='default': {'mrope_section', 'mrope_interleaved'}
+(APIServer pid=7) [transformers] Unrecognized keys in `rope_parameters` for 'rope_type'='default': {'mrope_section', 'mrope_interleaved'}
+(APIServer pid=7) [transformers] Unrecognized keys in `rope_parameters` for 'rope_type'='default': {'mrope_section', 'mrope_interleaved'}
+(APIServer pid=7) INFO 11-20 21:33:48 [model.py:692] Resolved architecture: Qwen4ExpForConditionalGeneration
+(APIServer pid=7) INFO 11-20 21:33:48 [model.py:2030] Using max model len 32768
+[l0-peer-shim pid=179] active scope=large-nonccl-tracked-device-allocation-peer-residency path=loader-tracer pool_ceiling=4194304 report_interval=15s
+(APIServer pid=7) [transformers] Unrecognized keys in `rope_parameters` for 'rope_type'='default': {'mrope_section', 'mrope_interleaved'}
+(APIServer pid=7) [transformers] Unrecognized keys in `rope_parameters` for 'rope_type'='default': {'mrope_section', 'mrope_interleaved'}
+(APIServer pid=7) [transformers] Unrecognized keys in `rope_parameters` for 'rope_type'='default': {'mrope_section', 'mrope_interleaved'}
+(APIServer pid=7) [transformers] Unrecognized keys in `rope_parameters` for 'rope_type'='default': {'mrope_section', 'mrope_interleaved'}
+(APIServer pid=7) [transformers] Unrecognized keys in `rope_parameters` for 'rope_type'='default': {'mrope_section', 'mrope_interleaved'}
+(APIServer pid=7) WARNING 11-20 21:33:50 [indexer_topk.py:29] Failed to import the DeepSelect extension (vllm._deepselect_C): No module named 'vllm._deepselect_C'
+(APIServer pid=7) WARNING 11-20 21:33:50 [vllm.py:1547] Enforce eager set, disabling torch.compile and CUDAGraphs. This is equivalent to setting -cc.mode=none -cc.cudagraph_mode=none
+(APIServer pid=7) INFO 11-20 21:33:50 [vllm.py:762] Auto-enabling VLLM_USE_BREAKABLE_CUDAGRAPH=1. Set VLLM_USE_BREAKABLE_CUDAGRAPH=0 to opt out.
+(APIServer pid=7) INFO 11-20 21:33:50 [kernel.py:416] Final IR op priority after setting platform defaults: IrOpPriorityConfig(rms_norm=['vllm_c', 'native'], fused_add_rms_norm=['vllm_c', 'native'], gelu_and_mul_sparse=['native'])
+(APIServer pid=7) INFO 11-20 21:33:50 [vllm.py:1780] Cudagraph is disabled under eager mode
+(APIServer pid=7) WARNING 11-20 21:33:50 [xpu.py:308] XPU Graph support is experimental and currently only supports single-GPU execution.
+(APIServer pid=7) INFO 11-20 21:33:50 [xpu.py:382] XPU platform: set server shutdown_timeout=5.
+(APIServer pid=7) INFO 11-20 21:33:50 [compilation.py:336] Enabled custom fusions: norm_quant, act_quant
+(APIServer pid=7) [transformers] Unrecognized keys in `rope_parameters` for 'rope_type'='default': {'mrope_section', 'mrope_interleaved'}
+(APIServer pid=7) [transformers] Unrecognized keys in `rope_parameters` for 'rope_type'='default': {'mrope_section', 'mrope_interleaved'}
+(APIServer pid=7) [transformers] The `use_fast` parameter is deprecated and will be removed in a future version. Use `backend="torchvision"` instead of `use_fast=True`, or `backend="pil"` instead of `use_fast=False`.
+(APIServer pid=7) [transformers] Unrecognized keys in `rope_parameters` for 'rope_type'='default': {'mrope_section', 'mrope_interleaved'}
+(APIServer pid=7) [transformers] Unrecognized keys in `rope_parameters` for 'rope_type'='default': {'mrope_section', 'mrope_interleaved'}
+[l0-peer-shim pid=189] active scope=large-nonccl-tracked-device-allocation-peer-residency path=loader-tracer pool_ceiling=4194304 report_interval=15s
+[l0-peer-shim pid=188] active scope=large-nonccl-tracked-device-allocation-peer-residency path=loader-tracer pool_ceiling=4194304 report_interval=15s
+[l0-peer-shim pid=238] active scope=large-nonccl-tracked-device-allocation-peer-residency path=loader-tracer pool_ceiling=4194304 report_interval=15s
+(EngineCore pid=189) INFO 11-20 21:34:01 [core.py:123] Initializing a V1 LLM engine (v0.30.0) with config: model='/models/qwen38-w4a16-snapshot', speculative_config=None, tokenizer='/models/qwen38-w4a16-snapshot', skip_tokenizer_init=False, tokenizer_mode=auto, revision=None, tokenizer_revision=None, trust_remote_code=True, dtype=torch.bfloat16, max_seq_len=32768, download_dir=None, load_format=auto, tensor_parallel_size=4, pipeline_parallel_size=1, data_parallel_size=1, decode_context_parallel_size=1, dcp_comm_backend=ag_rs, disable_custom_all_reduce=True, quantization=inc, quantization_config=None, enforce_eager=True, enable_return_routed_experts=False, kv_cache_dtype=auto, device_config=xpu, structured_outputs_config=StructuredOutputsConfig(backend='auto', disable_any_whitespace=False, disable_additional_properties=False, reasoning_parser='', reasoning_parser_plugin='', enable_in_reasoning=False), observability_config=ObservabilityConfig(show_hidden_metrics_for_version=None, otlp_traces_endpoint=None, collect_detailed_traces=None, per_request_spec_decode_metrics='none', kv_cache_metrics=False, kv_cache_metrics_sample=0.01, cudagraph_metrics=False, enable_layerwise_nvtx_tracing=False, enable_mfu_metrics=False, enable_mm_processor_stats=False, enable_logging_iteration_details=False, jit_monitor_mode='warn', jit_monitor_verbose=False), seed=0, served_model_name=qwen38-flash-next-c1, enable_prefix_caching=False, enable_chunked_prefill=True, pooler_config=None, compilation_config={'mode': <CompilationMode.NONE: 0>, 'debug_dump_path': None, 'cache_dir': '', 'compile_cache_save_format': 'binary', 'backend': 'inductor', 'custom_ops': ['all'], 'ir_enable_torch_wrap': False, 'splitting_ops': [], 'compile_mm_encoder': False, 'cudagraph_mm_encoder': False, 'encoder_cudagraph_token_budgets': [], 'encoder_cudagraph_max_vision_items_per_batch': 0, 'encoder_cudagraph_max_frames_per_batch': None, 'compile_sizes': [], 'compile_ranges_endpoints': [2048], 'inductor_compile_config': {'enable_auto_functionalized_v2': False, 'combo_kernels': True, 'benchmark_combo_kernel': True}, 'inductor_passes': {}, 'cudagraph_mode': <CUDAGraphMode.NONE: 0>, 'cudagraph_num_of_warmups': 0, 'cudagraph_capture_sizes': [], 'cudagraph_copy_inputs': False, 'cudagraph_specialize_lora': True, 'use_inductor_graph_partition': False, 'pass_config': {'fuse_norm_quant': True, 'fuse_act_quant': True, 'fuse_attn_quant': False, 'enable_sp': False, 'fuse_gemm_comms': False, 'fuse_allreduce_rms': False, 'enable_qk_norm_rope_fusion': False, 'fuse_rope_kvcache_cat_mla': False, 'fuse_act_padding': False, 'fuse_qk_norm_rope_kvcache': False}, 'max_cudagraph_capture_size': 0, 'dynamic_shapes_config': {'type': <DynamicShapesType.BACKED: 'backed'>, 'evaluate_guards': False, 'assume_32_bit_indexing': False}, 'local_cache_dir': None, 'fast_moe_cold_start': False, 'static_all_moe_layers': []}, kernel_config=KernelConfig(ir_op_priority=IrOpPriorityConfig(rms_norm=['vllm_c', 'native'], fused_add_rms_norm=['vllm_c', 'native'], gelu_and_mul_sparse=['native']), enable_flashinfer_autotune=True, enable_cutedsl_warmup=True, enable_jit_warmup=True, moe_backend='auto', sparse_indexer_topk_backend='auto', linear_backend='auto', linear_backend_per_quant=None)
+(EngineCore pid=189) INFO 11-20 21:34:01 [multiproc_executor.py:153] DP group leader: node_rank=0, node_rank_within_dp=0, master_addr=127.0.0.1, mq_connect_ip=10.0.0.194 (local), world_size=4, local_world_size=4
+[l0-peer-shim pid=276] active scope=large-nonccl-tracked-device-allocation-peer-residency path=loader-tracer pool_ceiling=4194304 report_interval=15s
+[l0-peer-shim pid=7] summary reason=periodic path=loader-tracer alloc_calls=8 tracked=8 freed=0 live=4 owner_allowed=8 peer_preserved=24 peer_suppressed=0 peer_bytes=0 other_passthrough=0
+[l0-peer-shim pid=289] active scope=large-nonccl-tracked-device-allocation-peer-residency path=loader-tracer pool_ceiling=4194304 report_interval=15s
+[l0-peer-shim pid=297] active scope=large-nonccl-tracked-device-allocation-peer-residency path=loader-tracer pool_ceiling=4194304 report_interval=15s
+WARNING 11-20 21:34:06 [indexer_topk.py:29] Failed to import the DeepSelect extension (vllm._deepselect_C): No module named 'vllm._deepselect_C'
+(APIServer pid=7) [transformers] Unrecognized keys in `rope_parameters` for 'rope_type'='default': {'mrope_section', 'mrope_interleaved'}
+(APIServer pid=7) [transformers] Unrecognized keys in `rope_parameters` for 'rope_type'='default': {'mrope_section', 'mrope_interleaved'}
+[l0-peer-shim pid=304] active scope=large-nonccl-tracked-device-allocation-peer-residency path=loader-tracer pool_ceiling=4194304 report_interval=15s
+[transformers] Unrecognized keys in `rope_parameters` for 'rope_type'='default': {'mrope_interleaved', 'mrope_section'}
+[transformers] Unrecognized keys in `rope_parameters` for 'rope_type'='default': {'mrope_interleaved', 'mrope_section'}
+[transformers] Unrecognized keys in `rope_parameters` for 'rope_type'='default': {'mrope_interleaved', 'mrope_section'}
+[transformers] Unrecognized keys in `rope_parameters` for 'rope_type'='default': {'mrope_interleaved', 'mrope_section'}
+[transformers] Unrecognized keys in `rope_parameters` for 'rope_type'='default': {'mrope_interleaved', 'mrope_section'}
+(Worker pid=276) INFO 11-20 21:34:08 [parallel_state.py:1827] world_size=4 rank=0 local_rank=0 distributed_init_method=file:///work/cache/tmp/vllm_dist_210ce61b895b416ca3791586c9170784 backend=xccl
+(APIServer pid=7) [transformers] Qwen3VL video processing does not apply the per-frame pixel cap the reference implementation (qwen-vl-utils) applies, so some videos cost far more tokens than they would there. In v5.22 the capped behavior will become the default and `cap_pixels_per_frame` will be removed. Pass `cap_pixels_per_frame=True` to adopt the reference behavior now, or `False` to keep the current behavior and silence this warning.
+[l0-peer-shim pid=342] active scope=large-nonccl-tracked-device-allocation-peer-residency path=loader-tracer pool_ceiling=4194304 report_interval=15s
+(APIServer pid=7) INFO 11-20 21:34:11 [base.py:261] Multi-modal warmup completed in 9.954s
+[l0-peer-shim pid=350] active scope=large-nonccl-tracked-device-allocation-peer-residency path=loader-tracer pool_ceiling=4194304 report_interval=15s
+WARNING 11-20 21:34:11 [indexer_topk.py:29] Failed to import the DeepSelect extension (vllm._deepselect_C): No module named 'vllm._deepselect_C'
+[l0-peer-shim pid=352] active scope=large-nonccl-tracked-device-allocation-peer-residency path=loader-tracer pool_ceiling=4194304 report_interval=15s
+(APIServer pid=7) INFO 11-20 21:34:12 [base.py:261] Readonly multi-modal warmup completed in 0.822s
+[transformers] Unrecognized keys in `rope_parameters` for 'rope_type'='default': {'mrope_interleaved', 'mrope_section'}
+[transformers] Unrecognized keys in `rope_parameters` for 'rope_type'='default': {'mrope_interleaved', 'mrope_section'}
+[transformers] Unrecognized keys in `rope_parameters` for 'rope_type'='default': {'mrope_interleaved', 'mrope_section'}
+[transformers] Unrecognized keys in `rope_parameters` for 'rope_type'='default': {'mrope_interleaved', 'mrope_section'}
+[transformers] Unrecognized keys in `rope_parameters` for 'rope_type'='default': {'mrope_interleaved', 'mrope_section'}
+(Worker pid=297) INFO 11-20 21:34:13 [parallel_state.py:1827] world_size=4 rank=1 local_rank=1 distributed_init_method=file:///work/cache/tmp/vllm_dist_210ce61b895b416ca3791586c9170784 backend=xccl
+[l0-peer-shim pid=371] active scope=large-nonccl-tracked-device-allocation-peer-residency path=loader-tracer pool_ceiling=4194304 report_interval=15s
+[l0-peer-shim pid=379] active scope=large-nonccl-tracked-device-allocation-peer-residency path=loader-tracer pool_ceiling=4194304 report_interval=15s
+WARNING 11-20 21:34:16 [indexer_topk.py:29] Failed to import the DeepSelect extension (vllm._deepselect_C): No module named 'vllm._deepselect_C'
+[l0-peer-shim pid=381] active scope=large-nonccl-tracked-device-allocation-peer-residency path=loader-tracer pool_ceiling=4194304 report_interval=15s
+[transformers] Unrecognized keys in `rope_parameters` for 'rope_type'='default': {'mrope_interleaved', 'mrope_section'}
+[transformers] Unrecognized keys in `rope_parameters` for 'rope_type'='default': {'mrope_interleaved', 'mrope_section'}
+[transformers] Unrecognized keys in `rope_parameters` for 'rope_type'='default': {'mrope_interleaved', 'mrope_section'}
+[transformers] Unrecognized keys in `rope_parameters` for 'rope_type'='default': {'mrope_interleaved', 'mrope_section'}
+[transformers] Unrecognized keys in `rope_parameters` for 'rope_type'='default': {'mrope_interleaved', 'mrope_section'}
+(Worker pid=350) INFO 11-20 21:34:18 [parallel_state.py:1827] world_size=4 rank=2 local_rank=2 distributed_init_method=file:///work/cache/tmp/vllm_dist_210ce61b895b416ca3791586c9170784 backend=xccl
+[l0-peer-shim pid=400] active scope=large-nonccl-tracked-device-allocation-peer-residency path=loader-tracer pool_ceiling=4194304 report_interval=15s
+WARNING 11-20 21:34:21 [indexer_topk.py:29] Failed to import the DeepSelect extension (vllm._deepselect_C): No module named 'vllm._deepselect_C'
+[l0-peer-shim pid=409] active scope=large-nonccl-tracked-device-allocation-peer-residency path=loader-tracer pool_ceiling=4194304 report_interval=15s
+[l0-peer-shim pid=276] summary reason=periodic path=loader-tracer alloc_calls=8 tracked=8 freed=0 live=4 owner_allowed=8 peer_preserved=24 peer_suppressed=0 peer_bytes=0 other_passthrough=0
+[transformers] Unrecognized keys in `rope_parameters` for 'rope_type'='default': {'mrope_section', 'mrope_interleaved'}
+[transformers] Unrecognized keys in `rope_parameters` for 'rope_type'='default': {'mrope_section', 'mrope_interleaved'}
+[transformers] Unrecognized keys in `rope_parameters` for 'rope_type'='default': {'mrope_section', 'mrope_interleaved'}
+[transformers] Unrecognized keys in `rope_parameters` for 'rope_type'='default': {'mrope_section', 'mrope_interleaved'}
+[transformers] Unrecognized keys in `rope_parameters` for 'rope_type'='default': {'mrope_section', 'mrope_interleaved'}
+(Worker pid=379) INFO 11-20 21:34:23 [parallel_state.py:1827] world_size=4 rank=3 local_rank=3 distributed_init_method=file:///work/cache/tmp/vllm_dist_210ce61b895b416ca3791586c9170784 backend=xccl
+(Worker pid=276) INFO 11-20 21:34:23 [parallel_state.py:2267] rank 0 in world size 4 is assigned as DP rank 0, PP rank 0, PCP rank 0, TP rank 0, ETP rank 0, EP rank 0, EPLB rank N/A
+2026:11:20-21:34:23:  379 |CCL_WARN| value of CCL_ATL_TRANSPORT changed to be ofi (default:mpi)
+2026:11:20-21:34:23:  379 |CCL_WARN| value of CCL_SYCL_ALLREDUCE_TMP_BUF changed to be 1 (default:0)
+2026:11:20-21:34:23:  379 |CCL_WARN| value of CCL_SYCL_ALLGATHERV_TMP_BUF changed to be 1 (default:0)
+2026:11:20-21:34:23:  350 |CCL_WARN| value of CCL_ATL_TRANSPORT changed to be ofi (default:mpi)
+2026:11:20-21:34:23:  350 |CCL_WARN| value of CCL_SYCL_ALLREDUCE_TMP_BUF changed to be 1 (default:0)
+2026:11:20-21:34:23:  350 |CCL_WARN| value of CCL_SYCL_ALLGATHERV_TMP_BUF changed to be 1 (default:0)
+2026:11:20-21:34:23:  297 |CCL_WARN| value of CCL_ATL_TRANSPORT changed to be ofi (default:mpi)
+2026:11:20-21:34:23:  297 |CCL_WARN| value of CCL_SYCL_ALLREDUCE_TMP_BUF changed to be 1 (default:0)
+2026:11:20-21:34:23:  297 |CCL_WARN| value of CCL_SYCL_ALLGATHERV_TMP_BUF changed to be 1 (default:0)
+2026:11:20-21:34:23:  276 |CCL_WARN| value of CCL_ATL_TRANSPORT changed to be ofi (default:mpi)
+2026:11:20-21:34:23:  276 |CCL_WARN| value of CCL_SYCL_ALLREDUCE_TMP_BUF changed to be 1 (default:0)
+2026:11:20-21:34:23:  276 |CCL_WARN| value of CCL_SYCL_ALLGATHERV_TMP_BUF changed to be 1 (default:0)
+2026:11:20-21:34:23:  379 |CCL_WARN| value of CCL_ZE_IPC_EXCHANGE changed to be sockets (default:pidfd)
+2026:11:20-21:34:23:  379 |CCL_WARN| could not get local_idx/count from environment variables, trying to get them from ATL
+2026:11:20-21:34:23:  350 |CCL_WARN| value of CCL_ZE_IPC_EXCHANGE changed to be sockets (default:pidfd)
+2026:11:20-21:34:23:  350 |CCL_WARN| could not get local_idx/count from environment variables, trying to get them from ATL
+2026:11:20-21:34:23:  297 |CCL_WARN| value of CCL_ZE_IPC_EXCHANGE changed to be sockets (default:pidfd)
+2026:11:20-21:34:23:  297 |CCL_WARN| could not get local_idx/count from environment variables, trying to get them from ATL
+2026:11:20-21:34:23:  276 |CCL_WARN| value of CCL_ZE_IPC_EXCHANGE changed to be sockets (default:pidfd)
+2026:11:20-21:34:23:  276 |CCL_WARN| could not get local_idx/count from environment variables, trying to get them from ATL
+2026:11:20-21:34:24:  532:[0] |CCL_WARN| no membind support for NUMA node 0, skip thread membind
+2026:11:20-21:34:24:  533:[1] |CCL_WARN| no membind support for NUMA node 0, skip thread membind
+2026:11:20-21:34:24:  535:[3] |CCL_WARN| no membind support for NUMA node 0, skip thread membind
+2026:11:20-21:34:24:  534:[2] |CCL_WARN| no membind support for NUMA node 0, skip thread membind
+2026:11:20-21:34:24:  379:[3] |CCL_WARN| topology recognition shows PCIe connection between devices. If this is not correct, you can disable topology recognition, with CCL_TOPO_FABRIC_VERTEX_CONNECTION_CHECK=0. This will assume XeLinks across devices
+2026:11:20-21:34:24:  297:[1] |CCL_WARN| topology recognition shows PCIe connection between devices. If this is not correct, you can disable topology recognition, with CCL_TOPO_FABRIC_VERTEX_CONNECTION_CHECK=0. This will assume XeLinks across devices
+2026:11:20-21:34:24:  350:[2] |CCL_WARN| topology recognition shows PCIe connection between devices. If this is not correct, you can disable topology recognition, with CCL_TOPO_FABRIC_VERTEX_CONNECTION_CHECK=0. This will assume XeLinks across devices
+2026:11:20-21:34:24:  276:[0] |CCL_WARN| topology recognition shows PCIe connection between devices. If this is not correct, you can disable topology recognition, with CCL_TOPO_FABRIC_VERTEX_CONNECTION_CHECK=0. This will assume XeLinks across devices
+2026:11:20-21:34:24:  276:[0] |CCL_WARN| pidfd is not supported, fallbacks to drmfd exchange mode
+2026:11:20-21:34:24:  297:[1] |CCL_WARN| pidfd is not supported, fallbacks to drmfd exchange mode
+2026:11:20-21:34:24:  350:[2] |CCL_WARN| pidfd is not supported, fallbacks to drmfd exchange mode
+2026:11:20-21:34:24:  379:[3] |CCL_WARN| pidfd is not supported, fallbacks to drmfd exchange mode
+(Worker pid=276) INFO 11-20 21:34:25 [xpu_worker.py:169] Using V2 Model Runner
+(Worker_TP0_EP0 pid=276) INFO 11-20 21:34:25 [model_runner.py:397] Loading model from scratch...
+(Worker_TP0_EP0 pid=276) INFO 11-20 21:34:26 [xpu.py:233] Using backend AttentionBackendEnum.FLASH_ATTN for vit attention
+(Worker_TP0_EP0 pid=276) INFO 11-20 21:34:26 [mm_encoder_attention.py:372] Using AttentionBackendEnum.FLASH_ATTN for MMEncoderAttention.
+(Worker_TP0_EP0 pid=276) INFO 11-20 21:34:26 [qwen_gdn_linear_attn.py:176] Using Triton/FLA GDN prefill kernel (requested=auto, head_k_dim=128).
+(Worker_TP0_EP0 pid=276) INFO 11-20 21:34:26 [qwen_gdn_linear_attn.py:528] GDN decode kernel: cuda
+(Worker_TP0_EP0 pid=276) INFO 11-20 21:34:26 [expert_map_manager.py:245] [EP Rank 0/4] Expert parallelism is enabled. Expert placement strategy: linear. Local/global number of experts: 128/512. Experts local to global index map: 0->0, 1->1, 2->2, 3->3, 4->4, 5->5, 6->6, 7->7, 8->8, 9->9, 10->10, 11->11, 12->12, 13->13, 14->14, 15->15, 16->16, 17->17, 18->18, 19->19, 20->20, 21->21, 22->22, 23->23, 24->24, 25->25, 26->26, 27->27, 28->28, 29->29, 30->30, 31->31, 32->32, 33->33, 34->34, 35->35, 36->36, 37->37, 38->38, 39->39, 40->40, 41->41, 42->42, 43->43, 44->44, 45->45, 46->46, 47->47, 48->48, 49->49, 50->50, 51->51, 52->52, 53->53, 54->54, 55->55, 56->56, 57->57, 58->58, 59->59, 60->60, 61->61, 62->62, 63->63, 64->64, 65->65, 66->66, 67->67, 68->68, 69->69, 70->70, 71->71, 72->72, 73->73, 74->74, 75->75, 76->76, 77->77, 78->78, 79->79, 80->80, 81->81, 82->82, 83->83, 84->84, 85->85, 86->86, 87->87, 88->88, 89->89, 90->90, 91->91, 92->92, 93->93, 94->94, 95->95, 96->96, 97->97, 98->98, 99->99, 100->100, 101->101, 102->102, 103->103, 104->104, 105->105, 106->106, 107->107, 108->108, 109->109, 110->110, 111->111, 112->112, 113->113, 114->114, 115->115, 116->116, 117->117, 118->118, 119->119, 120->120, 121->121, 122->122, 123->123, 124->124, 125->125, 126->126, 127->127.
+(Worker_TP0_EP0 pid=276) INFO 11-20 21:34:26 [int_wna16.py:325] Using 'XPU' WNA16 MoE backend.
+(Worker_TP2_EP2 pid=350) INFO 11-20 21:34:26 [ngram_embedding.py:2403] Initialized PLE embedding language_model.model.layers.1.ple.ple_embedding.ngram_embedding: quantization_method=B70PLEFp8PinnedEmbeddingMethod, weight_dtype=torch.float8_e4m3fn, weight_device=cpu, pinned=False
+(Worker_TP3_EP3 pid=379) INFO 11-20 21:34:26 [ngram_embedding.py:2403] Initialized PLE embedding language_model.model.layers.1.ple.ple_embedding.ngram_embedding: quantization_method=B70PLEFp8PinnedEmbeddingMethod, weight_dtype=torch.float8_e4m3fn, weight_device=cpu, pinned=False
+(Worker_TP0_EP0 pid=276) INFO 11-20 21:34:26 [ngram_embedding.py:2403] Initialized PLE embedding language_model.model.layers.1.ple.ple_embedding.ngram_embedding: quantization_method=B70PLEFp8PinnedEmbeddingMethod, weight_dtype=torch.float8_e4m3fn, weight_device=cpu, pinned=False
+(Worker_TP1_EP1 pid=297) INFO 11-20 21:34:26 [ngram_embedding.py:2403] Initialized PLE embedding language_model.model.layers.1.ple.ple_embedding.ngram_embedding: quantization_method=B70PLEFp8PinnedEmbeddingMethod, weight_dtype=torch.float8_e4m3fn, weight_device=cpu, pinned=False
+(Worker_TP0_EP0 pid=276) INFO 11-20 21:34:26 [xpu.py:199] Using Flash Attention backend.
+(Worker_TP0_EP0 pid=276) INFO 11-20 21:34:26 [flash_attn.py:1116] Using FlashAttention version 2
+[l0-peer-shim pid=297] summary reason=periodic path=loader-tracer alloc_calls=104 tracked=104 freed=0 live=99 owner_allowed=104 peer_preserved=111 peer_suppressed=195 peer_bytes=13979615232 other_passthrough=0
+(Worker_TP0_EP0 pid=276) INFO 11-20 21:34:28 [weight_utils.py:895] Filesystem type for checkpoints: EXT4. Checkpoint size: 68.53 GiB. Available RAM: 42.59 GiB.
+(Worker_TP0_EP0 pid=276) INFO 11-20 21:34:28 [weight_utils.py:925] Auto-prefetch is disabled because the filesystem (EXT4) is not a recognized network FS (NFS/Lustre) and the checkpoint size (68.53 GiB) exceeds 90% of available RAM (42.59 GiB).
+(Worker_TP0_EP0 pid=276) Loading safetensors checkpoint shards:   0% Completed | 0/15 [00:00<?, ?it/s]
+(Worker_TP0_EP0 pid=276) Loading safetensors checkpoint shards:   7% Completed | 1/15 [00:01<00:24,  1.73s/it]
+(Worker_TP0_EP0 pid=276) INFO 11-20 21:34:31 [ple_nvme.py:560] PLE NVMe native reader loaded from /work/cache/tmp/b70-ple-nvme/ple_nvme_reader-547ad09f26d0e506.so
+(Worker_TP0_EP0 pid=276) INFO 11-20 21:34:31 [ngram_embedding.py:1658] PLE FP8 NVMe load (B70_PLE_FP8_NVME=1) starting: /models/qwen38-w4a16, 128 shards in 10 files, 16 I/O threads, reader native; VmRSS=3.7 GiB, MemAvailable=42.0 GiB
+(Worker_TP1_EP1 pid=297) INFO 11-20 21:34:31 [ple_nvme.py:560] PLE NVMe native reader loaded from /work/cache/tmp/b70-ple-nvme/ple_nvme_reader-547ad09f26d0e506.so
+(Worker_TP1_EP1 pid=297) INFO 11-20 21:34:31 [ngram_embedding.py:1658] PLE FP8 NVMe load (B70_PLE_FP8_NVME=1) starting: /models/qwen38-w4a16, 128 shards in 10 files, 16 I/O threads, reader native; VmRSS=3.7 GiB, MemAvailable=42.1 GiB
+(Worker_TP3_EP3 pid=379) INFO 11-20 21:34:31 [ple_nvme.py:560] PLE NVMe native reader loaded from /work/cache/tmp/b70-ple-nvme/ple_nvme_reader-547ad09f26d0e506.so
+(Worker_TP2_EP2 pid=350) INFO 11-20 21:34:31 [ple_nvme.py:560] PLE NVMe native reader loaded from /work/cache/tmp/b70-ple-nvme/ple_nvme_reader-547ad09f26d0e506.so
+(Worker_TP3_EP3 pid=379) INFO 11-20 21:34:31 [ngram_embedding.py:1658] PLE FP8 NVMe load (B70_PLE_FP8_NVME=1) starting: /models/qwen38-w4a16, 128 shards in 10 files, 16 I/O threads, reader native; VmRSS=3.7 GiB, MemAvailable=42.1 GiB
+(Worker_TP2_EP2 pid=350) INFO 11-20 21:34:31 [ngram_embedding.py:1658] PLE FP8 NVMe load (B70_PLE_FP8_NVME=1) starting: /models/qwen38-w4a16, 128 shards in 10 files, 16 I/O threads, reader native; VmRSS=3.7 GiB, MemAvailable=42.1 GiB
+[l0-peer-shim pid=350] summary reason=periodic path=loader-tracer alloc_calls=370 tracked=370 freed=0 live=365 owner_allowed=370 peer_preserved=282 peer_suppressed=822 peer_bytes=59039023104 other_passthrough=0
+(Worker_TP2_EP2 pid=350) INFO 11-20 21:34:32 [ngram_embedding.py:2013] PLE NVMe pinned allocation: row cache 13421772 x 160 B = 2147483520 B (2.000 GiB), is_pinned=True
+(Worker_TP0_EP0 pid=276) INFO 11-20 21:34:32 [ngram_embedding.py:2013] PLE NVMe pinned allocation: row cache 13421772 x 160 B = 2147483520 B (2.000 GiB), is_pinned=True
+(Worker_TP3_EP3 pid=379) INFO 11-20 21:34:32 [ngram_embedding.py:2013] PLE NVMe pinned allocation: row cache 13421772 x 160 B = 2147483520 B (2.000 GiB), is_pinned=True
+(Worker_TP1_EP1 pid=297) INFO 11-20 21:34:32 [ngram_embedding.py:2013] PLE NVMe pinned allocation: row cache 13421772 x 160 B = 2147483520 B (2.000 GiB), is_pinned=True
+(Worker_TP2_EP2 pid=350) INFO 11-20 21:34:33 [ngram_embedding.py:2131] PLE NVMe host-hash self-test: 1024 ids equal to the device hash on xpu:2
+(Worker_TP3_EP3 pid=379) INFO 11-20 21:34:33 [ngram_embedding.py:2131] PLE NVMe host-hash self-test: 1024 ids equal to the device hash on xpu:3
+(Worker_TP2_EP2 pid=350) INFO 11-20 21:34:33 [ngram_embedding.py:2067] PLE NVMe pinned allocation: id staging 262144 B, is_pinned=True
+(Worker_TP3_EP3 pid=379) INFO 11-20 21:34:33 [ngram_embedding.py:2067] PLE NVMe pinned allocation: id staging 262144 B, is_pinned=True
+(Worker_TP2_EP2 pid=350) INFO 11-20 21:34:33 [ngram_embedding.py:2084] PLE NVMe host path ready (rank 2, rows from NVMe): cache 13421772 rows (2.00 GiB pinned, 0.51 GiB maps), own heads [8, 9, 10, 11, 12], rows [160000768, 240001152); VmRSS=4.7 GiB, MemAvailable=30.6 GiB
+(Worker_TP3_EP3 pid=379) INFO 11-20 21:34:33 [ngram_embedding.py:2084] PLE NVMe host path ready (rank 3, rows from NVMe): cache 13421772 rows (2.00 GiB pinned, 0.51 GiB maps), own heads [12, 13, 14, 15], rows [240001152, 320001536); VmRSS=4.7 GiB, MemAvailable=30.6 GiB
+(Worker_TP2_EP2 pid=350) INFO 11-20 21:34:33 [ngram_embedding.py:1707] Serving FP8 PLE table from NVMe in place, /models/qwen38-w4a16 (128 shards x 2500012 rows; layout matches model: ngram_heads_offsets, ngram_heads_vocab_sizes, layer_multipliers): tp rows [160000768, 240001152) of 320001536, 160 B/row, scale=0.000199318; boot: 4352 rows byte-equal to the mmap, 65536 own rows NaN-free; VmRSS=4.7 GiB, MemAvailable=30.6 GiB
+(Worker_TP3_EP3 pid=379) INFO 11-20 21:34:33 [ngram_embedding.py:1707] Serving FP8 PLE table from NVMe in place, /models/qwen38-w4a16 (128 shards x 2500012 rows; layout matches model: ngram_heads_offsets, ngram_heads_vocab_sizes, layer_multipliers): tp rows [240001152, 320001536) of 320001536, 160 B/row, scale=0.000199318; boot: 4352 rows byte-equal to the mmap, 65536 own rows NaN-free; VmRSS=4.7 GiB, MemAvailable=30.6 GiB
+(Worker_TP0_EP0 pid=276) INFO 11-20 21:34:33 [ngram_embedding.py:2131] PLE NVMe host-hash self-test: 1024 ids equal to the device hash on xpu:0
+(Worker_TP0_EP0 pid=276) INFO 11-20 21:34:33 [ngram_embedding.py:2067] PLE NVMe pinned allocation: id staging 262144 B, is_pinned=True
+(Worker_TP0_EP0 pid=276) INFO 11-20 21:34:33 [ngram_embedding.py:2084] PLE NVMe host path ready (rank 0, rows from NVMe): cache 13421772 rows (2.00 GiB pinned, 0.51 GiB maps), own heads [0, 1, 2, 3, 4], rows [0, 80000384); VmRSS=4.7 GiB, MemAvailable=30.6 GiB
+(Worker_TP0_EP0 pid=276) INFO 11-20 21:34:33 [ngram_embedding.py:1707] Serving FP8 PLE table from NVMe in place, /models/qwen38-w4a16 (128 shards x 2500012 rows; layout matches model: ngram_heads_offsets, ngram_heads_vocab_sizes, layer_multipliers): tp rows [0, 80000384) of 320001536, 160 B/row, scale=0.000199318; boot: 4352 rows byte-equal to the mmap, 65536 own rows NaN-free; VmRSS=4.7 GiB, MemAvailable=30.6 GiB
+(Worker_TP1_EP1 pid=297) INFO 11-20 21:34:33 [ngram_embedding.py:2131] PLE NVMe host-hash self-test: 1024 ids equal to the device hash on xpu:1
+(Worker_TP1_EP1 pid=297) INFO 11-20 21:34:33 [ngram_embedding.py:2067] PLE NVMe pinned allocation: id staging 262144 B, is_pinned=True
+(Worker_TP1_EP1 pid=297) INFO 11-20 21:34:33 [ngram_embedding.py:2084] PLE NVMe host path ready (rank 1, rows from NVMe): cache 13421772 rows (2.00 GiB pinned, 0.51 GiB maps), own heads [4, 5, 6, 7, 8], rows [80000384, 160000768); VmRSS=4.7 GiB, MemAvailable=30.6 GiB
+(Worker_TP1_EP1 pid=297) INFO 11-20 21:34:33 [ngram_embedding.py:1707] Serving FP8 PLE table from NVMe in place, /models/qwen38-w4a16 (128 shards x 2500012 rows; layout matches model: ngram_heads_offsets, ngram_heads_vocab_sizes, layer_multipliers): tp rows [80000384, 160000768) of 320001536, 160 B/row, scale=0.000199318; boot: 4352 rows byte-equal to the mmap, 65536 own rows NaN-free; VmRSS=4.7 GiB, MemAvailable=30.6 GiB
+[l0-peer-shim pid=379] summary reason=periodic path=loader-tracer alloc_calls=370 tracked=370 freed=0 live=365 owner_allowed=370 peer_preserved=282 peer_suppressed=822 peer_bytes=59039023104 other_passthrough=0
+(Worker_TP0_EP0 pid=276) Loading safetensors checkpoint shards:  13% Completed | 2/15 [00:08<01:02,  4.79s/it]
+[l0-peer-shim pid=276] summary reason=periodic path=loader-tracer alloc_calls=370 tracked=370 freed=0 live=365 owner_allowed=370 peer_preserved=282 peer_suppressed=822 peer_bytes=59039023104 other_passthrough=0
+[l0-peer-shim pid=297] summary reason=periodic path=loader-tracer alloc_calls=370 tracked=370 freed=0 live=365 owner_allowed=370 peer_preserved=282 peer_suppressed=822 peer_bytes=59039023104 other_passthrough=0
+(Worker_TP0_EP0 pid=276) Loading safetensors checkpoint shards:  20% Completed | 3/15 [00:35<02:58, 14.87s/it]
+(Worker_TP0_EP0 pid=276) Loading safetensors checkpoint shards:  27% Completed | 4/15 [00:38<01:49, 10.00s/it]
+(Worker_TP0_EP0 pid=276) Loading safetensors checkpoint shards:  33% Completed | 5/15 [00:40<01:14,  7.41s/it]
+(Worker_TP0_EP0 pid=276) Loading safetensors checkpoint shards:  40% Completed | 6/15 [01:07<02:06, 14.04s/it]
+(Worker_TP0_EP0 pid=276) Loading safetensors checkpoint shards:  47% Completed | 7/15 [01:10<01:22, 10.31s/it]
+(Worker_TP0_EP0 pid=276) Loading safetensors checkpoint shards:  53% Completed | 8/15 [01:14<00:57,  8.17s/it]
+(Worker_TP0_EP0 pid=276) Loading safetensors checkpoint shards:  60% Completed | 9/15 [01:43<01:28, 14.78s/it]
+(Worker_TP0_EP0 pid=276) Loading safetensors checkpoint shards:  67% Completed | 10/15 [01:45<00:55, 11.02s/it]
+(Worker_TP0_EP0 pid=276) Loading safetensors checkpoint shards:  73% Completed | 11/15 [01:49<00:34,  8.74s/it]
+(Worker_TP0_EP0 pid=276) Loading safetensors checkpoint shards:  80% Completed | 12/15 [01:52<00:21,  7.14s/it]
+(Worker_TP0_EP0 pid=276) Loading safetensors checkpoint shards:  87% Completed | 13/15 [02:08<00:19,  9.76s/it]
+(Worker_TP0_EP0 pid=276) Loading safetensors checkpoint shards:  93% Completed | 14/15 [02:10<00:07,  7.46s/it]
+(Worker_TP0_EP0 pid=276) Loading safetensors checkpoint shards: 100% Completed | 15/15 [02:11<00:00,  5.26s/it]
+(Worker_TP0_EP0 pid=276) Loading safetensors checkpoint shards: 100% Completed | 15/15 [02:11<00:00,  8.74s/it]
+(Worker_TP0_EP0 pid=276) 
+(Worker_TP0_EP0 pid=276) INFO 11-20 21:36:39 [default_loader.py:430] Loading weights took 131.07 seconds
+(Worker_TP0_EP0 pid=276) INFO 11-20 21:36:39 [int_wna16.py:435] Using MoEPrepareAndFinalizeNoDPEPModular
+(Worker_TP0_EP0 pid=276) INFO 11-20 21:36:39 [int_wna16.py:436] Using XPUExpertsWNA16
+(Worker_TP0_EP0 pid=276) INFO 11-20 21:36:39 [model_runner.py:429] Model loading took 19.01 GiB memory and 134.104700 seconds
+(Worker_TP0_EP0 pid=276) INFO 11-20 21:36:39 [interface.py:635] Setting kv cache block size to 64 for FLASH_ATTN backend.
+(Worker_TP0_EP0 pid=276) INFO 11-20 21:36:39 [interface.py:933] Setting attention block size to 832 tokens to ensure that attention page size is >= mamba page size.
+(Worker_TP0_EP0 pid=276) INFO 11-20 21:36:39 [interface.py:957] Padding mamba page size by 6.26% to ensure that mamba page size and attention page size are exactly equal.
+(Worker_TP3_EP3 pid=379) INFO 11-20 21:36:39 [model_runner.py:429] Model loading took 19.01 GiB memory and 134.311481 seconds
+(Worker_TP3_EP3 pid=379) INFO 11-20 21:36:39 [interface.py:635] Setting kv cache block size to 64 for FLASH_ATTN backend.
+(Worker_TP3_EP3 pid=379) INFO 11-20 21:36:39 [interface.py:933] Setting attention block size to 832 tokens to ensure that attention page size is >= mamba page size.
+(Worker_TP3_EP3 pid=379) INFO 11-20 21:36:39 [interface.py:957] Padding mamba page size by 6.26% to ensure that mamba page size and attention page size are exactly equal.
+(Worker_TP1_EP1 pid=297) INFO 11-20 21:36:40 [model_runner.py:429] Model loading took 19.01 GiB memory and 134.591709 seconds
+(Worker_TP1_EP1 pid=297) INFO 11-20 21:36:40 [interface.py:635] Setting kv cache block size to 64 for FLASH_ATTN backend.
+(Worker_TP1_EP1 pid=297) INFO 11-20 21:36:40 [interface.py:933] Setting attention block size to 832 tokens to ensure that attention page size is >= mamba page size.
+(Worker_TP1_EP1 pid=297) INFO 11-20 21:36:40 [interface.py:957] Padding mamba page size by 6.26% to ensure that mamba page size and attention page size are exactly equal.
+(Worker_TP2_EP2 pid=350) INFO 11-20 21:36:41 [model_runner.py:429] Model loading took 19.01 GiB memory and 135.700271 seconds
+(Worker_TP2_EP2 pid=350) INFO 11-20 21:36:41 [interface.py:635] Setting kv cache block size to 64 for FLASH_ATTN backend.
+(Worker_TP2_EP2 pid=350) INFO 11-20 21:36:41 [interface.py:933] Setting attention block size to 832 tokens to ensure that attention page size is >= mamba page size.
+(Worker_TP2_EP2 pid=350) INFO 11-20 21:36:41 [interface.py:957] Padding mamba page size by 6.26% to ensure that mamba page size and attention page size are exactly equal.
+(EngineCore pid=189) INFO 11-20 21:36:41 [torch_utils.py:287] Reducing Torch threads from 6 to 1 for serving. Set OMP_NUM_THREADS in the external environment to override.
+(EngineCore pid=189) INFO 11-20 21:36:41 [utils.py:320] Using LBNHC KV cache layout.
+(Worker_TP2_EP2 pid=350) [transformers] Unrecognized keys in `rope_parameters` for 'rope_type'='default': {'mrope_interleaved', 'mrope_section'}
+(Worker_TP3_EP3 pid=379) [transformers] Unrecognized keys in `rope_parameters` for 'rope_type'='default': {'mrope_section', 'mrope_interleaved'}
+(Worker_TP1_EP1 pid=297) [transformers] Unrecognized keys in `rope_parameters` for 'rope_type'='default': {'mrope_interleaved', 'mrope_section'}
+(Worker_TP0_EP0 pid=276) [transformers] Unrecognized keys in `rope_parameters` for 'rope_type'='default': {'mrope_interleaved', 'mrope_section'}
+(Worker_TP2_EP2 pid=350) [transformers] Unrecognized keys in `rope_parameters` for 'rope_type'='default': {'mrope_interleaved', 'mrope_section'}
+(Worker_TP3_EP3 pid=379) [transformers] Unrecognized keys in `rope_parameters` for 'rope_type'='default': {'mrope_section', 'mrope_interleaved'}
+(Worker_TP1_EP1 pid=297) [transformers] Unrecognized keys in `rope_parameters` for 'rope_type'='default': {'mrope_interleaved', 'mrope_section'}
+(Worker_TP0_EP0 pid=276) [transformers] Unrecognized keys in `rope_parameters` for 'rope_type'='default': {'mrope_interleaved', 'mrope_section'}
+[l0-peer-shim pid=297] summary reason=periodic path=loader-tracer alloc_calls=381 tracked=381 freed=0 live=376 owner_allowed=381 peer_preserved=282 peer_suppressed=855 peer_bytes=62310580224 other_passthrough=0
+(Worker_TP2_EP2 pid=350) [transformers] The `use_fast` parameter is deprecated and will be removed in a future version. Use `backend="torchvision"` instead of `use_fast=True`, or `backend="pil"` instead of `use_fast=False`.
+(Worker_TP0_EP0 pid=276) [transformers] The `use_fast` parameter is deprecated and will be removed in a future version. Use `backend="torchvision"` instead of `use_fast=True`, or `backend="pil"` instead of `use_fast=False`.
+(Worker_TP3_EP3 pid=379) [transformers] The `use_fast` parameter is deprecated and will be removed in a future version. Use `backend="torchvision"` instead of `use_fast=True`, or `backend="pil"` instead of `use_fast=False`.
+(Worker_TP1_EP1 pid=297) [transformers] The `use_fast` parameter is deprecated and will be removed in a future version. Use `backend="torchvision"` instead of `use_fast=True`, or `backend="pil"` instead of `use_fast=False`.
+(Worker_TP3_EP3 pid=379) [transformers] Unrecognized keys in `rope_parameters` for 'rope_type'='default': {'mrope_section', 'mrope_interleaved'}
+(Worker_TP2_EP2 pid=350) [transformers] Unrecognized keys in `rope_parameters` for 'rope_type'='default': {'mrope_interleaved', 'mrope_section'}
+(Worker_TP0_EP0 pid=276) [transformers] Unrecognized keys in `rope_parameters` for 'rope_type'='default': {'mrope_interleaved', 'mrope_section'}
+(Worker_TP3_EP3 pid=379) [transformers] Unrecognized keys in `rope_parameters` for 'rope_type'='default': {'mrope_section', 'mrope_interleaved'}
+(Worker_TP2_EP2 pid=350) [transformers] Unrecognized keys in `rope_parameters` for 'rope_type'='default': {'mrope_interleaved', 'mrope_section'}
+(Worker_TP0_EP0 pid=276) [transformers] Unrecognized keys in `rope_parameters` for 'rope_type'='default': {'mrope_interleaved', 'mrope_section'}
+(Worker_TP1_EP1 pid=297) [transformers] Unrecognized keys in `rope_parameters` for 'rope_type'='default': {'mrope_interleaved', 'mrope_section'}
+(Worker_TP1_EP1 pid=297) [transformers] Unrecognized keys in `rope_parameters` for 'rope_type'='default': {'mrope_interleaved', 'mrope_section'}
+(Worker_TP0_EP0 pid=276) INFO 11-20 21:36:46 [encoder_runner.py:131] Encoder cache will be initialized with a budget of 16384 tokens, and profiled with 1 image items of the maximum feature size.
+[l0-peer-shim pid=350] summary reason=periodic path=loader-tracer alloc_calls=384 tracked=384 freed=0 live=379 owner_allowed=384 peer_preserved=282 peer_suppressed=864 peer_bytes=63820529664 other_passthrough=0
+2026:11:20-21:36:47:  276:[0] |CCL_WARN| pidfd is not supported, fallbacks to drmfd exchange mode
+2026:11:20-21:36:47:  297:[1] |CCL_WARN| pidfd is not supported, fallbacks to drmfd exchange mode
+2026:11:20-21:36:47:  379:[3] |CCL_WARN| pidfd is not supported, fallbacks to drmfd exchange mode
+2026:11:20-21:36:47:  350:[2] |CCL_WARN| pidfd is not supported, fallbacks to drmfd exchange mode
+(Worker_TP1_EP1 pid=297) INFO 11-20 21:36:48 [hyperconnection.py:223] HC down GEMM: deterministic K-split engaged at row width 2048 (stock single GEMM kept for widths <= 64)
+(Worker_TP3_EP3 pid=379) INFO 11-20 21:36:48 [hyperconnection.py:223] HC down GEMM: deterministic K-split engaged at row width 2048 (stock single GEMM kept for widths <= 64)
+(Worker_TP0_EP0 pid=276) INFO 11-20 21:36:48 [hyperconnection.py:223] HC down GEMM: deterministic K-split engaged at row width 2048 (stock single GEMM kept for widths <= 64)
+(Worker_TP2_EP2 pid=350) INFO 11-20 21:36:48 [hyperconnection.py:223] HC down GEMM: deterministic K-split engaged at row width 2048 (stock single GEMM kept for widths <= 64)
+[l0-peer-shim pid=379] summary reason=periodic path=loader-tracer alloc_calls=398 tracked=398 freed=0 live=393 owner_allowed=398 peer_preserved=288 peer_suppressed=900 peer_bytes=67444408320 other_passthrough=0
+[l0-peer-shim pid=276] summary reason=periodic path=loader-tracer alloc_calls=398 tracked=398 freed=0 live=393 owner_allowed=398 peer_preserved=288 peer_suppressed=900 peer_bytes=67444408320 other_passthrough=0
+(Worker_TP1_EP1 pid=297) /opt/venv/lib/python3.12/site-packages/torch/distributed/c10d_logger.py:83: FutureWarning: `torch.distributed.all_gather_into_tensor` is deprecated. Please use `torch.distributed.all_gather_single` instead.
+(Worker_TP1_EP1 pid=297)   return func(*args, **kwargs)
+(Worker_TP0_EP0 pid=276) /opt/venv/lib/python3.12/site-packages/torch/distributed/c10d_logger.py:83: FutureWarning: `torch.distributed.all_gather_into_tensor` is deprecated. Please use `torch.distributed.all_gather_single` instead.
+(Worker_TP0_EP0 pid=276)   return func(*args, **kwargs)
+(Worker_TP2_EP2 pid=350) /opt/venv/lib/python3.12/site-packages/torch/distributed/c10d_logger.py:83: FutureWarning: `torch.distributed.all_gather_into_tensor` is deprecated. Please use `torch.distributed.all_gather_single` instead.
+(Worker_TP2_EP2 pid=350)   return func(*args, **kwargs)
+(Worker_TP3_EP3 pid=379) /opt/venv/lib/python3.12/site-packages/torch/distributed/c10d_logger.py:83: FutureWarning: `torch.distributed.all_gather_into_tensor` is deprecated. Please use `torch.distributed.all_gather_single` instead.
+(Worker_TP3_EP3 pid=379)   return func(*args, **kwargs)
+(Worker_TP0_EP0 pid=276) INFO 11-20 21:36:55 [gpu_worker.py:640] Available KV cache memory: 7.53 GiB
+(EngineCore pid=189) INFO 11-20 21:36:55 [kv_cache_utils.py:2395] XPU KV cache size: 601,359 tokens, Maximum concurrency for 32,768 tokens per request: 18.35x
+(Worker_TP1_EP1 pid=297) INFO 11-20 21:36:55 [kernel_warmup.py:172] JIT kernel warmup starting.
+(Worker_TP3_EP3 pid=379) INFO 11-20 21:36:55 [kernel_warmup.py:172] JIT kernel warmup starting.
+(Worker_TP0_EP0 pid=276) INFO 11-20 21:36:55 [kernel_warmup.py:172] JIT kernel warmup starting.
+(Worker_TP2_EP2 pid=350) INFO 11-20 21:36:55 [kernel_warmup.py:172] JIT kernel warmup starting.
+(Worker_TP1_EP1 pid=297) INFO 11-20 21:36:55 [kernel_warmup.py:185] JIT kernel warmup finished in 0.00s.
+(Worker_TP2_EP2 pid=350) INFO 11-20 21:36:55 [kernel_warmup.py:185] JIT kernel warmup finished in 0.00s.
+(Worker_TP0_EP0 pid=276) INFO 11-20 21:36:55 [kernel_warmup.py:185] JIT kernel warmup finished in 0.00s.
+(Worker_TP3_EP3 pid=379) INFO 11-20 21:36:55 [kernel_warmup.py:185] JIT kernel warmup finished in 0.00s.
+(Worker_TP0_EP0 pid=276) INFO 11-20 21:36:55 [qwen_vl_triton_warmup.py:57] Warmed position embedding and vision rotary kernels on grids=[(1, 16, 16), (1, 16, 2), (1, 2, 16), (1, 2, 2)].
+(Worker_TP1_EP1 pid=297) INFO 11-20 21:36:55 [qwen_vl_triton_warmup.py:57] Warmed position embedding and vision rotary kernels on grids=[(1, 16, 16), (1, 16, 2), (1, 2, 16), (1, 2, 2)].
+(Worker_TP2_EP2 pid=350) INFO 11-20 21:36:55 [qwen_vl_triton_warmup.py:57] Warmed position embedding and vision rotary kernels on grids=[(1, 16, 16), (1, 16, 2), (1, 2, 16), (1, 2, 2)].
+(Worker_TP3_EP3 pid=379) INFO 11-20 21:36:55 [qwen_vl_triton_warmup.py:57] Warmed position embedding and vision rotary kernels on grids=[(1, 16, 16), (1, 16, 2), (1, 2, 16), (1, 2, 2)].
+(Worker_TP0_EP0 pid=276) INFO 11-20 21:36:55 [qwen_vl_triton_warmup.py:98] Warmed M-RoPE Triton kernels.
+(Worker_TP1_EP1 pid=297) INFO 11-20 21:36:55 [qwen_vl_triton_warmup.py:98] Warmed M-RoPE Triton kernels.
+(Worker_TP2_EP2 pid=350) INFO 11-20 21:36:55 [qwen_vl_triton_warmup.py:98] Warmed M-RoPE Triton kernels.
+(Worker_TP3_EP3 pid=379) INFO 11-20 21:36:55 [qwen_vl_triton_warmup.py:98] Warmed M-RoPE Triton kernels.
+[l0-peer-shim pid=297] summary reason=periodic path=loader-tracer alloc_calls=411 tracked=411 freed=0 live=401 owner_allowed=411 peer_preserved=288 peer_suppressed=915 peer_bytes=94214553600 other_passthrough=0
+(Worker_TP3_EP3 pid=379) INFO 11-20 21:36:59 [_xpu_ops.py:175] B70-0023: GDN op mode -> official
+(Worker_TP0_EP0 pid=276) INFO 11-20 21:36:59 [_xpu_ops.py:175] B70-0023: GDN op mode -> official
+(Worker_TP2_EP2 pid=350) INFO 11-20 21:36:59 [_xpu_ops.py:175] B70-0023: GDN op mode -> official
+(Worker_TP1_EP1 pid=297) INFO 11-20 21:36:59 [_xpu_ops.py:175] B70-0023: GDN op mode -> official
+(Worker_TP2_EP2 pid=350) /opt/venv/lib/python3.12/site-packages/torch/distributed/c10d_logger.py:83: FutureWarning: `torch.distributed.all_gather_into_tensor` is deprecated. Please use `torch.distributed.all_gather_single` instead.
+(Worker_TP2_EP2 pid=350)   return func(*args, **kwargs)
+(Worker_TP3_EP3 pid=379) /opt/venv/lib/python3.12/site-packages/torch/distributed/c10d_logger.py:83: FutureWarning: `torch.distributed.all_gather_into_tensor` is deprecated. Please use `torch.distributed.all_gather_single` instead.
+(Worker_TP3_EP3 pid=379)   return func(*args, **kwargs)
+(Worker_TP0_EP0 pid=276) /opt/venv/lib/python3.12/site-packages/torch/distributed/c10d_logger.py:83: FutureWarning: `torch.distributed.all_gather_into_tensor` is deprecated. Please use `torch.distributed.all_gather_single` instead.
+(Worker_TP0_EP0 pid=276)   return func(*args, **kwargs)
+(Worker_TP1_EP1 pid=297) /opt/venv/lib/python3.12/site-packages/torch/distributed/c10d_logger.py:83: FutureWarning: `torch.distributed.all_gather_into_tensor` is deprecated. Please use `torch.distributed.all_gather_single` instead.
+(Worker_TP1_EP1 pid=297)   return func(*args, **kwargs)
+[l0-peer-shim pid=350] summary reason=periodic path=loader-tracer alloc_calls=419 tracked=419 freed=0 live=405 owner_allowed=419 peer_preserved=288 peer_suppressed=915 peer_bytes=94214553600 other_passthrough=0
+[l0-peer-shim pid=379] summary reason=periodic path=loader-tracer alloc_calls=419 tracked=419 freed=0 live=405 owner_allowed=419 peer_preserved=288 peer_suppressed=915 peer_bytes=94214553600 other_passthrough=0
+[l0-peer-shim pid=276] summary reason=periodic path=loader-tracer alloc_calls=419 tracked=419 freed=0 live=405 owner_allowed=419 peer_preserved=288 peer_suppressed=915 peer_bytes=94214553600 other_passthrough=0
+[l0-peer-shim pid=297] summary reason=periodic path=loader-tracer alloc_calls=419 tracked=419 freed=0 live=405 owner_allowed=419 peer_preserved=288 peer_suppressed=915 peer_bytes=94214553600 other_passthrough=0
+(Worker_TP2_EP2 pid=350) INFO 11-20 21:37:52 [prompt_logprob.py:43] B70-0029b: prompt logprobs on Model Runner V2, 128 rows per chunk (first step: 32 rows)
+(Worker_TP1_EP1 pid=297) INFO 11-20 21:37:52 [prompt_logprob.py:43] B70-0029b: prompt logprobs on Model Runner V2, 128 rows per chunk (first step: 32 rows)
+(Worker_TP3_EP3 pid=379) INFO 11-20 21:37:52 [prompt_logprob.py:43] B70-0029b: prompt logprobs on Model Runner V2, 128 rows per chunk (first step: 32 rows)
+(Worker_TP0_EP0 pid=276) INFO 11-20 21:37:53 [prompt_logprob.py:43] B70-0029b: prompt logprobs on Model Runner V2, 128 rows per chunk (first step: 32 rows)
+(Worker_TP1_EP1 pid=297) /opt/venv/lib/python3.12/site-packages/torch/distributed/c10d_logger.py:83: FutureWarning: `torch.distributed.all_gather_into_tensor` is deprecated. Please use `torch.distributed.all_gather_single` instead.
+(Worker_TP1_EP1 pid=297)   return func(*args, **kwargs)
+(Worker_TP3_EP3 pid=379) /opt/venv/lib/python3.12/site-packages/torch/distributed/c10d_logger.py:83: FutureWarning: `torch.distributed.all_gather_into_tensor` is deprecated. Please use `torch.distributed.all_gather_single` instead.
+(Worker_TP3_EP3 pid=379)   return func(*args, **kwargs)
+(Worker_TP0_EP0 pid=276) /opt/venv/lib/python3.12/site-packages/torch/distributed/c10d_logger.py:83: FutureWarning: `torch.distributed.all_gather_into_tensor` is deprecated. Please use `torch.distributed.all_gather_single` instead.
+(Worker_TP0_EP0 pid=276)   return func(*args, **kwargs)
+(Worker_TP2_EP2 pid=350) /opt/venv/lib/python3.12/site-packages/torch/distributed/c10d_logger.py:83: FutureWarning: `torch.distributed.all_gather_into_tensor` is deprecated. Please use `torch.distributed.all_gather_single` instead.
+(Worker_TP2_EP2 pid=350)   return func(*args, **kwargs)
+(EngineCore pid=189) INFO 11-20 21:37:56 [shm_broadcast.py:801] No available shared memory broadcast block found in 60 seconds. This typically happens when some processes are hanging or doing some time-consuming work (e.g. compilation, weight/kv cache quantization).
+[l0-peer-shim pid=297] summary reason=periodic path=loader-tracer alloc_calls=420 tracked=420 freed=0 live=406 owner_allowed=420 peer_preserved=288 peer_suppressed=918 peer_bytes=94239719424 other_passthrough=0
+[l0-peer-shim pid=350] summary reason=periodic path=loader-tracer alloc_calls=420 tracked=420 freed=0 live=406 owner_allowed=420 peer_preserved=288 peer_suppressed=918 peer_bytes=94239719424 other_passthrough=0
+(Worker_TP1_EP1 pid=297) INFO 11-20 21:38:02 [gpu_worker.py:888] Free memory on device (29.0/30.3 GiB) on startup. Desired GPU memory utilization is (0.95, 28.78 GiB). Actual usage is 20.07 GiB for consumed memory (weights + non-torch), 1.17 GiB for peak activation, and 0.0 GiB for CUDAGraph memory. Replace gpu_memory_utilization config with `--kv-cache-memory=7939956429` (7.39 GiB) to fit into requested memory, or `--kv-cache-memory=8176942592` (7.62 GiB) to fully utilize gpu memory. Current kv cache memory in use is 7.54 GiB.
+(Worker_TP3_EP3 pid=379) INFO 11-20 21:38:02 [gpu_worker.py:888] Free memory on device (29.0/30.3 GiB) on startup. Desired GPU memory utilization is (0.95, 28.78 GiB). Actual usage is 20.07 GiB for consumed memory (weights + non-torch), 1.17 GiB for peak activation, and 0.0 GiB for CUDAGraph memory. Replace gpu_memory_utilization config with `--kv-cache-memory=7941168845` (7.4 GiB) to fit into requested memory, or `--kv-cache-memory=8178236928` (7.62 GiB) to fully utilize gpu memory. Current kv cache memory in use is 7.54 GiB.
+(Worker_TP3_EP3 pid=379) INFO 11-20 21:38:02 [jit_monitor.py:85] Kernel JIT monitor activated; monitored JIT compilations during inference will use mode=warn.
+(Worker_TP1_EP1 pid=297) INFO 11-20 21:38:02 [jit_monitor.py:85] Kernel JIT monitor activated; monitored JIT compilations during inference will use mode=warn.
+(Worker_TP2_EP2 pid=350) INFO 11-20 21:38:02 [gpu_worker.py:888] Free memory on device (29.0/30.3 GiB) on startup. Desired GPU memory utilization is (0.95, 28.78 GiB). Actual usage is 20.07 GiB for consumed memory (weights + non-torch), 1.17 GiB for peak activation, and 0.0 GiB for CUDAGraph memory. Replace gpu_memory_utilization config with `--kv-cache-memory=7940591309` (7.4 GiB) to fit into requested memory, or `--kv-cache-memory=8177614336` (7.62 GiB) to fully utilize gpu memory. Current kv cache memory in use is 7.54 GiB.
+(Worker_TP2_EP2 pid=350) INFO 11-20 21:38:02 [jit_monitor.py:85] Kernel JIT monitor activated; monitored JIT compilations during inference will use mode=warn.
+(Worker_TP0_EP0 pid=276) INFO 11-20 21:38:02 [gpu_worker.py:888] Free memory on device (28.78/30.3 GiB) on startup. Desired GPU memory utilization is (0.95, 28.78 GiB). Actual usage is 20.08 GiB for consumed memory (weights + non-torch), 1.17 GiB for peak activation, and 0.0 GiB for CUDAGraph memory. Replace gpu_memory_utilization config with `--kv-cache-memory=7926726349` (7.38 GiB) to fit into requested memory, or `--kv-cache-memory=7929191936` (7.38 GiB) to fully utilize gpu memory. Current kv cache memory in use is 7.53 GiB.
+(Worker_TP0_EP0 pid=276) INFO 11-20 21:38:02 [jit_monitor.py:85] Kernel JIT monitor activated; monitored JIT compilations during inference will use mode=warn.
+(Worker_TP0_EP0 pid=276) INFO 11-20 21:38:02 [torch_utils.py:287] Reducing Torch threads from 6 to 1 for serving. Set OMP_NUM_THREADS in the external environment to override.
+(EngineCore pid=189) INFO 11-20 21:38:02 [core.py:379] init engine (profile, create kv cache, warmup model) took 81.29 s
+(EngineCore pid=189) [transformers] Unrecognized keys in `rope_parameters` for 'rope_type'='default': {'mrope_section', 'mrope_interleaved'}
+(EngineCore pid=189) [transformers] Unrecognized keys in `rope_parameters` for 'rope_type'='default': {'mrope_section', 'mrope_interleaved'}
+(EngineCore pid=189) [transformers] Unrecognized keys in `rope_parameters` for 'rope_type'='default': {'mrope_section', 'mrope_interleaved'}
+(EngineCore pid=189) [transformers] Unrecognized keys in `rope_parameters` for 'rope_type'='default': {'mrope_section', 'mrope_interleaved'}
+(EngineCore pid=189) [transformers] Unrecognized keys in `rope_parameters` for 'rope_type'='default': {'mrope_section', 'mrope_interleaved'}
+(EngineCore pid=189) INFO 11-20 21:38:03 [kv_cache_utils.py:748] kv cache group sizes [32768, 32768, 32768, 32768, 32768, 32768, 32768, 32768, 32768, 32768, 32768, 32768, 32768, 32768, 32768, 32768, 32768, 32768, 32768, 32768, 32768, 32768, 32768, 32768, 32768, 32768, 32768, 32768, 32768, 32768, 32768, 32768, 32768, 32768, 32768, 32768, 32768, 832, 832, 832, 832, 832, 832, 832, 832, 832, 832, 832, 832]
+(EngineCore pid=189) INFO 11-20 21:38:03 [kv_cache_utils.py:749] kv lcm block sizes 425984
+[l0-peer-shim pid=980] active scope=large-nonccl-tracked-device-allocation-peer-residency path=loader-tracer pool_ceiling=4194304 report_interval=15s
+(EngineCore pid=189) [transformers] Unrecognized keys in `rope_parameters` for 'rope_type'='default': {'mrope_section', 'mrope_interleaved'}
+(EngineCore pid=189) [transformers] Unrecognized keys in `rope_parameters` for 'rope_type'='default': {'mrope_section', 'mrope_interleaved'}
+(EngineCore pid=189) [transformers] The `use_fast` parameter is deprecated and will be removed in a future version. Use `backend="torchvision"` instead of `use_fast=True`, or `backend="pil"` instead of `use_fast=False`.
+(EngineCore pid=189) [transformers] Unrecognized keys in `rope_parameters` for 'rope_type'='default': {'mrope_section', 'mrope_interleaved'}
+(EngineCore pid=189) [transformers] Unrecognized keys in `rope_parameters` for 'rope_type'='default': {'mrope_section', 'mrope_interleaved'}
+[l0-peer-shim pid=379] summary reason=periodic path=loader-tracer alloc_calls=420 tracked=420 freed=0 live=406 owner_allowed=420 peer_preserved=288 peer_suppressed=918 peer_bytes=94239719424 other_passthrough=0
+[l0-peer-shim pid=276] summary reason=periodic path=loader-tracer alloc_calls=420 tracked=420 freed=0 live=406 owner_allowed=420 peer_preserved=288 peer_suppressed=918 peer_bytes=94239719424 other_passthrough=0
+(EngineCore pid=189) WARNING 11-20 21:38:08 [vllm.py:1547] Enforce eager set, disabling torch.compile and CUDAGraphs. This is equivalent to setting -cc.mode=none -cc.cudagraph_mode=none
+(EngineCore pid=189) INFO 11-20 21:38:08 [kernel.py:416] Final IR op priority after setting platform defaults: IrOpPriorityConfig(rms_norm=['vllm_c', 'native'], fused_add_rms_norm=['vllm_c', 'native'], gelu_and_mul_sparse=['native'])
+(EngineCore pid=189) INFO 11-20 21:38:08 [vllm.py:1780] Cudagraph is disabled under eager mode
+(EngineCore pid=189) WARNING 11-20 21:38:08 [xpu.py:308] XPU Graph support is experimental and currently only supports single-GPU execution.
+(EngineCore pid=189) INFO 11-20 21:38:08 [compilation.py:336] Enabled custom fusions: norm_quant, act_quant
+(APIServer pid=7) INFO 11-20 21:38:08 [entry.py:135] Supported tasks: ['generate']
+(APIServer pid=7) INFO 11-20 21:38:08 [factories.py:76] Scale-out endpoints are disabled. Set --enable-scale-out to enable them.
+(APIServer pid=7) [transformers] Unrecognized keys in `rope_parameters` for 'rope_type'='default': {'mrope_section', 'mrope_interleaved'}
+(APIServer pid=7) [transformers] Unrecognized keys in `rope_parameters` for 'rope_type'='default': {'mrope_section', 'mrope_interleaved'}
+(APIServer pid=7) INFO 11-20 21:38:09 [hf.py:642] Detected the chat template content format to be 'openai'. You can set `--chat-template-content-format` to override this.
+(APIServer pid=7) INFO 11-20 21:38:09 [entry.py:139] Starting vLLM server on http://127.0.0.1:59151
+(APIServer pid=7) INFO 11-20 21:38:09 [launcher.py:61] Available routes are:
+(APIServer pid=7) INFO 11-20 21:38:09 [launcher.py:70] Route: /openapi.json, Methods: GET, HEAD
+(APIServer pid=7) INFO 11-20 21:38:09 [launcher.py:70] Route: /docs, Methods: GET, HEAD
+(APIServer pid=7) INFO 11-20 21:38:09 [launcher.py:70] Route: /docs/oauth2-redirect, Methods: GET, HEAD
+(APIServer pid=7) INFO 11-20 21:38:09 [launcher.py:70] Route: /redoc, Methods: GET, HEAD
+(APIServer pid=7) INFO 11-20 21:38:09 [launcher.py:70] Route: /load, Methods: GET
+(APIServer pid=7) INFO 11-20 21:38:09 [launcher.py:70] Route: /version, Methods: GET
+(APIServer pid=7) INFO 11-20 21:38:09 [launcher.py:70] Route: /health, Methods: GET
+(APIServer pid=7) INFO 11-20 21:38:09 [launcher.py:70] Route: /metrics, Methods: GET
+(APIServer pid=7) INFO 11-20 21:38:09 [launcher.py:70] Route: /tokenize, Methods: POST
+(APIServer pid=7) INFO 11-20 21:38:09 [launcher.py:70] Route: /detokenize, Methods: POST
+(APIServer pid=7) INFO 11-20 21:38:09 [launcher.py:70] Route: /v1/models, Methods: GET
+(APIServer pid=7) INFO 11-20 21:38:09 [launcher.py:70] Route: /ping, Methods: GET
+(APIServer pid=7) INFO 11-20 21:38:09 [launcher.py:70] Route: /ping, Methods: POST
+(APIServer pid=7) INFO 11-20 21:38:09 [launcher.py:70] Route: /invocations, Methods: POST
+(APIServer pid=7) INFO 11-20 21:38:09 [launcher.py:70] Route: /v1/chat/completions, Methods: POST
+(APIServer pid=7) INFO 11-20 21:38:09 [launcher.py:70] Route: /v1/chat/completions/batch, Methods: POST
+(APIServer pid=7) INFO 11-20 21:38:09 [launcher.py:70] Route: /v1/responses, Methods: POST
+(APIServer pid=7) INFO 11-20 21:38:09 [launcher.py:70] Route: /v1/responses/{response_id}, Methods: GET
+(APIServer pid=7) INFO 11-20 21:38:09 [launcher.py:70] Route: /v1/responses/{response_id}/cancel, Methods: POST
+(APIServer pid=7) INFO 11-20 21:38:09 [launcher.py:70] Route: /v1/completions, Methods: POST
+(APIServer pid=7) INFO 11-20 21:38:09 [launcher.py:70] Route: /v1/messages, Methods: POST
+(APIServer pid=7) INFO 11-20 21:38:09 [launcher.py:70] Route: /v1/messages/count_tokens, Methods: POST
+(APIServer pid=7) INFO 11-20 21:38:09 [launcher.py:70] Route: /generative_scoring, Methods: POST
+(APIServer pid=7) INFO 11-20 21:38:09 [launcher.py:70] Route: /scale_elastic_ep, Methods: POST
+(APIServer pid=7) INFO 11-20 21:38:09 [launcher.py:70] Route: /is_scaling_elastic_ep, Methods: POST
+(APIServer pid=7) INFO:     Started server process [7]
+(APIServer pid=7) INFO:     Waiting for application startup.
+(APIServer pid=7) INFO:     Application startup complete.
+(APIServer pid=7) INFO:     127.0.0.1:53590 - "GET /health HTTP/1.1" 200 OK
+(APIServer pid=7) INFO:     127.0.0.1:53594 - "GET /metrics HTTP/1.1" 200 OK
+[l0-peer-shim pid=297] summary reason=periodic path=loader-tracer alloc_calls=426 tracked=426 freed=0 live=412 owner_allowed=426 peer_preserved=288 peer_suppressed=936 peer_bytes=95403638784 other_passthrough=0
+(APIServer pid=7) INFO:     127.0.0.1:53600 - "POST /v1/completions HTTP/1.1" 200 OK
+(APIServer pid=7) INFO:     127.0.0.1:57138 - "GET /metrics HTTP/1.1" 200 OK

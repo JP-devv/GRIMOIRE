@@ -1,0 +1,18 @@
+ 
+:: initializing oneAPI environment ...
+   bash: BASH_VERSION = 5.3.9(1)-release
+   args: Using "$@" for setvars.sh arguments: --force
+:: compiler -- latest
+:: debugger -- latest
+:: dev-utilities -- latest
+:: dnnl -- latest
+:: dpl -- latest
+:: mkl -- latest
+:: tbb -- latest
+:: tcm -- latest
+:: umf -- latest
+:: vtune -- latest
+:: oneAPI environment initialized ::
+ 
+icpx -fsycl -fsycl-targets=spir64 -fsycl-device-code-split=per_kernel -O2 -std=c++20 -fno-fast-math -ffp-contract=fast -fno-math-errno -Iinclude -Isrc -Ixe2 -c src/grimoire.cpp -o obj/grimoire.o
+icpx -fsycl -fsycl-targets=spir64 -fsycl-device-code-split=per_kernel -O2 -std=c++20 -fno-fast-math -ffp-contract=fast -fno-math-errno -Iinclude -Isrc -Ixe2 -Xspirv-translator -spirv-ext=+SPV_INTEL_split_barrier,+SPV_INTEL_2d_block_io,+SPV_INTEL_subgroup_matrix_multiply_accumulate -fsycl-max-parallel-link-jobs=4 obj/grimoire.o obj/qwen35_loader.o obj/native_model.o obj/safetensors.o obj/quantize.o obj/gptq.o obj/gemv_decode.o obj/gguf.o obj/gguf_decode.o obj/gguf_qwen35.o obj/gemm_xmx.o obj/attention.o obj/deltanet.o obj/moe_kernels.o obj/tiered_moe.o obj/cpu_experts.o obj/moe_ref.o obj/ops.o obj/prefill.o obj/tokenizer.o obj/qfn_small_moe.o obj/gemm_fast.o obj/grimoire_main.o obj/xe2-bench.o -pthread -L. -lgrimoire_gemm -lgrimoire_attn '-Wl,-rpath,$ORIGIN' -o qfn-combined
