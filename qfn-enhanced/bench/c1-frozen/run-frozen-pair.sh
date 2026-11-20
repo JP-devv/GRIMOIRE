@@ -126,14 +126,18 @@ native() (
             # prefill dispatch counters. It enables no event or fence timing.
             export GRIMOIRE_QFN_MOE_TRACE=1
             ;;
-        causal-off|causal-on)
+        causal-off|causal-on|causal-profile)
             [[ $fixture == frozen && ${PAIR_ORDER:-} == native-only ]]
             build="$Q/../receipts/causal-tiles-build"
             [[ $(< "$build/build-causal.exit") == 0 ]]
             (cd "$build"; sha256sum -c causal-tiles.sha256)
             NATIVE_BIN=$build/qfn-combined
             export GRIMOIRE_QFN_PREFILL_RSAG=1 GRIMOIRE_QFN_MOE_TRACE=1 GRIMOIRE_QFN_PREFILL_CAUSAL_TILES=0
-            if [[ $NATIVE_MODE == causal-on ]]; then export GRIMOIRE_QFN_PREFILL_CAUSAL_TILES=1; fi
+            if [[ $NATIVE_MODE != causal-off ]]; then export GRIMOIRE_QFN_PREFILL_CAUSAL_TILES=1; fi
+            if [[ $NATIVE_MODE == causal-profile ]]; then
+                export GRIMOIRE_Q4_TIMING=1 GRIMOIRE_HC_TIMING=1 GRIMOIRE_QFN_DN_PROFILE=1
+                export GRIMOIRE_QFN_TP_PREFILL_REDUCE_TIMING=1
+            fi
             ;;
         hc-up-off|hc-up-on)
             [[ $fixture == frozen && ${PAIR_ORDER:-} == native-only ]]
@@ -217,7 +221,7 @@ native() (
                 if [[ $NATIVE_MODE != rsag-off ]]; then
                     grep -Fxq "QFN prefill RSAG rank=$rank rows=2048 calls=97" "$D/native/r$rank.log"
                 fi
-                if [[ $NATIVE_MODE == causal-on ]]; then
+                if [[ $NATIVE_MODE == causal-on || $NATIVE_MODE == causal-profile ]]; then
                     for rows in 2048 658; do
                         grep -Fxq "QFN prefill causal tiles rank=$rank rows=$rows layers=12" "$D/native/r$rank.log"
                     done
@@ -238,7 +242,7 @@ native() (
                 fi
             done
         fi
-        if [[ ${NATIVE_MODE:-} == integrated-profile ]]; then
+        if [[ ${NATIVE_MODE:-} == integrated-profile || ${NATIVE_MODE:-} == causal-profile ]]; then
             python3 "$B/c1.py" native "$D/native"/r{0,1,2,3}.log > /dev/null
             grep -hE '^(QFN TP prefill |QFN .*verify |QFN DN |HC prefill |Q4 profile )' "$D/native"/r?.log > "$D/instrumented-stages.txt"
         else
@@ -368,7 +372,7 @@ if [[ ${PAIR_ORDER:-} == native-only ]]; then
     fi
     case "${NATIVE_MODE:-}" in
         replay) [[ -s $D/row-replay.txt ]] ;;
-        integrated-profile) [[ -s $D/instrumented-stages.txt ]] ;;
+        integrated-profile|causal-profile) [[ -s $D/instrumented-stages.txt ]] ;;
         *) [[ -s $D/native-phase.json ]] ;;
     esac
     exit
