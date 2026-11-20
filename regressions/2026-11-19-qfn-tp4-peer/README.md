@@ -33,3 +33,21 @@ with each slot size (`diagnostics/act-peer-uHytkg/{red,green,split4}`).
 The test qualifies this collective on these payloads, not end-to-end speed or
 PP4/TP4 model parity. The frozen prompt's independent token-19 mismatch stays
 open.
+
+## Frozen model workload
+
+Set `QFN_MODEL` to the dense text snapshot and `QFN_PLE_SOURCE` to the
+original snapshot. Build the host checker with `make bin/qfn_parity_receipt`,
+then run `bash benchmark.sh ISOLATED_JIT FROZEN_PROMPT_IDS EMPTY_OUTPUT_DIR`
+in tmux. Like the collective test, this runner uses the four-GPU lock and
+writes a receipt. It pins 512-row chunks, BF16 projections, GEMV, MTP off,
+no prefix cache, and 8 MiB peer slots (one push per destination for a 5 MiB
+prefill reduction). Startup and model loading are outside the timed phases.
+
+`qfn_parity_receipt --tp4` uses logits and token IDs from all ranks for both
+transport arms. If all 32 IDs agree, the runner times host→peer and peer→host
+pairs with the diagnostic logs disabled. It verifies the timed token IDs
+still match the gate and writes raw spans and derived throughputs to
+`timing.tsv`. Prefill is 2,706 tokens to prompt-ready. Decode is the 31
+subsequent tokens, from first token to last. Each rate uses the longest
+observed span across the four ranks for that phase.

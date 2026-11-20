@@ -88,7 +88,9 @@ Ids layout(const fs::path& root, const std::string& name, int length) {
             const auto actual = read_ids(ids, length);
             if (r == 0) result = actual;
             else if (actual != result) throw std::runtime_error("rank-local greedy mismatch");
-            read_log(log, name == "tp4" || r == 3, logits);
+            // PP4 has a head only on its last rank; each TP4 arm must
+            // supply logits from every vocabulary shard.
+            read_log(log, name != "pp4" || r == 3, logits);
         } catch (const std::exception& e) {
             throw std::runtime_error(stem.string() + ": " + e.what());
         }
@@ -129,15 +131,18 @@ int main(int argc, char** argv) {
             std::cout << "QFN parity receipt parser PASS\n";
             return 0;
         }
-        if (argc != 3) throw std::runtime_error("usage: qfn_parity_receipt RUN_DIR 1|32");
-        const std::string len = argv[2];
+        const bool transport = argc == 4 && std::string(argv[1]) == "--tp4";
+        if (!transport && argc != 3) throw std::runtime_error("usage: qfn_parity_receipt [--tp4] RUN_DIR 1|32");
+        const std::string len = argv[transport ? 3 : 2];
         if (len != "1" && len != "32") throw std::runtime_error("expected output length 1 or 32");
-        const auto pp = layout(argv[1], "pp4", std::stoi(len));
-        const auto tp = layout(argv[1], "tp4", std::stoi(len));
-        const auto mismatch = std::mismatch(pp.begin(), pp.end(), tp.begin());
-        if (mismatch.first != pp.end()) {
-            std::cout << "FAIL: first differing generated token " << (mismatch.first - pp.begin() + 1)
-                      << " (PP4 " << *mismatch.first << ", TP4 " << *mismatch.second << ")\n";
+        const auto root = argv[transport ? 2 : 1];
+        const auto left = layout(root, transport ? "host" : "pp4", std::stoi(len));
+        const auto right = layout(root, transport ? "peer" : "tp4", std::stoi(len));
+        const auto mismatch = std::mismatch(left.begin(), left.end(), right.begin());
+        if (mismatch.first != left.end()) {
+            std::cout << "FAIL: first differing generated token " << (mismatch.first - left.begin() + 1)
+                      << (transport ? " (TP4 host " : " (PP4 ") << *mismatch.first
+                      << (transport ? ", TP4 peer " : ", TP4 ") << *mismatch.second << ")\n";
             return 1;
         }
         std::cout << "PASS: all " << len << " greedy IDs match\n";
