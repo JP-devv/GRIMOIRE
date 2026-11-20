@@ -285,7 +285,9 @@ vllm() (
             --mount "type=bind,src=$B/qfn_profile_worker.py,dst=/work/qfn_profile_worker.py,readonly"
             --mount "type=bind,src=$B/qfn_boundary_worker.py,dst=/work/qfn_boundary_worker.py,readonly")
         profile_cli=(--worker-cls qfn_boundary_worker.QFNBoundaryWorker)
-        CAP=$(remaining 360); (( CAP <= 360 )) || CAP=360
+        CAP=$(remaining 360); (( CAP <= 360 )) || CAP=360    else
+        profiler_args=(--mount "type=bind,src=$B/qfn_receipt_worker.py,dst=/work/qfn_receipt_worker.py,readonly")
+        profile_cli=(--worker-cls qfn_receipt_worker.QFNReceiptWorker)
     fi
     CID=$(docker run --pull=never --detach --name "$NAME" --network host --ipc host \
         --device /dev/dri:/dev/dri --mount type=bind,src=/dev/dri/by-path,dst=/dev/dri/by-path,readonly --group-add render --group-add video \
