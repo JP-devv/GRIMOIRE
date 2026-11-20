@@ -1,0 +1,60 @@
+--- a/src/prefill.cpp
++++ b/src/prefill.cpp
+@@ -2033,6 +2033,10 @@
+     constexpr int QT=16, KT=16, WG=QT*SG_SIZE;
+     const int qtiles=(tokens+QT-1)/QT;
+     const int end=context_len+tokens;
++    const char* trim_env = std::getenv("GRIMOIRE_QFN_PREFILL_CAUSAL_TILES");
++    const bool trim = trim_env && std::strcmp(trim_env, "1") == 0 && causal &&
++        sliding_window == 0 && tokens >= 32 && num_heads == 6 &&
++        num_kv_heads == 1 && head_dim == 256;
+     const int begin=(causal&&sliding_window>0)
+         ? std::max(0,context_len+1-sliding_window)
+         : (sliding_window>0 ? std::max(0,end-sliding_window) : 0);
+@@ -2062,7 +2066,10 @@
+                 #pragma unroll
+                 for(int j=0;j<MAXD;++j)acc[j]=0.0f;
+                 float m=-std::numeric_limits<float>::infinity(),l=0.0f;
+-                for(int s0=begin;s0<end;s0+=KT){
++                // Every query in the block masks keys beyond this tile's
++                // last causal position. Skip only whole tiles of masked keys.
++                const int scan_end = trim ? sycl::min(end, context_len + (qt + 1) * QT) : end;
++                for(int s0=begin;s0<scan_end;s0+=KT){
+                     for(int x=lid;x<head_dim*KT;x+=WG){
+                         const int d=x/KT,k=x%KT,s=s0+k;
+                         ksl[x]=s<end?e4m3_to_f32(kh[int64_t(d)*seq_cap+s]):0.0f;
+--- a/src/grimoire.cpp
++++ b/src/grimoire.cpp
+@@ -19834,6 +19834,10 @@
+     const bool verify_attn_trial = verify && qfn_mtp3_diagnostic && qfn_tp4_plan && !seqb &&
+                                    M == kQfnVerifySharedRows;
+     const char* const split_env = verify_attn_trial ? std::getenv("GRIMOIRE_QFN_VERIFY_SPLIT_KV") : nullptr;
++    const char* causal_tiles_flag = std::getenv("GRIMOIRE_QFN_PREFILL_CAUSAL_TILES");
++    const bool causal_tiles_receipt = !verify && !seqb && qfn_tp4_plan && M >= 32 &&
++        QH == 6 && causal_tiles_flag && std::strcmp(causal_tiles_flag, "1") == 0;
++    unsigned causal_tiles_layers = 0;
+     const bool verify_attn_split = split_env && std::strcmp(split_env, "1") == 0;
+     const bool verify_attn_exact = verify_attn_trial && std::getenv("GRIMOIRE_MTP_EXACT_VERIFY");
+     const bool verify_attn_trace = verify_attn_trial && std::getenv("GRIMOIRE_QFN_VERIFY_ATTN_TRACE");
+@@ -20276,6 +20280,8 @@
+                                     QH, KVH, HD, max_seq, scale, s.part, s.pm, s.pl, splits, none);
+                             },
+                             [&](int anchor) {
++                                if (causal_tiles_receipt && rows >= 32 && KVH == 1 && HD == 256)
++                                    ++causal_tiles_layers;
+                                 auto event = launch_dflash2_block_attention(q, queries, kc, vc, output,
+                                     rows, anchor, QH, KVH, HD, max_seq, 0, true, scale, none);
+                                 if (verify_attn_profile && !seqb && rows == kQfnVerifySharedRows)
+@@ -20622,6 +20628,12 @@
+     if (fuse_prefill_hc && std::getenv("GRIMOIRE_BUDGET_DEBUG"))
+         std::fprintf(stderr, "QFN HC prefill fused rank=%d pos=%d rows=%d calls=%zu\n",
+                      tp_rank, start_pos, M, hc_fused_calls);
++    if (causal_tiles_receipt) {
++        std::fprintf(stderr, "QFN prefill causal tiles rank=%d rows=%d layers=%u\n",
++                     tp_rank, M, causal_tiles_layers);
++        if (causal_tiles_layers != unsigned(cfg.n_layers / 4))
++            throw std::runtime_error("QFN requested causal tile trim did not execute on each dense layer");
++    }
+     if (hc_up_calls)
+         std::fprintf(stderr, "QFN HC up mean rank=%d rows=%d calls=%zu\n", tp_rank, M, hc_up_calls);
+     if (check_rsag) {
