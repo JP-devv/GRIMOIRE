@@ -19,5 +19,5 @@ target=qfn-combined
 if [[ $1 == prefill-cost ]]; then
     target=qfn-hc-m64
 fi
-make -f Makefile.combined -j4 TLA="$tla" "$target"
-sha256sum "$target" libgrimoire_attn.so libgrimoire_gemm.so > rebuilt.sha256
+make -f Makefile.combined -j4 TLA="$tla" "$target" qfn-server
+sha256sum "$target" qfn-server libgrimoire_attn.so libgrimoire_gemm.so > rebuilt.sha256

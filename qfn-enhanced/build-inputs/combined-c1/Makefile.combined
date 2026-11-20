@@ -25,3 +25,9 @@ libgrimoire_attn.so: src/attn_verify_dpas.cpp
 libgrimoire_gemm.so: src/gemm_fast.cpp
 	$(CXX) $(AOT) -Xsycl-target-backend=intel_gpu_bmg_g31 '-options "-cl-intel-256-GRF-per-thread -doubleGRF"' $< -o $@
 .DELETE_ON_ERROR:
+
+SERVER_OBJECTS := $(filter-out obj/grimoire_main.o,$(OBJECTS)) obj/grimoire_server.o
+obj/grimoire_server.o: tools/grimoire_server.cpp | obj
+	$(CXX) $(SPIR) -c $< -o $@
+qfn-server: $(SERVER_OBJECTS) libgrimoire_attn.so libgrimoire_gemm.so
+	$(CXX) $(SPIR) $(EXT) -fsycl-max-parallel-link-jobs=4 $(SERVER_OBJECTS) -pthread -L. -lgrimoire_gemm -lgrimoire_attn '-Wl,-rpath,$$ORIGIN' -o $@
