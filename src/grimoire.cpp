@@ -24814,6 +24814,13 @@ int grimoire_serve_generate(Grimoire& e, const std::vector<int32_t>& prompt_ids,
     static const bool spec_stats=[]{ const char* s=std::getenv("GRIMOIRE_SPEC_STATS");
         return s && *s && std::atoi(s)!=0; }();
     SpecStats stats;
+    // GRIMOIRE_GENERATION_PHASES=1: print this request's prefill/decode split.
+    // The frozen fixture scores that line, so the numbers come from the
+    // engine's own clock instead of a tracer that has to already be attached
+    // to the right pid when the request arrives.
+    GenerationTiming timing;
+    const char* phases=std::getenv("GRIMOIRE_GENERATION_PHASES");
+    if(phases && std::strcmp(phases,"1")==0) o.timing=&timing;
     // GRIMOIRE_SPEC_TIME=1: per-phase time of a speculative round (snapshot,
     // draft, verify, commit), each fenced -- the split an A/B between a
     // cheaper and a more accurate drafter needs.  Implies the stats line.
@@ -24847,6 +24854,12 @@ int grimoire_serve_generate(Grimoire& e, const std::vector<int32_t>& prompt_ids,
         };
         const int n=generate_tokens(e,prompt_ids,o,out_ids,emit,reason);
         if(finish)*finish=reason;
+        if(o.timing && o.max_tokens>0) {
+            const double prefill_ms=std::chrono::duration<double,std::milli>(timing.prompt_ready-timing.start).count();
+            const double decode_ms=std::chrono::duration<double,std::milli>(timing.last_token-timing.first_token).count();
+            std::fprintf(stderr,"generation phases: prefill_tokens=%zu prefill_ms=%.3f decode_tokens=%d decode_ms=%.3f\n",
+                         timing.prefill_tokens, prefill_ms, std::max(0,n-1), decode_ms);
+        }
         if(o.stats && stats.steps)
             std::printf("  spec: %s depth %d -- %.2f accepted/step "
                         "(%lld of %lld drafted, %.1f%%) over %lld steps\n",
