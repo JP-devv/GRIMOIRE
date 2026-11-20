@@ -12,7 +12,14 @@ IMAGE=sha256:bcc91a8966e805a632f575b0467d4b8f926e1f6d7ec36cf4ecc16f3627537a05
 (cd "$B"; sha256sum -c inputs.sha256; sha256sum -c native.sha256; python3 checkpoint-lock.py)
 [[ $(docker image inspect --format '{{.Id}}' b70-flash-next:tp2) == "$IMAGE" ]]
 sha256sum -c "$SERVING"
-python3 "$B/c1.py" request > "$D/request.json"
+python3 -B "$B/render-fixtures.py" "$D/fixtures"
+fixture=${FIXTURE:-frozen}
+case "$fixture" in
+    frozen|full-chunk) output=32 ;;
+    long-decode) output=256 ;;
+    *) echo "Unknown fixture: $fixture" >&2; exit 2 ;;
+esac
+cp "$D/fixtures/$fixture.request.json" "$D/request.json"
 exec 9>/tmp/grimoire-qfn-gpus.lock
 flock -n 9
 idle() {
@@ -63,7 +70,7 @@ native() (
     export GRIMOIRE_QFN_GROUPED_K_PREFETCH=0 GRIMOIRE_QFN_GROUPED_LIVE_TILES=1
     export GRIMOIRE_QFN_XE2_GATE_UP=fp32 GRIMOIRE_QFN_XE2_DOWN=1
     export GRIMOIRE_QFN_HC_DOWN_TILED=1 GRIMOIRE_QFN_HC_FUSED_PREFILL=1
-    export GRIMOIRE_PROMPT_IDS="$(< "$B/prompt.ids")" GRIMOIRE_PRINT_IDS=1 GRIMOIRE_GENERATION_PHASES=1
+    export GRIMOIRE_PROMPT_IDS="$(< "$D/fixtures/$fixture.prompt.ids")" GRIMOIRE_PRINT_IDS=1 GRIMOIRE_GENERATION_PHASES=1
     CAP=$(remaining 90); (( CAP <= 165 )) || CAP=165
     SOCK=$(mktemp -d /tmp/qfn-c1-sock.XXXXXXXX)
     pids=(); trap 'for pid in "${pids[@]}"; do kill -TERM "$pid" 2>/dev/null || :; done; wait || :; rm -f -- "$SOCK/p"; rmdir -- "$SOCK"' EXIT
@@ -72,7 +79,7 @@ native() (
     for rank in 3 2 1 0; do
         GRIMOIRE_TP_RANK=$rank GRIMOIRE_TP_SOCKET=$SOCK/p \
             timeout --signal=TERM --kill-after=4s "$CAP" /tmp/qfn-catchup.pf1/verifier/qfn-verifier \
-            -m /home/haxor/models/qwen38-w4a16-snapshot --proj bf16 --ctx 32768 -p frozen -n 32 \
+            -m /home/haxor/models/qwen38-w4a16-snapshot --proj bf16 --ctx 32768 -p "$fixture" -n "$output" \
             > "$D/native/r$rank.out" 2> "$D/native/r$rank.log" &
         pids[rank]=$!
     done
@@ -81,7 +88,7 @@ native() (
         grep -Fxq '  TP4 P2P: direct peer-push, FP32 payloads and rank-order sum' "$f"
         grep -Fxq '  QFN TP4 synchronization: socket fan-out' "$f"
     done
-    python3 "$B/c1.py" native "$D/native"/r{0,1,2,3}.log > "$D/native-phase.json"
+    if [[ $fixture == frozen ]]; then python3 "$B/c1.py" native "$D/native"/r{0,1,2,3}.log > "$D/native-phase.json"; fi
 )
 
 vllm() (
@@ -91,6 +98,18 @@ vllm() (
     NAME=qfn-c1-$(basename "$D")
     URL=http://127.0.0.1:$BENCH_PORT
     mkdir -p "$D/vllm-work/cache/"{tmp,hf,triton,vllm,xdg}
+    local -a profiler_args=()
+    if [[ ${PAIR_ORDER:-} == profile ]]; then
+        mkdir "$D/vllm-work/traces"
+        timeout --kill-after=5s 60s docker run --rm --pull=never \
+            --device /dev/dri:/dev/dri -e ZE_AFFINITY_MASK=0 \
+            --mount "type=bind,src=$B/prove-xpu-trace.py,dst=/probe.py,readonly" \
+            --mount "type=bind,src=$D/vllm-work,dst=/work" \
+            --entrypoint /opt/venv/bin/python "$IMAGE" /probe.py > "$D/probe.log" 2>&1
+        idle
+        profiler_args=(--profiler-config '{"profiler":"torch","torch_profiler_dir":"/work/traces"}')
+        CAP=$(remaining 360); (( CAP <= 360 )) || CAP=360
+    fi
     CID=$(docker run --pull=never --detach --name "$NAME" --network host --ipc host \
         --device /dev/dri:/dev/dri --mount type=bind,src=/dev/dri/by-path,dst=/dev/dri/by-path,readonly --group-add render --group-add video \
         --ulimit memlock=-1:-1 --ulimit stack=67108864:67108864 \
@@ -102,7 +121,7 @@ vllm() (
         --gpu-memory-utilization 0.95 --max-model-len 32768 --max-num-batched-tokens 1024 --max-num-seqs 16 \
         --limit-mm-per-prompt '{"image":4,"video":2}' --async-scheduling --generation-config vllm \
         --compilation-config '{"cudagraph_mode":"FULL_AND_PIECEWISE","cudagraph_capture_sizes":[1,2,4,8,16,256,512,1024]}' \
-        --no-enable-prefix-caching --enable-prompt-tokens-details)
+        --no-enable-prefix-caching --enable-prompt-tokens-details "${profiler_args[@]}")
     trap 'docker logs "$CID" > "$D/vllm.log" 2>&1 || :; docker rm -f "$CID" >/dev/null' EXIT
     trap 'exit 143' TERM INT
     docker inspect --format '{{.Image}} {{json .Path}} {{json .Args}}' "$CID" > "$D/vllm-invocation.txt"
@@ -113,15 +132,24 @@ vllm() (
         sleep 1
     done
     unset http_proxy https_proxy HTTP_PROXY HTTPS_PROXY ALL_PROXY
+    if [[ ${PAIR_ORDER:-} == profile ]]; then
+        curl --noproxy '*' -fsS --max-time 20 -X POST "$URL/start_profile"
+    fi
     curl --noproxy '*' -fsS --max-time 5 "$URL/metrics" > "$D/before.prom"
     curl --noproxy '*' -fsS --max-time "$(remaining 5)" -H 'Content-Type: application/json' \
         --data-binary "@$D/request.json" "$URL/v1/completions" > "$D/response.json"
     curl --noproxy '*' -fsS --max-time 5 "$URL/metrics" > "$D/after.prom"
-    python3 "$B/c1.py" vllm "$D/response.json" "$D/before.prom" "$D/after.prom" > "$D/vllm-phase.json"
+    if [[ ${PAIR_ORDER:-} == profile ]]; then
+        curl --noproxy '*' -fsS --max-time 30 -X POST "$URL/stop_profile"
+        python3 "$B/trace-worker.py" "$D/vllm-work/traces" > "$D/worker-traces.json"
+        exit 0
+    fi
+    if [[ $fixture == frozen ]]; then python3 "$B/c1.py" vllm "$D/response.json" "$D/before.prom" "$D/after.prom" > "$D/vllm-phase.json"; fi
 )
 case "${PAIR_ORDER:-native-first}" in
     native-first) native; vllm ;;
     reference-first) vllm; native ;;
+    profile) vllm ;;
     *) echo "Invalid PAIR_ORDER" >&2; exit 2 ;;
 esac
 
@@ -130,4 +158,13 @@ sudo -n journalctl -k -q --no-pager --after-cursor "$CURSOR" -o cat > "$D/kernel
 awk '/xe.*(Fault response|Timedout job|GPU HANG|Engine memory CAT error|wedged)/' "$D/kernel.log" > "$D/xe-fault.log"
 [[ ! -s $D/xe-fault.log ]]
 sha256sum -c "$SERVING"
+if [[ ${PAIR_ORDER:-} == profile ]]; then exit 0; fi
+if [[ $fixture != frozen ]]; then
+    score_args=()
+    if [[ $fixture == long-decode ]]; then
+        score_args=(--expected-prefix "$D/fixtures/$fixture.expected-prefix.ids")
+    fi
+    python3 -B "$B/score-fixture.py" "$D/request.json" "$D/native" "$D" "${score_args[@]}" > "$D/comparison.json"
+    exit 0
+fi
 for receipt in "$D/"{native,vllm}-phase.json; do [[ -s $receipt ]]; jq -e . "$receipt"; done
